@@ -148,9 +148,22 @@ bool eligibleFunction(Function &F) {
     if (!F.getFunctionType()->getReturnType()->isFirstClassType() &&
         !F.getFunctionType()->getReturnType()->isVoidTy())
         return false;
-    for (Argument &A : F.args())
+    for (Argument &A : F.args()) {
         if (!A.getType()->isFirstClassType())
             return false;
+        // ABI / structural parameter attributes that the selector-dispatcher
+        // indirection cannot faithfully forward.  Merging such functions would
+        // silently miscompile (byval/sret) or fail the verifier (swifterror).
+        if (A.hasAttribute(Attribute::ByVal) ||
+            A.hasAttribute(Attribute::StructRet) ||
+            A.hasAttribute(Attribute::SwiftError) ||
+            A.hasAttribute(Attribute::SwiftSelf) ||
+            A.hasAttribute(Attribute::SwiftAsync) ||
+            A.hasAttribute(Attribute::InAlloca) ||
+            A.hasAttribute(Attribute::Preallocated) ||
+            A.hasAttribute(Attribute::Nest))
+            return false;
+    }
     return true;
 }
 
