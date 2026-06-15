@@ -14,6 +14,8 @@
 
 #include "morok/passes/ArithmeticTables.hpp"
 
+#include "morok/ir/InstUtil.hpp"
+
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -222,6 +224,10 @@ bool tableArithmeticFunction(Function &F, const TableArithParams &params,
                              ir::IRRandom &rng) {
     if (F.isDeclaration() || F.getName().starts_with("morok.") ||
         params.probability == 0 || params.max_tables == 0)
+        return false;
+    // Inserted table-ensure calls in a funclet-colored block would need a
+    // funclet operand bundle; skip WinEH functions entirely (no-op elsewhere).
+    if (ir::usesFuncletEH(F))
         return false;
 
     const std::uint32_t limit =

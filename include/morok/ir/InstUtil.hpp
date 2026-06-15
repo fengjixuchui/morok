@@ -12,6 +12,7 @@
 #define MOROK_IR_INST_UTIL_HPP
 
 namespace llvm {
+class Function;
 class ReturnInst;
 } // namespace llvm
 
@@ -25,6 +26,14 @@ namespace morok::ir {
 /// between the call and the return, or rewrites the return operand produces
 /// IR that fails verification.  Passes that touch returns must skip these.
 bool isMustTailReturn(const llvm::ReturnInst &RI);
+
+/// True if `F` uses a Windows-style funclet EH personality (MSVC C++, SEH,
+/// CoreCLR).  Calls inserted into funclet-colored blocks of such functions
+/// require a `["funclet"(token)]` operand bundle or the verifier rejects them;
+/// passes that splice plain calls into arbitrary blocks should skip these
+/// functions.  Always false on Itanium (macOS/Linux) and EH-free functions, so
+/// it is a no-op on those targets.
+bool usesFuncletEH(const llvm::Function &F);
 
 } // namespace morok::ir
 

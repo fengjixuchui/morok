@@ -12,6 +12,8 @@
 
 #include "morok/passes/DataFlowIntegrity.hpp"
 
+#include "morok/ir/InstUtil.hpp"
+
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Attributes.h"
@@ -373,6 +375,10 @@ bool dataFlowIntegrityFunction(Function &F,
                                ir::IRRandom &Rng) {
     if (F.isDeclaration() || generatedFunction(F) || Params.probability == 0 ||
         Params.max_tables == 0 || Params.region_bytes == 0)
+        return false;
+    // Inserted integrity-diff calls in a funclet-colored block would need a
+    // funclet operand bundle; skip WinEH functions entirely (no-op elsewhere).
+    if (ir::usesFuncletEH(F))
         return false;
 
     const std::string HashName = "morok.dfi.hash." + suffixFor(F);

@@ -6,6 +6,8 @@
 
 #include "morok/ir/InstUtil.hpp"
 
+#include "llvm/IR/EHPersonalities.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 
 using namespace llvm;
@@ -32,6 +34,12 @@ bool isMustTailReturn(const ReturnInst &RI) {
             return true;
 
     return false;
+}
+
+bool usesFuncletEH(const Function &F) {
+    if (!F.hasPersonalityFn())
+        return false;
+    return isFuncletEHPersonality(classifyEHPersonality(F.getPersonalityFn()));
 }
 
 } // namespace morok::ir
