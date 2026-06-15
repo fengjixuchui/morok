@@ -68,6 +68,10 @@ Function *getOrCreateGf8Mul(Module &M) {
 bool eligible(const GlobalVariable &gv) {
     if (!gv.hasInitializer() || !gv.hasLocalLinkage())
         return false;
+    // A single global constructor only decrypts the init-time TLS instance;
+    // other threads would observe ciphertext.  Leave thread-locals alone.
+    if (gv.isThreadLocal())
+        return false;
     if (gv.getName().starts_with("llvm.") || gv.getName().starts_with("morok."))
         return false;
     if (gv.getSection() == "llvm.metadata")
