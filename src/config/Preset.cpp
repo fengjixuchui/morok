@@ -76,6 +76,73 @@ PassConfig makeLow() {
     c.split.splits = 2;
     c.split.stack_confusion = false;
 
+    c.stack_coalesce.enabled = false;
+    c.stack_coalesce.probability = 0;
+    c.stack_coalesce.opaque_offsets = false;
+
+    c.pointer_launder.enabled = false;
+    c.pointer_launder.pointer_probability = 0;
+    c.pointer_launder.integer_probability = 0;
+
+    c.type_pun.enabled = false;
+    c.type_pun.probability = 0;
+    c.type_pun.include_floating = false;
+    c.type_pun.max_targets = 0;
+
+    c.phi_tangle.enabled = false;
+    c.phi_tangle.probability = 0;
+    c.phi_tangle.layers = 0;
+    c.phi_tangle.max_phis = 0;
+
+    c.alias_op.enabled = false;
+    c.alias_op.probability = 0;
+    c.alias_op.iterations = 0;
+    c.alias_op.max_blocks = 0;
+
+    c.coherent_decoy.enabled = false;
+    c.coherent_decoy.probability = 0;
+    c.coherent_decoy.max_blocks = 0;
+    c.coherent_decoy.depth = 0;
+
+    c.data_entangled_flatten.enabled = false;
+    c.data_entangled_flatten.max_terms = 0;
+
+    c.non_invertible_state.enabled = false;
+    c.non_invertible_state.max_terms = 0;
+    c.non_invertible_state.rounds = 0;
+
+    c.state_opaque.enabled = false;
+    c.state_opaque.probability = 0;
+    c.state_opaque.max_blocks = 0;
+    c.state_opaque.max_terms = 0;
+
+    c.interprocedural_fsm.enabled = false;
+    c.interprocedural_fsm.probability = 0;
+    c.interprocedural_fsm.max_sites = 0;
+    c.interprocedural_fsm.max_terms = 0;
+
+    c.opt_amplify.enabled = false;
+    c.opt_amplify.probability = 0;
+    c.opt_amplify.max_forms = 0;
+
+    c.table_arith.enabled = false;
+    c.table_arith.probability = 0;
+    c.table_arith.max_tables = 0;
+
+    c.sub_threshold.enabled = false;
+    c.sub_threshold.probability = 0;
+    c.sub_threshold.max_terms = 0;
+
+    c.path_explosion.enabled = false;
+    c.path_explosion.probability = 0;
+    c.path_explosion.max_blocks = 0;
+    c.path_explosion.max_iterations = 0;
+
+    c.dispatcherless.enabled = false;
+    c.dispatcherless.probability = 0;
+    c.dispatcherless.max_routes = 0;
+    c.dispatcherless.max_terms = 0;
+
     c.vec.enabled = false;
     c.csm.enabled = false;
     c.flatten.enabled = false;
@@ -123,6 +190,73 @@ PassConfig makeMid() {
     c.split.enabled = true;
     c.split.splits = 3;
     c.split.stack_confusion = true;
+
+    c.stack_coalesce.enabled = true;
+    c.stack_coalesce.probability = 60;
+    c.stack_coalesce.opaque_offsets = true;
+
+    c.pointer_launder.enabled = true;
+    c.pointer_launder.pointer_probability = 50;
+    c.pointer_launder.integer_probability = 25;
+
+    c.type_pun.enabled = true;
+    c.type_pun.probability = 30;
+    c.type_pun.include_floating = true;
+    c.type_pun.max_targets = 16;
+
+    c.phi_tangle.enabled = true;
+    c.phi_tangle.probability = 45;
+    c.phi_tangle.layers = 1;
+    c.phi_tangle.max_phis = 12;
+
+    c.alias_op.enabled = true;
+    c.alias_op.probability = 35;
+    c.alias_op.iterations = 1;
+    c.alias_op.max_blocks = 6;
+
+    c.coherent_decoy.enabled = true;
+    c.coherent_decoy.probability = 35;
+    c.coherent_decoy.max_blocks = 4;
+    c.coherent_decoy.depth = 3;
+
+    c.data_entangled_flatten.enabled = true;
+    c.data_entangled_flatten.max_terms = 3;
+
+    c.non_invertible_state.enabled = true;
+    c.non_invertible_state.max_terms = 3;
+    c.non_invertible_state.rounds = 2;
+
+    c.state_opaque.enabled = true;
+    c.state_opaque.probability = 45;
+    c.state_opaque.max_blocks = 12;
+    c.state_opaque.max_terms = 3;
+
+    c.interprocedural_fsm.enabled = true;
+    c.interprocedural_fsm.probability = 50;
+    c.interprocedural_fsm.max_sites = 16;
+    c.interprocedural_fsm.max_terms = 3;
+
+    c.opt_amplify.enabled = true;
+    c.opt_amplify.probability = 10;
+    c.opt_amplify.max_forms = 1;
+
+    c.table_arith.enabled = true;
+    c.table_arith.probability = 20;
+    c.table_arith.max_tables = 2;
+
+    c.sub_threshold.enabled = true;
+    c.sub_threshold.probability = 15;
+    c.sub_threshold.max_terms = 1;
+
+    c.path_explosion.enabled = true;
+    c.path_explosion.probability = 15;
+    c.path_explosion.max_blocks = 2;
+    c.path_explosion.max_iterations = 8;
+
+    c.dispatcherless.enabled = true;
+    c.dispatcherless.probability = 35;
+    c.dispatcherless.max_routes = 8;
+    c.dispatcherless.max_terms = 3;
 
     c.vec.enabled = true;
     c.vec.probability = 40;
@@ -177,6 +311,73 @@ PassConfig makeHigh() {
     c.split.enabled = true;
     c.split.splits = 5;
     c.split.stack_confusion = true;
+
+    c.stack_coalesce.enabled = true;
+    c.stack_coalesce.probability = 100;
+    c.stack_coalesce.opaque_offsets = true;
+
+    c.pointer_launder.enabled = true;
+    c.pointer_launder.pointer_probability = 90;
+    c.pointer_launder.integer_probability = 45;
+
+    c.type_pun.enabled = true;
+    c.type_pun.probability = 60;
+    c.type_pun.include_floating = true;
+    c.type_pun.max_targets = 32;
+
+    c.phi_tangle.enabled = true;
+    c.phi_tangle.probability = 80;
+    c.phi_tangle.layers = 2;
+    c.phi_tangle.max_phis = 24;
+
+    c.alias_op.enabled = true;
+    c.alias_op.probability = 65;
+    c.alias_op.iterations = 2;
+    c.alias_op.max_blocks = 10;
+
+    c.coherent_decoy.enabled = true;
+    c.coherent_decoy.probability = 70;
+    c.coherent_decoy.max_blocks = 8;
+    c.coherent_decoy.depth = 5;
+
+    c.data_entangled_flatten.enabled = true;
+    c.data_entangled_flatten.max_terms = 5;
+
+    c.non_invertible_state.enabled = true;
+    c.non_invertible_state.max_terms = 5;
+    c.non_invertible_state.rounds = 4;
+
+    c.state_opaque.enabled = true;
+    c.state_opaque.probability = 80;
+    c.state_opaque.max_blocks = 32;
+    c.state_opaque.max_terms = 5;
+
+    c.interprocedural_fsm.enabled = true;
+    c.interprocedural_fsm.probability = 100;
+    c.interprocedural_fsm.max_sites = 64;
+    c.interprocedural_fsm.max_terms = 5;
+
+    c.opt_amplify.enabled = true;
+    c.opt_amplify.probability = 20;
+    c.opt_amplify.max_forms = 2;
+
+    c.table_arith.enabled = true;
+    c.table_arith.probability = 35;
+    c.table_arith.max_tables = 4;
+
+    c.sub_threshold.enabled = true;
+    c.sub_threshold.probability = 15;
+    c.sub_threshold.max_terms = 1;
+
+    c.path_explosion.enabled = true;
+    c.path_explosion.probability = 35;
+    c.path_explosion.max_blocks = 4;
+    c.path_explosion.max_iterations = 16;
+
+    c.dispatcherless.enabled = true;
+    c.dispatcherless.probability = 75;
+    c.dispatcherless.max_routes = 24;
+    c.dispatcherless.max_terms = 5;
 
     c.vec.enabled = true;
     c.vec.probability = 65;

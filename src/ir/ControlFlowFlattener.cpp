@@ -39,19 +39,31 @@ bool isFlattenable(Function &F) {
     return true;
 }
 
-std::uint32_t freshId(IRRandom &rng, std::unordered_set<std::uint32_t> &used) {
-    std::uint32_t id = 0;
+struct FreshStateId {
+    std::uint32_t logical = 0;
+    std::uint32_t encoded = 0;
+};
+
+FreshStateId freshId(IRRandom &rng, std::unordered_set<std::uint32_t> &used,
+                     std::unordered_set<std::uint32_t> &usedEncoded,
+                     const StateEncodeFn &encodeState) {
+    FreshStateId id;
     do {
-        id = static_cast<std::uint32_t>(rng.next());
-    } while (id == 0 || used.count(id));
-    used.insert(id);
+        id.logical = static_cast<std::uint32_t>(rng.next());
+        id.encoded = encodeState(id.logical);
+    } while (id.logical == 0 || id.encoded == 0 || used.count(id.logical) ||
+             used.count(id.encoded) || usedEncoded.count(id.logical) ||
+             usedEncoded.count(id.encoded));
+    used.insert(id.logical);
+    usedEncoded.insert(id.encoded);
     return id;
 }
 
 } // namespace
 
 bool flattenControlFlow(Function &F, IRRandom &rng,
-                        const NextStateFn &nextState) {
+                        const NextStateFn &nextState,
+                        const StateEncodeFn &encodeState) {
     if (!isFlattenable(F))
         return false;
 
@@ -78,9 +90,14 @@ bool flattenControlFlow(Function &F, IRRandom &rng,
         return false;
 
     std::unordered_map<BasicBlock *, std::uint32_t> idOf;
+    std::unordered_map<BasicBlock *, std::uint32_t> encodedIdOf;
     std::unordered_set<std::uint32_t> used;
-    for (BasicBlock *bb : blocks)
-        idOf[bb] = freshId(rng, used);
+    std::unordered_set<std::uint32_t> usedEncoded;
+    for (BasicBlock *bb : blocks) {
+        const FreshStateId id = freshId(rng, used, usedEncoded, encodeState);
+        idOf[bb] = id.logical;
+        encodedIdOf[bb] = id.encoded;
+    }
 
     IRBuilder<> entryB(entry, entry->getFirstInsertionPt());
     auto *stateVar = entryB.CreateAlloca(i32, nullptr, "fla.state");
@@ -91,7 +108,7 @@ bool flattenControlFlow(Function &F, IRRandom &rng,
 
     Instruction *entryTerm = entry->getTerminator();
     IRBuilder<> initB(entryTerm);
-    initB.CreateStore(ConstantInt::get(i32, idOf[firstReal]), stateVar);
+    initB.CreateStore(ConstantInt::get(i32, encodedIdOf[firstReal]), stateVar);
     initB.CreateBr(dispatch);
     entryTerm->eraseFromParent();
 
@@ -105,7 +122,7 @@ bool flattenControlFlow(Function &F, IRRandom &rng,
 
     for (BasicBlock *bb : blocks) {
         bb->moveBefore(backEdge);
-        sw->addCase(ConstantInt::get(i32, idOf[bb]), bb);
+        sw->addCase(ConstantInt::get(i32, encodedIdOf[bb]), bb);
     }
 
     for (BasicBlock *bb : blocks) {
@@ -143,6 +160,13 @@ bool flattenControlFlow(Function &F, IRRandom &rng,
 
     demoteToStack(F);
     return true;
+}
+
+bool flattenControlFlow(Function &F, IRRandom &rng,
+                        const NextStateFn &nextState) {
+    return flattenControlFlow(
+        F, rng, nextState,
+        [](std::uint32_t logicalId) -> std::uint32_t { return logicalId; });
 }
 
 } // namespace morok::ir

@@ -10,18 +10,33 @@
 #include "morok/core/Xoshiro256.hpp"
 #include "morok/ir/Annotations.hpp"
 #include "morok/ir/IRRandom.hpp"
+#include "morok/passes/AliasOpaquePredicates.hpp"
 #include "morok/passes/AntiAnalysis.hpp"
+#include "morok/passes/ArithmeticTables.hpp"
 #include "morok/passes/BogusControlFlow.hpp"
 #include "morok/passes/ChaosStateMachine.hpp"
+#include "morok/passes/CoherentDecoys.hpp"
 #include "morok/passes/ConstantEncryption.hpp"
+#include "morok/passes/DataEntangledFlattening.hpp"
+#include "morok/passes/DispatcherlessRouting.hpp"
 #include "morok/passes/Flattening.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
 #include "morok/passes/FunctionWrapper.hpp"
 #include "morok/passes/IndirectBranch.hpp"
+#include "morok/passes/InterproceduralFsm.hpp"
 #include "morok/passes/Mba.hpp"
+#include "morok/passes/NonInvertibleState.hpp"
+#include "morok/passes/OptimizerAmplification.hpp"
+#include "morok/passes/PathExplosion.hpp"
+#include "morok/passes/PhiTangling.hpp"
+#include "morok/passes/PointerLaundering.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
+#include "morok/passes/StackCoalescing.hpp"
+#include "morok/passes/StateOpaquePredicates.hpp"
 #include "morok/passes/StringEncryption.hpp"
+#include "morok/passes/SubThresholdPersistence.hpp"
 #include "morok/passes/Substitution.hpp"
+#include "morok/passes/TypePunning.hpp"
 #include "morok/passes/VectorObfuscation.hpp"
 
 #include "llvm/Demangle/Demangle.h"
@@ -74,7 +89,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     }
 
     for (Function &F : M) {
-        if (F.isDeclaration())
+        if (F.isDeclaration() || F.getName().starts_with("morok."))
             continue;
 
         const config::PassConfig eff =
@@ -96,6 +111,17 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             changed |= passes::bogusControlFlowFunction(F, p, rng);
         }
 
+        // PM-sensitive: for `-mllvm -morok` this runs from the plugin's
+        // vectorizer-start callback. This scheduler fallback supports manual
+        // `-passes=morok` placement without requiring a separate pass name.
+        if (ir::shouldObfuscate(F, "optamp",
+                                eff.opt_amplify.enabled.value_or(false))) {
+            passes::OptAmpParams p;
+            p.probability = eff.opt_amplify.probability.value_or(20);
+            p.max_forms = eff.opt_amplify.max_forms.value_or(2);
+            changed |= passes::optimizerAmplifyFunction(F, p, rng);
+        }
+
         // Substitution before MBA, mirroring the documented ordering.
         if (ir::shouldObfuscate(F, "sub", eff.sub.enabled.value_or(false))) {
             passes::SubstitutionParams p;
@@ -112,12 +138,65 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             changed |= passes::mbaFunction(F, p, rng);
         }
 
+        // Add small volatile-neutral webs after Sub/MBA have expanded scalar
+        // expressions but before CFG-heavy passes make the local value graph
+        // harder to place near the original operation.
+        if (ir::shouldObfuscate(
+                F, "threshold", eff.sub_threshold.enabled.value_or(false))) {
+            passes::SubThresholdParams p;
+            p.probability = eff.sub_threshold.probability.value_or(25);
+            p.max_terms = eff.sub_threshold.max_terms.value_or(1);
+            changed |= passes::subThresholdPersistFunction(F, p, rng);
+        }
+
+        // Alias-invariant guards widen the CFG after value-level expansion, so
+        // their own pointer/int scaffolding does not get amplified by Sub/MBA.
+        if (ir::shouldObfuscate(F, "aliasop",
+                                eff.alias_op.enabled.value_or(false))) {
+            passes::AliasOpParams p;
+            p.probability = eff.alias_op.probability.value_or(45);
+            p.iterations = eff.alias_op.iterations.value_or(1);
+            p.max_blocks = eff.alias_op.max_blocks.value_or(16);
+            changed |= passes::aliasOpaquePredicatesFunction(F, p, rng);
+        }
+
+        // Coherent dead paths use opaque-true guards but return plausible
+        // alternate results, so flattening later absorbs them as real-looking
+        // CFG structure rather than obvious junk.
+        if (ir::shouldObfuscate(
+                F, "decoy", eff.coherent_decoy.enabled.value_or(false))) {
+            passes::CoherentDecoyParams p;
+            p.probability = eff.coherent_decoy.probability.value_or(35);
+            p.max_blocks = eff.coherent_decoy.max_blocks.value_or(4);
+            p.depth = eff.coherent_decoy.depth.value_or(3);
+            changed |= passes::coherentDecoysFunction(F, p, rng);
+        }
+
         // Exactly one control-flow-flattening layer per function, after the
-        // value-level passes: prefer the chaos state machine, fall back to
-        // plain flattening (so each function gets a single, strongest CFF
-        // layer).
+        // value-level passes: prefer non-invertible encoded states, then
+        // data-entangled state updates, then the chaos state machine, then
+        // plain flattening.
         bool flattened = false;
-        if (ir::shouldObfuscate(F, "csm", eff.csm.enabled.value_or(false))) {
+        if (ir::shouldObfuscate(
+                F, "nistate",
+                eff.non_invertible_state.enabled.value_or(false))) {
+            passes::NonInvertibleStateParams p;
+            p.max_terms = eff.non_invertible_state.max_terms.value_or(4);
+            p.rounds = eff.non_invertible_state.rounds.value_or(3);
+            flattened = passes::nonInvertibleStateFunction(F, p, rng);
+            changed |= flattened;
+        }
+        if (!flattened &&
+            ir::shouldObfuscate(
+                F, "entfla",
+                eff.data_entangled_flatten.enabled.value_or(false))) {
+            passes::DataEntangledFlattenParams p;
+            p.max_terms = eff.data_entangled_flatten.max_terms.value_or(4);
+            flattened = passes::dataEntangledFlattenFunction(F, p, rng);
+            changed |= flattened;
+        }
+        if (!flattened &&
+            ir::shouldObfuscate(F, "csm", eff.csm.enabled.value_or(false))) {
             flattened = passes::chaosStateMachineFunction(F, rng);
             changed |= flattened;
         }
@@ -126,12 +205,106 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             changed |= passes::flattenFunction(F, rng);
         }
 
+        if (ir::shouldObfuscate(
+                F, "stateop", eff.state_opaque.enabled.value_or(false))) {
+            passes::StateOpParams p;
+            p.probability = eff.state_opaque.probability.value_or(45);
+            p.max_blocks = eff.state_opaque.max_blocks.value_or(16);
+            p.max_terms = eff.state_opaque.max_terms.value_or(4);
+            changed |= passes::stateOpaquePredicatesFunction(F, p, rng);
+        }
+
+        if (ir::shouldObfuscate(
+                F, "ifsm",
+                eff.interprocedural_fsm.enabled.value_or(false))) {
+            passes::InterproceduralFsmParams p;
+            p.probability =
+                eff.interprocedural_fsm.probability.value_or(100);
+            p.max_sites = eff.interprocedural_fsm.max_sites.value_or(64);
+            p.max_terms = eff.interprocedural_fsm.max_terms.value_or(4);
+            changed |= passes::interproceduralFsmSplitFunction(F, p, rng);
+        }
+
+        if (ir::shouldObfuscate(F, "phitangle",
+                                eff.phi_tangle.enabled.value_or(false))) {
+            passes::PhiTangleParams p;
+            p.probability = eff.phi_tangle.probability.value_or(45);
+            p.layers = eff.phi_tangle.layers.value_or(2);
+            p.max_phis = eff.phi_tangle.max_phis.value_or(32);
+            changed |= passes::phiTangleFunction(F, p, rng);
+        }
+
+        if (ir::shouldObfuscate(F, "typepun",
+                                eff.type_pun.enabled.value_or(false))) {
+            passes::TypePunParams p;
+            p.probability = eff.type_pun.probability.value_or(35);
+            p.include_floating = eff.type_pun.include_floating.value_or(true);
+            p.max_targets = eff.type_pun.max_targets.value_or(64);
+            changed |= passes::typePunFunction(F, p, rng);
+        }
+
+        // Collapse user and Reg2Mem-created locals after flattening has
+        // introduced its frame slots, directly attacking lvar recovery.
+        if (ir::shouldObfuscate(F, "stackcoalesce",
+                                eff.stack_coalesce.enabled.value_or(false))) {
+            passes::StackCoalesceParams p;
+            p.probability = eff.stack_coalesce.probability.value_or(100);
+            p.opaque_offsets = eff.stack_coalesce.opaque_offsets.value_or(true);
+            changed |= passes::stackCoalesceFunction(F, p, rng);
+        }
+
+        // Launder the frame/GEP pointers introduced above and selected integer
+        // SSA values through pointer-int and vector-scalar boundaries.
+        if (ir::shouldObfuscate(F, "ptrlaunder",
+                                eff.pointer_launder.enabled.value_or(false))) {
+            passes::PointerLaunderParams p;
+            p.pointer_probability =
+                eff.pointer_launder.pointer_probability.value_or(80);
+            p.integer_probability =
+                eff.pointer_launder.integer_probability.value_or(35);
+            changed |= passes::pointerLaunderFunction(F, p, rng);
+        }
+
+        // Replace surviving byte arithmetic with encrypted lazy lookup tables.
+        if (ir::shouldObfuscate(F, "tablearith",
+                                eff.table_arith.enabled.value_or(false))) {
+            passes::TableArithParams p;
+            p.probability = eff.table_arith.probability.value_or(30);
+            p.max_tables = eff.table_arith.max_tables.value_or(8);
+            changed |= passes::tableArithmeticFunction(F, p, rng);
+        }
+
         // SIMD lifting after the control-flow passes, so even dispatcher
         // arithmetic gets vectorised.
         if (ir::shouldObfuscate(F, "vobf", eff.vec.enabled.value_or(false))) {
             passes::VecParams p;
             p.probability = eff.vec.probability.value_or(40);
+            p.width = eff.vec.width.value_or(128);
+            p.shuffle = eff.vec.shuffle.value_or(false);
+            p.lift_comparisons = eff.vec.lift_comparisons.value_or(true);
             changed |= passes::vectorObfuscateFunction(F, p, rng);
+        }
+
+        // Anti-DSE decoy loops run after flattening/vectorization so their
+        // indirectbr regions do not block the CFG-structuring passes.
+        if (ir::shouldObfuscate(F, "pathexplode",
+                                eff.path_explosion.enabled.value_or(false))) {
+            passes::PathExplosionParams p;
+            p.probability = eff.path_explosion.probability.value_or(25);
+            p.max_blocks = eff.path_explosion.max_blocks.value_or(4);
+            p.max_iterations = eff.path_explosion.max_iterations.value_or(16);
+            changed |= passes::pathExplosionFunction(F, p, rng);
+        }
+
+        // Dispatcherless routing converts remaining direct branches/switches to
+        // local indirectbr table lookups after every CFG-structuring pass.
+        if (ir::shouldObfuscate(F, "dispatchless",
+                                eff.dispatcherless.enabled.value_or(false))) {
+            passes::DispatcherlessRoutingParams p;
+            p.probability = eff.dispatcherless.probability.value_or(50);
+            p.max_routes = eff.dispatcherless.max_routes.value_or(32);
+            p.max_terms = eff.dispatcherless.max_terms.value_or(4);
+            changed |= passes::dispatcherlessRoutingFunction(F, p, rng);
         }
 
         // Constant encryption hides the literals the other passes introduce.

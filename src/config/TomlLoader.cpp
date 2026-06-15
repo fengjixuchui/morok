@@ -72,6 +72,106 @@ void parseSplit(const toml::table &t, SplitConfig &c) {
     c.stack_confusion = readBool(t["stack_confusion"]);
 }
 
+void parseStackCoalesce(const toml::table &t, StackCoalesceConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.opaque_offsets = readBool(t["opaque_offsets"]);
+}
+
+void parsePointerLaunder(const toml::table &t, PointerLaunderConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.pointer_probability = readU32(t["pointer_probability"]);
+    c.integer_probability = readU32(t["integer_probability"]);
+}
+
+void parseTypePun(const toml::table &t, TypePunConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.include_floating = readBool(t["include_floating"]);
+    c.max_targets = readU32(t["max_targets"]);
+}
+
+void parsePhiTangle(const toml::table &t, PhiTangleConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.layers = readU32(t["layers"]);
+    c.max_phis = readU32(t["max_phis"]);
+}
+
+void parseAliasOp(const toml::table &t, AliasOpConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.iterations = readU32(t["iterations"]);
+    c.max_blocks = readU32(t["max_blocks"]);
+}
+
+void parseCoherentDecoy(const toml::table &t, CoherentDecoyConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_blocks = readU32(t["max_blocks"]);
+    c.depth = readU32(t["depth"]);
+}
+
+void parseDataEntangledFlatten(const toml::table &t,
+                               DataEntangledFlattenConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.max_terms = readU32(t["max_terms"]);
+}
+
+void parseNonInvertibleState(const toml::table &t,
+                             NonInvertibleStateConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.max_terms = readU32(t["max_terms"]);
+    c.rounds = readU32(t["rounds"]);
+}
+
+void parseStateOpaque(const toml::table &t, StateOpaqueConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_blocks = readU32(t["max_blocks"]);
+    c.max_terms = readU32(t["max_terms"]);
+}
+
+void parseInterproceduralFsm(const toml::table &t,
+                             InterproceduralFsmConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_sites = readU32(t["max_sites"]);
+    c.max_terms = readU32(t["max_terms"]);
+}
+
+void parseOptAmplify(const toml::table &t, OptAmplifyConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_forms = readU32(t["max_forms"]);
+}
+
+void parseTableArith(const toml::table &t, TableArithConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_tables = readU32(t["max_tables"]);
+}
+
+void parseSubThreshold(const toml::table &t, SubThresholdConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_terms = readU32(t["max_terms"]);
+}
+
+void parsePathExplosion(const toml::table &t, PathExplosionConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_blocks = readU32(t["max_blocks"]);
+    c.max_iterations = readU32(t["max_iterations"]);
+}
+
+void parseDispatcherless(const toml::table &t, DispatcherlessConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_routes = readU32(t["max_routes"]);
+    c.max_terms = readU32(t["max_terms"]);
+}
+
 void parseStrEnc(const toml::table &t, StrEncConfig &c) {
     c.enabled = readBool(t["enabled"]);
     c.probability = readU32(t["probability"]);
@@ -125,6 +225,36 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseMba(*t, pc.mba);
     if (auto *t = p["split_blocks"].as_table())
         parseSplit(*t, pc.split);
+    if (auto *t = p["stack_coalescing"].as_table())
+        parseStackCoalesce(*t, pc.stack_coalesce);
+    if (auto *t = p["pointer_laundering"].as_table())
+        parsePointerLaunder(*t, pc.pointer_launder);
+    if (auto *t = p["type_punning"].as_table())
+        parseTypePun(*t, pc.type_pun);
+    if (auto *t = p["phi_tangling"].as_table())
+        parsePhiTangle(*t, pc.phi_tangle);
+    if (auto *t = p["alias_opaque_predicates"].as_table())
+        parseAliasOp(*t, pc.alias_op);
+    if (auto *t = p["coherent_decoys"].as_table())
+        parseCoherentDecoy(*t, pc.coherent_decoy);
+    if (auto *t = p["data_entangled_flattening"].as_table())
+        parseDataEntangledFlatten(*t, pc.data_entangled_flatten);
+    if (auto *t = p["non_invertible_state"].as_table())
+        parseNonInvertibleState(*t, pc.non_invertible_state);
+    if (auto *t = p["state_opaque_predicates"].as_table())
+        parseStateOpaque(*t, pc.state_opaque);
+    if (auto *t = p["interprocedural_fsm"].as_table())
+        parseInterproceduralFsm(*t, pc.interprocedural_fsm);
+    if (auto *t = p["optimizer_amplification"].as_table())
+        parseOptAmplify(*t, pc.opt_amplify);
+    if (auto *t = p["table_arithmetic"].as_table())
+        parseTableArith(*t, pc.table_arith);
+    if (auto *t = p["sub_threshold_persistence"].as_table())
+        parseSubThreshold(*t, pc.sub_threshold);
+    if (auto *t = p["path_explosion"].as_table())
+        parsePathExplosion(*t, pc.path_explosion);
+    if (auto *t = p["dispatcherless_routing"].as_table())
+        parseDispatcherless(*t, pc.dispatcherless);
     if (auto *t = p["string_encryption"].as_table())
         parseStrEnc(*t, pc.str_enc);
     if (auto *t = p["constant_encryption"].as_table())

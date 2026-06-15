@@ -102,12 +102,27 @@ Every obfuscation pass is implemented as a New-PM pass, each available standalon
 | Pass | `-passes` name | What it does |
 |------|----------------|--------------|
 | Split basic blocks | `morok-split` | cuts blocks into more dispatch targets |
+| Stack coalescing | `morok-stackcoalesce` | locals → one opaque byte buffer |
+| Pointer laundering | `morok-ptrlaunder` | pointer/int round trips and byte-vector value views |
+| Type punning | `morok-typepun` | union-buffer scalar reinterpretation chains |
+| PHI tangling | `morok-phitangle` | redundant cross-block PHI webs |
+| Table arithmetic | `morok-tablearith` | byte arithmetic lowered to encrypted lookup tables |
+| Path explosion | `morok-pathexplode` | opaque-guarded input-derived decoy loops |
+| Alias opaque predicates | `morok-aliasop` | pointer/alias invariant guarded decoy edges |
+| Coherent decoys | `morok-decoy` | opaque-dead alternate return implementations |
 | Bogus control flow | `morok-bcf` | opaque-true (volatile-load) guarded junk edges |
+| Optimizer amplification | `morok-optamp` | early input-selected equivalent forms for optimizer/backend lowering |
 | Substitution | `morok-substitution` | integer ops → equivalent expression trees |
 | Mixed Boolean-Arithmetic | `morok-mba` | layered MBA rewrites + zero-noise |
+| Sub-threshold persistence | `morok-threshold` | volatile-seeded neutral terms tuned below optimizer fold thresholds |
 | Flattening | `morok-flatten` | switch-dispatcher control-flow flattening |
+| Data-entangled flattening | `morok-entfla` | dispatcher state updates fused with live data |
+| Non-invertible state | `morok-nistate` | flattened next states hashed into encoded dispatcher IDs |
+| Stateful opaque predicates | `morok-stateop` | MBA opaque guards over flattened dispatcher state |
+| Interprocedural FSM | `morok-ifsm` | flattened state updates routed through recursive helper functions |
 | Chaos state machine | `morok-csm` | flattening driven by the logistic map |
-| Vector obfuscation | `morok-vec` | scalar integer ops lifted to 2-lane SIMD |
+| Dispatcherless routing | `morok-dispatchless` | branch/switch edges → state-entangled `indirectbr` DAG |
+| Vector obfuscation | `morok-vec` | scalar integer ops/comparisons lifted to configurable SIMD |
 | Constant encryption | `morok-constenc` | literals split into XOR shares |
 | String encryption | `morok-strenc` | literals stored GF(2⁸)-encrypted, decrypted in a ctor |
 | Indirect branch | `morok-indbr` | conditional edges → keyed `indirectbr` table |
@@ -122,11 +137,10 @@ passes are additionally proven semantics-preserving by the end-to-end
 differential tests across the `low`/`mid`/`high` presets — the `high` preset
 stacks the full pipeline and still reproduces the reference output byte-for-byte.
 
-Two faithfulness notes for the current LLVM: indirect-branch keys the table index
+Faithfulness note for the current LLVM: indirect-branch keys the table index
 rather than multiplicatively encrypting the loaded pointer (modern LLVM forbids
 the `ConstantExpr` arithmetic that required); the verified Knuth primitive
-(`core/KnuthHash`) remains available. Vector obfuscation lifts to a fixed 2-lane
-width rather than honouring the `width`/`shuffle` knobs.
+(`core/KnuthHash`) remains available.
 
 ## Licence
 

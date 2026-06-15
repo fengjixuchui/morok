@@ -11,11 +11,26 @@ add_library(morok_passes STATIC
   Mba.cpp
   ConstantEncryption.cpp
   SplitBasicBlocks.cpp
+  StackCoalescing.cpp
+  PointerLaundering.cpp
+  TypePunning.cpp
+  PhiTangling.cpp
+  AliasOpaquePredicates.cpp
+  CoherentDecoys.cpp
   BogusControlFlow.cpp
   Flattening.cpp
+  DataEntangledFlattening.cpp
+  NonInvertibleState.cpp
+  StateOpaquePredicates.cpp
+  InterproceduralFsm.cpp
   ChaosStateMachine.cpp
+  OptimizerAmplification.cpp
+  ArithmeticTables.cpp
+  PathExplosion.cpp
+  DispatcherlessRouting.cpp
   StringEncryption.cpp
   FunctionWrapper.cpp
+  SubThresholdPersistence.cpp
   VectorObfuscation.cpp
   IndirectBranch.cpp
   FunctionCallObfuscate.cpp

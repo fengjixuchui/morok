@@ -53,11 +53,23 @@ using NextStateFn = std::function<llvm::Value *(
     llvm::IRBuilder<> &B, llvm::AllocaInst *stateVar, std::uint32_t currentId,
     const SuccessorIds &succ)>;
 
+/// Maps a logical per-block state id to the concrete i32 value stored in the
+/// dispatcher state variable and matched by the switch.  The default flattening
+/// family uses identity mapping; stronger variants can use keyed non-invertible
+/// encodings while still receiving logical target ids in `SuccessorIds`.
+using StateEncodeFn = std::function<std::uint32_t(std::uint32_t logicalId)>;
+
 /// Flatten `F` using `nextState` to drive transitions.  Returns false (leaving
 /// `F` unchanged) for functions with fewer than two blocks or containing
 /// exception-handling / indirect terminators.
 bool flattenControlFlow(llvm::Function &F, IRRandom &rng,
                         const NextStateFn &nextState);
+
+/// Flatten `F` using encoded dispatcher state ids.  The callback still receives
+/// logical successor ids and must return the already-encoded next state.
+bool flattenControlFlow(llvm::Function &F, IRRandom &rng,
+                        const NextStateFn &nextState,
+                        const StateEncodeFn &encodeState);
 
 } // namespace morok::ir
 

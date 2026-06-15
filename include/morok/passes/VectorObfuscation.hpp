@@ -4,10 +4,11 @@
 //
 // morok/passes/VectorObfuscation.hpp — scalar-to-SIMD lifting.
 //
-// Rewrites scalar integer binary operations into 2-lane vector operations whose
-// lane 0 carries the real computation (lane 1 is junk), then extracts lane 0.
-// A decompiler renders the result as opaque vector intrinsics; the value is
-// unchanged because per-lane semantics make lane 0 equal to the original op.
+// Rewrites scalar integer binary operations/comparisons into configurable-width
+// vector operations whose real lane carries the original computation and the
+// remaining lanes are junk, then extracts the real lane.  A decompiler renders
+// the result as opaque vector intrinsics while per-lane semantics preserve the
+// scalar value.
 
 #ifndef MOROK_PASSES_VECTOR_OBFUSCATION_HPP
 #define MOROK_PASSES_VECTOR_OBFUSCATION_HPP
@@ -27,6 +28,9 @@ namespace morok::passes {
 
 struct VecParams {
     std::uint32_t probability = 40; ///< per-instruction chance, 0..100
+    std::uint32_t width = 128;      ///< target vector width in bits
+    bool shuffle = false;           ///< route real lane through shufflevector
+    bool lift_comparisons = true;   ///< also lift scalar integer icmp
 };
 
 /// Lift eligible scalar integer ops in `F` to SIMD.  Returns true if changed.

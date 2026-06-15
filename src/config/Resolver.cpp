@@ -60,6 +60,85 @@ void merge(PassConfig &dst, const PassConfig &src) {
     mergeOpt(dst.split.enabled, src.split.enabled);
     mergeOpt(dst.split.splits, src.split.splits);
     mergeOpt(dst.split.stack_confusion, src.split.stack_confusion);
+    // Stack coalescing
+    mergeOpt(dst.stack_coalesce.enabled, src.stack_coalesce.enabled);
+    mergeOpt(dst.stack_coalesce.probability, src.stack_coalesce.probability);
+    mergeOpt(dst.stack_coalesce.opaque_offsets,
+             src.stack_coalesce.opaque_offsets);
+    // Pointer laundering
+    mergeOpt(dst.pointer_launder.enabled, src.pointer_launder.enabled);
+    mergeOpt(dst.pointer_launder.pointer_probability,
+             src.pointer_launder.pointer_probability);
+    mergeOpt(dst.pointer_launder.integer_probability,
+             src.pointer_launder.integer_probability);
+    // Type punning
+    mergeOpt(dst.type_pun.enabled, src.type_pun.enabled);
+    mergeOpt(dst.type_pun.probability, src.type_pun.probability);
+    mergeOpt(dst.type_pun.include_floating, src.type_pun.include_floating);
+    mergeOpt(dst.type_pun.max_targets, src.type_pun.max_targets);
+    // Phi tangling
+    mergeOpt(dst.phi_tangle.enabled, src.phi_tangle.enabled);
+    mergeOpt(dst.phi_tangle.probability, src.phi_tangle.probability);
+    mergeOpt(dst.phi_tangle.layers, src.phi_tangle.layers);
+    mergeOpt(dst.phi_tangle.max_phis, src.phi_tangle.max_phis);
+    // Alias opaque predicates
+    mergeOpt(dst.alias_op.enabled, src.alias_op.enabled);
+    mergeOpt(dst.alias_op.probability, src.alias_op.probability);
+    mergeOpt(dst.alias_op.iterations, src.alias_op.iterations);
+    mergeOpt(dst.alias_op.max_blocks, src.alias_op.max_blocks);
+    // Coherent decoy dead paths
+    mergeOpt(dst.coherent_decoy.enabled, src.coherent_decoy.enabled);
+    mergeOpt(dst.coherent_decoy.probability, src.coherent_decoy.probability);
+    mergeOpt(dst.coherent_decoy.max_blocks, src.coherent_decoy.max_blocks);
+    mergeOpt(dst.coherent_decoy.depth, src.coherent_decoy.depth);
+    // Data-entangled flattening
+    mergeOpt(dst.data_entangled_flatten.enabled,
+             src.data_entangled_flatten.enabled);
+    mergeOpt(dst.data_entangled_flatten.max_terms,
+             src.data_entangled_flatten.max_terms);
+    // Non-invertible state flattening
+    mergeOpt(dst.non_invertible_state.enabled,
+             src.non_invertible_state.enabled);
+    mergeOpt(dst.non_invertible_state.max_terms,
+             src.non_invertible_state.max_terms);
+    mergeOpt(dst.non_invertible_state.rounds, src.non_invertible_state.rounds);
+    // Stateful MBA opaque predicates
+    mergeOpt(dst.state_opaque.enabled, src.state_opaque.enabled);
+    mergeOpt(dst.state_opaque.probability, src.state_opaque.probability);
+    mergeOpt(dst.state_opaque.max_blocks, src.state_opaque.max_blocks);
+    mergeOpt(dst.state_opaque.max_terms, src.state_opaque.max_terms);
+    // Interprocedural FSM splitting
+    mergeOpt(dst.interprocedural_fsm.enabled,
+             src.interprocedural_fsm.enabled);
+    mergeOpt(dst.interprocedural_fsm.probability,
+             src.interprocedural_fsm.probability);
+    mergeOpt(dst.interprocedural_fsm.max_sites,
+             src.interprocedural_fsm.max_sites);
+    mergeOpt(dst.interprocedural_fsm.max_terms,
+             src.interprocedural_fsm.max_terms);
+    // Optimizer amplification
+    mergeOpt(dst.opt_amplify.enabled, src.opt_amplify.enabled);
+    mergeOpt(dst.opt_amplify.probability, src.opt_amplify.probability);
+    mergeOpt(dst.opt_amplify.max_forms, src.opt_amplify.max_forms);
+    // Table arithmetic
+    mergeOpt(dst.table_arith.enabled, src.table_arith.enabled);
+    mergeOpt(dst.table_arith.probability, src.table_arith.probability);
+    mergeOpt(dst.table_arith.max_tables, src.table_arith.max_tables);
+    // Sub-threshold persistence
+    mergeOpt(dst.sub_threshold.enabled, src.sub_threshold.enabled);
+    mergeOpt(dst.sub_threshold.probability, src.sub_threshold.probability);
+    mergeOpt(dst.sub_threshold.max_terms, src.sub_threshold.max_terms);
+    // Path explosion
+    mergeOpt(dst.path_explosion.enabled, src.path_explosion.enabled);
+    mergeOpt(dst.path_explosion.probability, src.path_explosion.probability);
+    mergeOpt(dst.path_explosion.max_blocks, src.path_explosion.max_blocks);
+    mergeOpt(dst.path_explosion.max_iterations,
+             src.path_explosion.max_iterations);
+    // Dispatcherless routing
+    mergeOpt(dst.dispatcherless.enabled, src.dispatcherless.enabled);
+    mergeOpt(dst.dispatcherless.probability, src.dispatcherless.probability);
+    mergeOpt(dst.dispatcherless.max_routes, src.dispatcherless.max_routes);
+    mergeOpt(dst.dispatcherless.max_terms, src.dispatcherless.max_terms);
     // StrEnc
     mergeOpt(dst.str_enc.enabled, src.str_enc.enabled);
     mergeOpt(dst.str_enc.probability, src.str_enc.probability);

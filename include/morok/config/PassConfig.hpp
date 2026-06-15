@@ -53,6 +53,103 @@ struct SplitConfig {
     Opt<bool> stack_confusion;
 };
 
+struct StackCoalesceConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<bool> opaque_offsets;
+};
+
+struct PointerLaunderConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> pointer_probability;
+    Opt<std::uint32_t> integer_probability;
+};
+
+struct TypePunConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<bool> include_floating;
+    Opt<std::uint32_t> max_targets;
+};
+
+struct PhiTangleConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> layers;
+    Opt<std::uint32_t> max_phis;
+};
+
+struct AliasOpConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> iterations;
+    Opt<std::uint32_t> max_blocks;
+};
+
+struct CoherentDecoyConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_blocks;
+    Opt<std::uint32_t> depth;
+};
+
+struct DataEntangledFlattenConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> max_terms;
+};
+
+struct NonInvertibleStateConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> max_terms;
+    Opt<std::uint32_t> rounds;
+};
+
+struct StateOpaqueConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_blocks;
+    Opt<std::uint32_t> max_terms;
+};
+
+struct InterproceduralFsmConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_sites;
+    Opt<std::uint32_t> max_terms;
+};
+
+struct OptAmplifyConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_forms;
+};
+
+struct TableArithConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_tables;
+};
+
+struct SubThresholdConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_terms;
+};
+
+struct PathExplosionConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_blocks;
+    Opt<std::uint32_t> max_iterations;
+};
+
+struct DispatcherlessConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_routes;
+    Opt<std::uint32_t> max_terms;
+};
+
 struct StrEncConfig {
     Opt<bool> enabled;
     Opt<std::uint32_t> probability;
@@ -97,6 +194,21 @@ struct PassConfig {
     SubConfig sub;
     MbaConfig mba;
     SplitConfig split;
+    StackCoalesceConfig stack_coalesce;
+    PointerLaunderConfig pointer_launder;
+    TypePunConfig type_pun;
+    PhiTangleConfig phi_tangle;
+    AliasOpConfig alias_op;
+    CoherentDecoyConfig coherent_decoy;
+    DataEntangledFlattenConfig data_entangled_flatten;
+    NonInvertibleStateConfig non_invertible_state;
+    StateOpaqueConfig state_opaque;
+    InterproceduralFsmConfig interprocedural_fsm;
+    OptAmplifyConfig opt_amplify;
+    TableArithConfig table_arith;
+    SubThresholdConfig sub_threshold;
+    PathExplosionConfig path_explosion;
+    DispatcherlessConfig dispatcherless;
     StrEncConfig str_enc;
     ConstEncConfig const_enc;
     VecConfig vec;
