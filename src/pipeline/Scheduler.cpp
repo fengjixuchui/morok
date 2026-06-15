@@ -95,9 +95,25 @@ std::uint64_t instructionCount(const Function &F) {
     return Count;
 }
 
+// Like instructionCount but stops as soon as `Max` is exceeded.  The
+// per-function budget checks only need the boolean, so an over-budget function
+// bails without walking its remaining blocks.
+bool instructionCountAtMost(const Function &F, std::uint64_t Max) {
+    std::uint64_t Count = 0;
+    for (const BasicBlock &BB : F) {
+        Count += BB.size();
+        if (Count > Max)
+            return false;
+    }
+    return true;
+}
+
 bool withinFunctionBudget(const Function &F, std::uint64_t MaxInstructions,
                           std::uint64_t MaxBlocks) {
-    return instructionCount(F) <= MaxInstructions && F.size() <= MaxBlocks;
+    // Cheap O(1) block-count check first, then the early-exiting instruction
+    // count, so over-budget functions bail without a full instruction walk.
+    return F.size() <= MaxBlocks &&
+           instructionCountAtMost(F, MaxInstructions);
 }
 
 bool growthFunctionOk(const Function &F) {

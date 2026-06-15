@@ -300,6 +300,12 @@ void merge(PassConfig &dst, const PassConfig &src) {
 
 PassConfig resolve(const Config &cfg, std::string_view module_name,
                    std::string_view func_name, const Demangler &demangle) {
+    // Fast path: with no policy rules the effective config is exactly the base
+    // config, and the demangle is only consumed by policy matching.  Skip the
+    // per-function demangle and policy scan entirely.
+    if (cfg.policies.empty())
+        return cfg.passes;
+
     PassConfig eff = cfg.passes;
 
     const std::string module_str(module_name);
