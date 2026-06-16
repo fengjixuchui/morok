@@ -5,8 +5,8 @@
 // morok/passes/MqGate.cpp
 //
 // Planted MQ gates for anti-symbolic pressure.  The emitted gate is built from
-// argument-derived bits but rebased through volatile scratch cancellation to
-// the planted assignment, so the guard is true at runtime and remains
+// argument/load-derived bits but rebased through volatile scratch cancellation
+// to the planted assignment, so the guard is true at runtime and remains
 // semantics-preserving for arbitrary programs.
 
 #include "morok/passes/MqGate.hpp"
@@ -59,6 +59,21 @@ bool withinMqBudget(const Function &F) {
     return instructionCount(F) <= kMqInstLimit && F.size() <= kMqBlockLimit;
 }
 
+bool supportedFloatType(Type *Ty) {
+    return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+           Ty->isDoubleTy();
+}
+
+IntegerType *integerCarrierFor(Type *Ty) {
+    if (Ty->isHalfTy() || Ty->isBFloatTy())
+        return IntegerType::get(Ty->getContext(), 16);
+    if (Ty->isFloatTy())
+        return IntegerType::get(Ty->getContext(), 32);
+    if (Ty->isDoubleTy())
+        return IntegerType::get(Ty->getContext(), 64);
+    return nullptr;
+}
+
 bool inputDerived(Value *V, unsigned Depth, SmallPtrSetImpl<Value *> &Seen) {
     if (!V || Depth == 0 || !Seen.insert(V).second)
         return false;
@@ -67,8 +82,9 @@ bool inputDerived(Value *V, unsigned Depth, SmallPtrSetImpl<Value *> &Seen) {
     if (isa<Constant>(V))
         return false;
     if (auto *I = dyn_cast<Instruction>(V)) {
-        if (isa<BinaryOperator>(I) || isa<ICmpInst>(I) || isa<CastInst>(I) ||
-            isa<SelectInst>(I) || isa<GetElementPtrInst>(I)) {
+        if (isa<BinaryOperator>(I) || isa<ICmpInst>(I) || isa<FCmpInst>(I) ||
+            isa<CastInst>(I) || isa<SelectInst>(I) ||
+            isa<GetElementPtrInst>(I)) {
             for (Value *Op : I->operands())
                 if (inputDerived(Op, Depth - 1, Seen))
                     return true;
@@ -99,6 +115,9 @@ Value *asInteger(IRBuilder<NoFolder> &B, Value *V) {
         return V;
     if (V->getType()->isPointerTy())
         return B.CreatePtrToInt(V, B.getInt64Ty(), "morok.mq.arg.ptr");
+    if (supportedFloatType(V->getType()))
+        return B.CreateBitCast(V, integerCarrierFor(V->getType()),
+                               "morok.mq.arg.fp");
     return nullptr;
 }
 
@@ -108,7 +127,8 @@ void collectInputSources(Value *V, unsigned Depth,
     if (!V || Depth == 0 || !Seen.insert(V).second)
         return;
     if ((isa<Argument>(V) || isa<LoadInst>(V)) &&
-        (V->getType()->isIntegerTy() || V->getType()->isPointerTy())) {
+        (V->getType()->isIntegerTy() || V->getType()->isPointerTy() ||
+         supportedFloatType(V->getType()))) {
         Sources.push_back(V);
         return;
     }
@@ -124,7 +144,8 @@ void collectSources(Function &F, Value *Root,
     if (!Sources.empty())
         return;
     for (Argument &Arg : F.args())
-        if (Arg.getType()->isIntegerTy() || Arg.getType()->isPointerTy())
+        if (Arg.getType()->isIntegerTy() || Arg.getType()->isPointerTy() ||
+            supportedFloatType(Arg.getType()))
             Sources.push_back(&Arg);
 }
 

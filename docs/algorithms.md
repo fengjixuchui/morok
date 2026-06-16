@@ -751,10 +751,13 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   random non-root sample.
 - The current pass is a semantics-preserving planted opaque gate, not arbitrary
   user-input validation.  It selects input-derived conditional branches, builds
-  `vars` gate bits from function arguments, stores each source bit to a volatile
-  scratch byte, reloads it twice, xors the two loads to zero, then xors in the
-  planted bit.  The emitted bits therefore equal the planted assignment at
-  runtime while still carrying volatile argument-derived structure in IR.
+  `vars` gate bits from integer, pointer, and scalar floating-point
+  argument/load sources, stores each source bit to a volatile scratch byte,
+  reloads it twice, xors the two loads to zero, then xors in the planted bit.
+  Floating-point sources (`half`, `bfloat`, `float`, `double`) are bitcast to
+  equal-width integer carriers before bit extraction.  The emitted bits
+  therefore equal the planted assignment at runtime while still carrying
+  volatile input-derived structure in IR.
 - Each selected branch gets an unrolled dense MQ term tree: quadratic terms are
   `morok.mq.term` `and`s, forms are `morok.mq.form` `xor`s, equations are
   `morok.mq.eq` comparisons to zero, and their conjunction is `morok.mq.gate`.
@@ -855,7 +858,7 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - AdversarialSelfTuning: cloned-candidate search over hardness metrics with best verified bundle replay.
 - PerBuildPolymorphism: seed-driven function/block order and volatile-zero scalar integer/FP return anchors.
 - PathExplosion: opaque-guarded input-derived loops with volatile symbolic stores and indirectbr dispatch.
-- MqGate: planted GF(2) quadratic opaque gates over volatile argument-derived bits.
+- MqGate: planted GF(2) quadratic opaque gates over volatile integer/pointer/FP input-derived bits.
 - TraceKeying: edge-carried rolling trace accumulator with guards and neutral poisoning.
 - SelfChecksumConstants: scalar constants XORed with runtime checksum diffs for data-only tamper corruption.
 - ShamirShare: selected scalar literals reconstructed from volatile GF(2^8) threshold shares.

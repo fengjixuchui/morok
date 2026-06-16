@@ -5669,6 +5669,52 @@ else:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("mqGateFunction extracts floating input bits") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @mq_float(float %a, double %b) {
+entry:
+  %b32 = fptrunc double %b to float
+  %mix = fadd float %a, %b32
+  %cond = fcmp olt float %mix, %a
+  br i1 %cond, label %then, label %else
+then:
+  ret i32 1
+else:
+  ret i32 0
+}
+)ir");
+    Function *F = M->getFunction("mq_float");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(0x51f71);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::mqGateFunction(*F,
+                                        {/*probability=*/100, /*vars=*/8,
+                                         /*eqs=*/6, /*density=*/60,
+                                         /*max_gates=*/1, /*fold_diff=*/true},
+                                        rng));
+
+    bool hasGate = false;
+    bool hasFpBitcast = false;
+    bool hasInputBit = false;
+    for (Instruction &I : instructions(*F)) {
+        hasGate |= I.getName().starts_with("morok.mq.gate");
+        hasInputBit |= I.getName().starts_with("morok.mq.input.bit");
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpBitcast |= BC->getName().starts_with("morok.mq.arg.fp") &&
+                            (BC->getSrcTy()->isFloatTy() ||
+                             BC->getSrcTy()->isDoubleTy()) &&
+                            BC->getDestTy()->isIntegerTy();
+    }
+
+    CHECK(hasGate);
+    CHECK(hasFpBitcast);
+    CHECK(hasInputBit);
+    CHECK(countGlobals(*M, "morok.mq.sys") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("mqGateFunction honors probability and max gate caps") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

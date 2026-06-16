@@ -29,7 +29,8 @@ struct MqGateParams {
     bool fold_diff = true;          ///< emit decoy side-effect path
 };
 
-/// Insert planted MQ gates on selected input-derived conditional branches.
+/// Insert planted MQ gates on selected integer/pointer/FP input-derived
+/// conditional branches.
 bool mqGateFunction(llvm::Function &F, const MqGateParams &params,
                     morok::ir::IRRandom &rng);
 
