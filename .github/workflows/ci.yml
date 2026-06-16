@@ -90,7 +90,8 @@ jobs:
           dir="${RUNNER_TEMP//\\//}/sccache"
           mkdir -p "$dir"
           echo "SCCACHE_DIR=$dir" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=" >> "$GITHUB_ENV"
+          # sccache validates this strictly: it must be a real boolean, not empty.
+          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
           # Bound per-platform sccache so the install caches + 4 platforms of
           # object cache stay within the repo's 10 GB Actions-cache budget.
           echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
