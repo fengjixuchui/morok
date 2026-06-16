@@ -56,14 +56,25 @@ struct MergedFunction {
     std::uint32_t selector = 0;
 };
 
+enum class OutlineKind : unsigned {
+    Binary,
+    ICmp,
+};
+
 struct OutlineKey {
-    unsigned opcode = 0;
+    OutlineKind kind = OutlineKind::Binary;
+    unsigned code = 0;
     unsigned bits = 0;
 };
 
 struct OutlineHelper {
     OutlineKey key;
     Function *helper = nullptr;
+};
+
+struct OutlineTarget {
+    Instruction *inst = nullptr;
+    OutlineKey key;
 };
 
 bool generatedFunction(const Function &F) {
@@ -111,6 +122,57 @@ StringRef opcodeName(unsigned Opcode) {
     default:
         return "op";
     }
+}
+
+bool supportedPredicate(CmpInst::Predicate Pred) {
+    switch (Pred) {
+    case CmpInst::ICMP_EQ:
+    case CmpInst::ICMP_NE:
+    case CmpInst::ICMP_UGT:
+    case CmpInst::ICMP_UGE:
+    case CmpInst::ICMP_ULT:
+    case CmpInst::ICMP_ULE:
+    case CmpInst::ICMP_SGT:
+    case CmpInst::ICMP_SGE:
+    case CmpInst::ICMP_SLT:
+    case CmpInst::ICMP_SLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+StringRef predicateName(CmpInst::Predicate Pred) {
+    switch (Pred) {
+    case CmpInst::ICMP_EQ:
+        return "icmp.eq";
+    case CmpInst::ICMP_NE:
+        return "icmp.ne";
+    case CmpInst::ICMP_UGT:
+        return "icmp.ugt";
+    case CmpInst::ICMP_UGE:
+        return "icmp.uge";
+    case CmpInst::ICMP_ULT:
+        return "icmp.ult";
+    case CmpInst::ICMP_ULE:
+        return "icmp.ule";
+    case CmpInst::ICMP_SGT:
+        return "icmp.sgt";
+    case CmpInst::ICMP_SGE:
+        return "icmp.sge";
+    case CmpInst::ICMP_SLT:
+        return "icmp.slt";
+    case CmpInst::ICMP_SLE:
+        return "icmp.sle";
+    default:
+        return "icmp";
+    }
+}
+
+std::string outlineName(const OutlineKey &Key) {
+    if (Key.kind == OutlineKind::ICmp)
+        return predicateName(static_cast<CmpInst::Predicate>(Key.code)).str();
+    return opcodeName(Key.code).str();
 }
 
 bool hasBlockAddressUser(const Function &F) {
@@ -178,6 +240,17 @@ bool eligibleOutline(BinaryOperator &BO) {
     return !BO.hasPoisonGeneratingFlags();
 }
 
+bool eligibleOutline(ICmpInst &CI) {
+    if (!supportedPredicate(CI.getPredicate()))
+        return false;
+    if (CI.getName().starts_with("morok.afm."))
+        return false;
+    auto *Ty = dyn_cast<IntegerType>(CI.getOperand(0)->getType());
+    if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 64)
+        return false;
+    return CI.getOperand(1)->getType() == Ty;
+}
+
 void addNoInlineBarrier(Function *F) {
     F->removeFnAttr(Attribute::AlwaysInline);
     F->addFnAttr(Attribute::NoInline);
@@ -213,7 +286,7 @@ void shuffleGroups(std::vector<SignatureGroup> &Groups, ir::IRRandom &Rng) {
     }
 }
 
-void shuffleOutlines(std::vector<BinaryOperator *> &Ops, ir::IRRandom &Rng) {
+void shuffleOutlines(std::vector<OutlineTarget> &Ops, ir::IRRandom &Rng) {
     for (std::size_t I = Ops.size(); I > 1; --I) {
         const std::size_t J = Rng.range(static_cast<std::uint32_t>(I));
         std::swap(Ops[I - 1], Ops[J]);
@@ -390,11 +463,11 @@ void rewriteOriginalAsWrapper(MergedFunction &MF, Function *Dispatch, Module &M,
 GlobalVariable *createOutlineKey(Module &M, const OutlineKey &Key,
                                  ir::IRRandom &Rng) {
     auto *I64 = Type::getInt64Ty(M.getContext());
+    const std::string Name = outlineName(Key);
     auto *GV = new GlobalVariable(
         M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
         ConstantInt::get(I64, Rng.next()),
-        (Twine("morok.afm.key.outline.") + opcodeName(Key.opcode) + ".i" +
-         Twine(Key.bits))
+        (Twine("morok.afm.key.outline.") + Name + ".i" + Twine(Key.bits))
             .str());
     GV->setAlignment(Align(8));
     GV->setDSOLocal(true);
@@ -413,13 +486,15 @@ Value *castZero(Builder &B, Value *Zero64, IntegerType *Ty) {
 Function *createOutlineHelper(Module &M, const OutlineKey &Key,
                               ir::IRRandom &Rng) {
     LLVMContext &Ctx = M.getContext();
-    auto *Ty = IntegerType::get(Ctx, Key.bits);
+    auto *ArgTy = IntegerType::get(Ctx, Key.bits);
+    auto *RetTy = Key.kind == OutlineKind::ICmp ? Type::getInt1Ty(Ctx) : ArgTy;
     auto *I64 = Type::getInt64Ty(Ctx);
-    auto *FT = FunctionType::get(Ty, {Ty, Ty}, false);
+    auto *FT = FunctionType::get(RetTy, {ArgTy, ArgTy}, false);
+    const std::string Name = outlineName(Key);
     auto *Fn =
         Function::Create(FT, GlobalValue::InternalLinkage,
-                         (Twine("morok.afm.outline.") + opcodeName(Key.opcode) +
-                          ".i" + Twine(Key.bits))
+                         (Twine("morok.afm.outline.") + Name + ".i" +
+                          Twine(Key.bits))
                              .str(),
                          &M);
     Fn->setDSOLocal(true);
@@ -434,8 +509,14 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
     R->setName("rhs");
 
     Builder B(BasicBlock::Create(Ctx, "entry", Fn));
-    Value *Base = B.CreateBinOp(static_cast<Instruction::BinaryOps>(Key.opcode),
-                                L, R, "morok.afm.outline.base");
+    Value *Base = nullptr;
+    if (Key.kind == OutlineKind::ICmp) {
+        Base = B.CreateICmp(static_cast<CmpInst::Predicate>(Key.code), L, R,
+                            "morok.afm.outline.base");
+    } else {
+        Base = B.CreateBinOp(static_cast<Instruction::BinaryOps>(Key.code), L,
+                             R, "morok.afm.outline.base");
+    }
     auto *A = B.CreateLoad(I64, KeyGV, "morok.afm.outline.key.a");
     A->setVolatile(true);
     A->setAlignment(Align(8));
@@ -443,7 +524,7 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
     Bv->setVolatile(true);
     Bv->setAlignment(Align(8));
     Value *Zero64 = B.CreateXor(A, Bv, "morok.afm.outline.zero64");
-    Value *Zero = castZero(B, Zero64, Ty);
+    Value *Zero = castZero(B, Zero64, cast<IntegerType>(RetTy));
     B.CreateRet(B.CreateXor(Base, Zero, "morok.afm.outline.value"));
     return Fn;
 }
@@ -451,7 +532,8 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
 Function *getOutlineHelper(Module &M, std::vector<OutlineHelper> &Helpers,
                            const OutlineKey &Key, ir::IRRandom &Rng) {
     for (const OutlineHelper &H : Helpers)
-        if (H.key.opcode == Key.opcode && H.key.bits == Key.bits)
+        if (H.key.kind == Key.kind && H.key.code == Key.code &&
+            H.key.bits == Key.bits)
             return H.helper;
     Function *Helper = createOutlineHelper(M, Key, Rng);
     Helpers.push_back({Key, Helper});
@@ -463,33 +545,47 @@ bool outlineFragments(Module &M, ArrayRef<Function *> ImplFunctions,
     if (Params.outline_probability == 0 || Params.max_outlines == 0)
         return false;
 
-    std::vector<BinaryOperator *> Targets;
-    for (Function *Impl : ImplFunctions)
-        for (Instruction &I : instructions(*Impl))
-            if (auto *BO = dyn_cast<BinaryOperator>(&I))
+    std::vector<OutlineTarget> Targets;
+    for (Function *Impl : ImplFunctions) {
+        for (Instruction &I : instructions(*Impl)) {
+            if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
                 if (eligibleOutline(*BO))
-                    Targets.push_back(BO);
+                    Targets.push_back({BO, {OutlineKind::Binary,
+                                            BO->getOpcode(),
+                                            cast<IntegerType>(BO->getType())
+                                                ->getBitWidth()}});
+                continue;
+            }
+            if (auto *CI = dyn_cast<ICmpInst>(&I)) {
+                if (eligibleOutline(*CI))
+                    Targets.push_back({CI, {OutlineKind::ICmp,
+                                            CI->getPredicate(),
+                                            cast<IntegerType>(
+                                                CI->getOperand(0)->getType())
+                                                ->getBitWidth()}});
+            }
+        }
+    }
     if (Targets.empty())
         return false;
     shuffleOutlines(Targets, Rng);
 
     std::vector<OutlineHelper> Helpers;
     std::uint32_t Outlined = 0;
-    for (BinaryOperator *BO : Targets) {
+    for (const OutlineTarget &Target : Targets) {
         if (Outlined >= Params.max_outlines)
             break;
         if (!Rng.chance(Params.outline_probability))
             continue;
-        auto *Ty = cast<IntegerType>(BO->getType());
-        OutlineKey Key{BO->getOpcode(), Ty->getBitWidth()};
-        Function *Helper = getOutlineHelper(M, Helpers, Key, Rng);
+        Instruction *Inst = Target.inst;
+        Function *Helper = getOutlineHelper(M, Helpers, Target.key, Rng);
 
-        Builder B(BO);
+        Builder B(Inst);
         CallInst *Call = B.CreateCall(Helper->getFunctionType(), Helper,
-                                      {BO->getOperand(0), BO->getOperand(1)},
+                                      {Inst->getOperand(0), Inst->getOperand(1)},
                                       "morok.afm.outline.value");
-        BO->replaceAllUsesWith(Call);
-        BO->eraseFromParent();
+        Inst->replaceAllUsesWith(Call);
+        Inst->eraseFromParent();
         ++Outlined;
     }
 

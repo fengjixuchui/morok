@@ -5417,6 +5417,72 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("adversarialFunctionMergingModule outlines integer comparisons") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i1 @cmp_a(i8 %a, i8 %b) {
+entry:
+  %x = icmp ult i8 %a, %b
+  ret i1 %x
+}
+
+define i1 @cmp_b(i8 %a, i8 %b) {
+entry:
+  %x = icmp sge i8 %a, %b
+  ret i1 %x
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(224);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::adversarialFunctionMergingModule(
+        *M,
+        {/*probability=*/100, /*max_groups=*/1, /*max_functions=*/2,
+         /*outline_probability=*/100, /*max_outlines=*/2},
+        rng));
+
+    CHECK(countFunctions(*M, "morok.afm.dispatch") == 1u);
+    CHECK(countFunctions(*M, "morok.afm.impl") == 2u);
+
+    bool hasIcmpOutline = false;
+    bool helperHasVolatileKey = false;
+    unsigned implIcmpOutlineCalls = 0;
+    for (Function &F : *M) {
+        if (F.getName().starts_with("morok.afm.outline.icmp")) {
+            hasIcmpOutline = true;
+            auto *RetTy = dyn_cast<IntegerType>(F.getReturnType());
+            REQUIRE(RetTy);
+            CHECK(RetTy->getBitWidth() == 1);
+            CHECK(F.arg_size() == 2u);
+            for (Argument &A : F.args()) {
+                auto *ArgTy = dyn_cast<IntegerType>(A.getType());
+                REQUIRE(ArgTy);
+                CHECK(ArgTy->getBitWidth() == 8);
+            }
+            for (Instruction &I : instructions(F))
+                if (auto *LI = dyn_cast<LoadInst>(&I))
+                    helperHasVolatileKey |=
+                        LI->isVolatile() &&
+                        LI->getPointerOperand()->getName().starts_with(
+                            "morok.afm.key.outline.icmp");
+        }
+
+        if (!F.getName().starts_with("morok.afm.impl"))
+            continue;
+        for (Instruction &I : instructions(F))
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *Callee = CI->getCalledFunction())
+                    if (Callee->getName().starts_with(
+                            "morok.afm.outline.icmp"))
+                        ++implIcmpOutlineCalls;
+    }
+
+    CHECK(hasIcmpOutline);
+    CHECK(helperHasVolatileKey);
+    CHECK(implIcmpOutlineCalls == 2u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("adversarialFunctionMergingModule honors zero probability") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

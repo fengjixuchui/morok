@@ -3,7 +3,7 @@
 // Morok — modular LLVM IR obfuscator.
 //
 // morok/passes/AdversarialFunctionMerging.hpp — call-graph confusion by
-// unrelated function fusion and shared scalar outlining.
+// unrelated function fusion and shared scalar operation/comparison outlining.
 
 #ifndef MOROK_PASSES_ADVERSARIAL_FUNCTION_MERGING_HPP
 #define MOROK_PASSES_ADVERSARIAL_FUNCTION_MERGING_HPP
@@ -30,7 +30,8 @@ struct AdversarialMergeParams {
 };
 
 /// Fuse unrelated same-signature functions behind hidden selector dispatchers
-/// and outline selected scalar fragments into shared noinline helpers.
+/// and outline selected scalar operation/comparison fragments into shared
+/// noinline helpers.
 bool adversarialFunctionMergingModule(llvm::Module &M,
                                       const AdversarialMergeParams &params,
                                       morok::ir::IRRandom &rng);
