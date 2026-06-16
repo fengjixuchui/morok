@@ -184,7 +184,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
     // Anti-analysis module passes run earliest.
     if (config_.passes.anti_hook.enabled.value_or(false))
-        changed |= passes::antiHookingModule(M);
+        changed |= passes::antiHookingModule(M, rng);
     if (config_.passes.anti_class_dump.enabled.value_or(false))
         changed |= passes::antiClassDumpModule(M);
     if (config_.passes.anti_dbg.enabled.value_or(false))

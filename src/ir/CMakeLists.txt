@@ -11,6 +11,7 @@ add_library(morok_ir STATIC
   InstUtil.cpp
   IRRandom.cpp
   Reg2Mem.cpp
+  SymbolCloak.cpp
   ControlFlowFlattener.cpp)
 add_library(morok::ir ALIAS morok_ir)
 

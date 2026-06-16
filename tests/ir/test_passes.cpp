@@ -515,7 +515,7 @@ TEST_CASE("MorokPass stops per-function growth on oversized modules") {
     CHECK(countFunctions(*M, "morok.") == 0u);
     CHECK(M->getFunction("dlsym") == nullptr);
     CHECK(countGlobals(*M, "morok.k1") == 0u);
-    CHECK(countGlobals(*M, "morok.fco") == 0u);
+    CHECK(countGlobals(*M, "morok.cloak") == 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -8281,7 +8281,7 @@ TEST_CASE("functionCallObfuscateModule caps redirected call sites") {
     CHECK(morok::passes::functionCallObfuscateModule(
         *M, {/*probability=*/100, /*max_calls=*/1000}, rng));
 
-    CHECK(countGlobals(*M, "morok.fco.c") == 256u);
+    CHECK(countGlobals(*M, "morok.cloak.c") == 256u);
     CHECK(countCallsTo(*Caller, "dlsym") == 256u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
@@ -8309,8 +8309,8 @@ define i32 @caller() {
                 CHECK(CDA->getRawDataValues().find("puts") == StringRef::npos);
     }
     // A per-site cipher global and the volatile module seed exist.
-    CHECK(countGlobals(*M, "morok.fco.c") == 1u);
-    CHECK(countGlobals(*M, "morok.fco.s") == 1u);
+    CHECK(countGlobals(*M, "morok.cloak.c") == 1u);
+    CHECK(countGlobals(*M, "morok.cloak.seed") == 1u);
 
     // The seed is read with a volatile load, and the symbol passed to dlsym is
     // a computed stack pointer (an alloca), not a direct global string.
@@ -8335,9 +8335,19 @@ define i32 @caller() {
 TEST_CASE("anti-analysis passes inject valid startup code") {
     LLVMContext ctx;
     auto M = parse(ctx, "define i32 @main() { ret i32 0 }\n");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(88);
+    morok::ir::IRRandom rng(engine);
     CHECK(morok::passes::antiDebuggingModule(*M));
-    CHECK(morok::passes::antiHookingModule(*M));
+    CHECK(morok::passes::antiHookingModule(*M, rng));
     CHECK_FALSE(morok::passes::antiClassDumpModule(*M)); // no ObjC → no-op
+
+    // The probed framework name must never appear as a readable string.
+    for (GlobalVariable &GV : M->globals())
+        if (GV.hasInitializer())
+            if (auto *CDA = dyn_cast<ConstantDataArray>(GV.getInitializer()))
+                if (CDA->getElementType()->isIntegerTy(8))
+                    CHECK(CDA->getRawDataValues().find("MSHookFunction") ==
+                          StringRef::npos);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

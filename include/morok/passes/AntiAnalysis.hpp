@@ -15,7 +15,12 @@
 #ifndef MOROK_PASSES_ANTI_ANALYSIS_HPP
 #define MOROK_PASSES_ANTI_ANALYSIS_HPP
 
+#include "morok/core/Xoshiro256.hpp"
+#include "morok/ir/IRRandom.hpp"
+
 #include "llvm/IR/PassManager.h"
+
+#include <cstdint>
 
 namespace llvm {
 class Module;
@@ -26,9 +31,10 @@ namespace morok::passes {
 /// Inject a startup debugger-denial check.  Returns true if code was added.
 bool antiDebuggingModule(llvm::Module &M);
 
-/// Inject a startup inline-hook prologue check.  Returns true if code was
-/// added.
-bool antiHookingModule(llvm::Module &M);
+/// Inject a startup inline-hook prologue check.  The probed symbol name is
+/// cloaked inline (never a readable string), keyed off `rng`.  Returns true if
+/// code was added.
+bool antiHookingModule(llvm::Module &M, morok::ir::IRRandom &rng);
 
 /// Scramble Objective-C metadata; a no-op (returns false) on modules without
 /// it.
@@ -42,8 +48,14 @@ public:
 
 class AntiHookingPass : public llvm::PassInfoMixin<AntiHookingPass> {
 public:
+    explicit AntiHookingPass(std::uint64_t seed = 0x1337)
+        : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
+
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
     static bool isRequired() { return true; }
+
+private:
+    core::Xoshiro256pp engine_;
 };
 
 class AntiClassDumpPass : public llvm::PassInfoMixin<AntiClassDumpPass> {

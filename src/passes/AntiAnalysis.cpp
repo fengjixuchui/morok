@@ -9,6 +9,8 @@
 
 #include "morok/passes/AntiAnalysis.hpp"
 
+#include "morok/ir/SymbolCloak.hpp"
+
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -56,7 +58,7 @@ bool antiDebuggingModule(Module &M) {
     return true;
 }
 
-bool antiHookingModule(Module &M) {
+bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ptr = PointerType::getUnqual(ctx);
@@ -70,7 +72,8 @@ bool antiHookingModule(Module &M) {
 
     Function *ctor = makeCtorShell(M, "morok.antihook");
     IRBuilder<> B(&ctor->getEntryBlock());
-    Constant *sym = B.CreateGlobalString("MSHookFunction", "morok.hooksym");
+    // The probed symbol is cloaked inline — never a readable "MSHookFunction".
+    Value *sym = ir::emitCloakedSymbol(B, M, "MSHookFunction", rng);
     // RTLD_DEFAULT == (void*)-2; build it at pointer width so inttoptr does not
     // zero-extend a 32-bit value into the wrong handle.
     auto *i64 = Type::getInt64Ty(ctx);
@@ -124,8 +127,9 @@ PreservedAnalyses AntiDebuggingPass::run(Module &M, ModuleAnalysisManager &) {
                                   : PreservedAnalyses::all();
 }
 PreservedAnalyses AntiHookingPass::run(Module &M, ModuleAnalysisManager &) {
-    return antiHookingModule(M) ? PreservedAnalyses::none()
-                                : PreservedAnalyses::all();
+    ir::IRRandom rng(engine_);
+    return antiHookingModule(M, rng) ? PreservedAnalyses::none()
+                                     : PreservedAnalyses::all();
 }
 PreservedAnalyses AntiClassDumpPass::run(Module &M, ModuleAnalysisManager &) {
     return antiClassDumpModule(M) ? PreservedAnalyses::none()
