@@ -54,6 +54,17 @@ cmake --build build
 ctest --test-dir build -j
 ```
 
+Or run the whole thing — build plus the *entire* suite (core logic / property
+tests, config tests, the LLVM-linked per-pass IR tests, the `c -> clang
+--morok--> binary` differential tests, and the full `programs/` compile sweep at
+`high` and `max` settings) — with the single top-level entrypoint:
+
+```sh
+./run_tests.sh            # incremental build + everything
+./run_tests.sh --clean    # wipe build/ and reconfigure first
+./run_tests.sh -L ir      # just one label (core/config/ir/e2e/programs/max)
+```
+
 The pure layers (`morok::core`, `morok::config`) and their tests build even if
 no usable LLVM is found; the IR/plugin layers are skipped in that case.
 
