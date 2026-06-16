@@ -163,6 +163,10 @@ std::optional<VmOp> binaryOpcode(BinaryOperator &BO, unsigned Width) {
     return VmOp::AShr;
 }
 
+bool safeNarrowBitwise(VmOp Op) {
+    return Op == VmOp::And || Op == VmOp::Or || Op == VmOp::Xor;
+}
+
 std::optional<VmOp> icmpOpcode(ICmpInst &Cmp, unsigned Width) {
     auto *LhsTy = dyn_cast<IntegerType>(Cmp.getOperand(0)->getType());
     auto *RhsTy = dyn_cast<IntegerType>(Cmp.getOperand(1)->getType());
@@ -233,6 +237,20 @@ bool appendInstr(Program &P, const VmInstr &Instr,
 }
 
 std::optional<std::uint8_t>
+materializeImmediate(std::uint64_t Imm, Program &P, std::uint32_t &NextReg,
+                     const VirtualizationParams &Params) {
+    std::uint8_t Reg = 0;
+    if (!newRegister(NextReg, Params, Reg))
+        return std::nullopt;
+    if (!appendInstr(P,
+                     VmInstr{VmOp::Const, Reg, 0, 0,
+                             Imm & widthMask(P.width)},
+                     Params))
+        return std::nullopt;
+    return Reg;
+}
+
+std::optional<std::uint8_t>
 materializeOperand(Value *V, Program &P,
                    DenseMap<const Value *, std::uint8_t> &Regs,
                    std::uint32_t &NextReg, const VirtualizationParams &Params) {
@@ -243,13 +261,11 @@ materializeOperand(Value *V, Program &P,
     if (!CI || CI->getBitWidth() > 64)
         return std::nullopt;
 
-    std::uint8_t Reg = 0;
-    if (!newRegister(NextReg, Params, Reg))
-        return std::nullopt;
     const std::uint64_t Imm = CI->getZExtValue() & widthMask(P.width);
-    if (!appendInstr(P, VmInstr{VmOp::Const, Reg, 0, 0, Imm}, Params))
-        return std::nullopt;
-    Regs[V] = Reg;
+    std::optional<std::uint8_t> Reg =
+        materializeImmediate(Imm, P, NextReg, Params);
+    if (Reg)
+        Regs[V] = *Reg;
     return Reg;
 }
 
@@ -277,10 +293,17 @@ std::optional<Program> buildProgram(Function &F,
     bool SawReturn = false;
     for (Instruction &I : BB) {
         if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
-            auto Op = binaryOpcode(*BO, P.width);
+            auto *BOTy = dyn_cast<IntegerType>(BO->getType());
+            if (!BOTy || !supportedWidth(BOTy->getBitWidth()) ||
+                BOTy->getBitWidth() > P.width)
+                return std::nullopt;
+            auto Op = binaryOpcode(*BO, BOTy->getBitWidth());
             if (!Op)
                 return std::nullopt;
-            if (!BO->getType()->isIntegerTy(P.width))
+            const bool SameWidth = BOTy->getBitWidth() == P.width;
+            const bool NarrowBitwise =
+                BOTy->getBitWidth() < P.width && safeNarrowBitwise(*Op);
+            if (!SameWidth && !NarrowBitwise)
                 return std::nullopt;
             auto L =
                 materializeOperand(BO->getOperand(0), P, Regs, NextReg, Params);
@@ -292,6 +315,31 @@ std::optional<Program> buildProgram(Function &F,
             if (!newRegister(NextReg, Params, Dst))
                 return std::nullopt;
             if (!appendInstr(P, VmInstr{*Op, Dst, *L, *R, 0}, Params))
+                return std::nullopt;
+            Regs[&I] = Dst;
+            continue;
+        }
+
+        if (auto *SExt = dyn_cast<SExtInst>(&I)) {
+            auto *DstTy = dyn_cast<IntegerType>(SExt->getType());
+            auto *SrcTy = dyn_cast<IntegerType>(SExt->getOperand(0)->getType());
+            if (!DstTy || !SrcTy || DstTy->getBitWidth() != P.width ||
+                SrcTy->getBitWidth() != 1)
+                return std::nullopt;
+            auto Cond =
+                materializeOperand(SExt->getOperand(0), P, Regs, NextReg,
+                                   Params);
+            auto AllOnes =
+                materializeImmediate(widthMask(P.width), P, NextReg, Params);
+            auto Zero = materializeImmediate(0, P, NextReg, Params);
+            if (!Cond || !AllOnes || !Zero)
+                return std::nullopt;
+            std::uint8_t Dst = 0;
+            if (!newRegister(NextReg, Params, Dst))
+                return std::nullopt;
+            if (!appendInstr(P,
+                             VmInstr{VmOp::Select, Dst, *Cond, *AllOnes, *Zero},
+                             Params))
                 return std::nullopt;
             Regs[&I] = Dst;
             continue;

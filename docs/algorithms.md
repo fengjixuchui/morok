@@ -453,8 +453,9 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   block, no calls or memory, unflagged modular arithmetic/bitwise/constant
   shifts, integer comparisons, and zero-extension of narrower integer results
   such as `icmp` booleans.  Branchless `select` over a one-bit condition and
-  same-width integer values is also supported.  Unsupported IR is left untouched
-  rather than approximated.
+  same-width integer values is also supported, as are narrow boolean
+  `and`/`or`/`xor` predicate compositions and `sext i1` signed-mask idioms.
+  Unsupported IR is left untouched rather than approximated.
 - The lifted function becomes a native wrapper that calls an internal
   `morok.vm.<function>.exec` helper.  The original computation is encoded as a
   private `morok.vm.bytecode.*` byte array; bytecode fields are first randomized

@@ -4789,6 +4789,58 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("virtualizeModule lifts branchless boolean predicates and masks") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @vm_predicate_mask(i32 %a, i32 %b, i32 %c) {
+entry:
+  %lt = icmp slt i32 %a, %b
+  %gt = icmp sgt i32 %b, %c
+  %both = and i1 %lt, %gt
+  %either = or i1 %lt, %gt
+  %flip = xor i1 %both, %either
+  %mask = sext i1 %flip to i32
+  %sel = select i1 %both, i32 %mask, i32 %a
+  %out = xor i32 %sel, %mask
+  ret i32 %out
+}
+)ir");
+    Function *F = M->getFunction("vm_predicate_mask");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1551);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/32, /*max_registers=*/48},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.vm_predicate_mask.exec");
+    REQUIRE(Helper);
+    CHECK(countGlobals(*M, "morok.vm.bytecode") == 1u);
+    CHECK(countGlobals(*M, "morok.vm.targets") == 1u);
+
+    std::size_t wrapperCalls = 0;
+    std::size_t wrapperBinops = 0;
+    std::size_t wrapperCmps = 0;
+    std::size_t wrapperSelects = 0;
+    std::size_t wrapperSexts = 0;
+    for (Instruction &I : instructions(*F)) {
+        wrapperCalls += isa<CallInst>(&I) ? 1u : 0u;
+        wrapperBinops += isa<BinaryOperator>(&I) ? 1u : 0u;
+        wrapperCmps += isa<ICmpInst>(&I) ? 1u : 0u;
+        wrapperSelects += isa<SelectInst>(&I) ? 1u : 0u;
+        wrapperSexts += isa<SExtInst>(&I) ? 1u : 0u;
+    }
+    CHECK(wrapperCalls == 1u);
+    CHECK(wrapperBinops == 0u);
+    CHECK(wrapperCmps == 0u);
+    CHECK(wrapperSelects == 0u);
+    CHECK(wrapperSexts == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule lifts one-bit integer functions") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
