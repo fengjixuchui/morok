@@ -3536,6 +3536,52 @@ join:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("stateOpaquePredicatesFunction mixes floating live terms") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @stateful_fp(float %a, double %b, i1 %flag) {
+entry:
+  %fla.state = alloca i32, align 4
+  store i32 7, ptr %fla.state, align 4
+  br i1 %flag, label %body, label %alt
+body:
+  %b32 = fptrunc double %b to float
+  %sum = fadd float %a, %b32
+  %cmp = fcmp ogt float %sum, %a
+  %out = select i1 %cmp, i32 1, i32 2
+  ret i32 %out
+alt:
+  ret i32 0
+}
+)ir");
+    Function *F = M->getFunction("stateful_fp");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1411);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::stateOpaquePredicatesFunction(
+        *F, {/*probability=*/100, /*max_blocks=*/4, /*max_terms=*/4}, rng));
+
+    bool hasFpTerm = false;
+    bool hasTokenMix = false;
+    bool hasPredicate = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpTerm |= BC->getName().starts_with("morok.stateop.term.fp") &&
+                         (BC->getSrcTy()->isFloatTy() ||
+                          BC->getSrcTy()->isDoubleTy()) &&
+                         BC->getDestTy()->isIntegerTy();
+        hasTokenMix |= I.getName().starts_with("morok.stateop.token.mix");
+        hasPredicate |= I.getName().starts_with("morok.stateop.pred");
+    }
+
+    CHECK(hasFpTerm);
+    CHECK(hasTokenMix);
+    CHECK(hasPredicate);
+    CHECK(countNamedAllocas(*F, "morok.stateop.shadow") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("stateOpaquePredicatesFunction honors zero probability") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

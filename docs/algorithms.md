@@ -116,11 +116,13 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `fla.state`, so it runs after NiState/EntFla/CSM/plain flattening.  Selected
   blocks are split and guarded with an opaque-true predicate before their first
   real instruction.
-- The predicate loads the current dispatcher state, mixes it with integer
-  function arguments and live integer values into `morok.stateop.token`, then
-  stores that token to two volatile slots in `morok.stateop.shadow`.  The
-  volatile reloads xor to zero at runtime but remain opaque to InstCombine and
-  scalar symbolic simplifiers.
+- The predicate loads the current dispatcher state, mixes it with scalar integer
+  and floating-point function arguments/live values into `morok.stateop.token`,
+  then stores that token to two volatile slots in `morok.stateop.shadow`.
+  Floating-point terms (`half`, `bfloat`, `float`, `double`) are bitcast to
+  equal-width integer carriers and reduced to the i32 token width.  The volatile
+  reloads xor to zero at runtime but remain opaque to InstCombine and scalar
+  symbolic simplifiers.
 - The guard checks an MBA identity over the state:
   `(((state^k)+token')^m)^m-token' == state^k`, where `token'` includes the
   volatile cancellation.  Runtime truth is guaranteed, but the expression is
@@ -834,7 +836,7 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 ## Passes without a pure numeric core (IR-structure only)
 - BogusControlFlow: opaque hardware-predicate edges; `bcf_prob`/loop/complexity/entropy_chain/junk_asm.
 - NonInvertibleState: encoded-state flattening with lossy keyed next-state hash.
-- StateOpaquePredicates: MBA opaque guards over flattened dispatcher state.
+- StateOpaquePredicates: MBA opaque guards over flattened dispatcher state plus scalar integer/FP terms.
 - InterproceduralFsm: flattened state stores call mutually-recursive transition helpers.
 - DataEntangledFlattening: switch dispatcher with live-data/previous-state transition tokens.
 - ChaosStateMachine: switch dispatcher driven by logistic or single-cycle T-function state maps.

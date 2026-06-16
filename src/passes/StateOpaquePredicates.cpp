@@ -8,8 +8,8 @@
 // before their first real instruction.  The guard compares an MBA expression
 // over the current `fla.state` with its reconstructed value; the cancellation
 // term is routed through volatile shadow memory, and the token is mixed with
-// live integer values.  Runtime semantics are unchanged because the false edge
-// is opaque-dead, but the predicate is not a pure algebraic identity.
+// live scalar integer/FP values.  Runtime semantics are unchanged because the
+// false edge is opaque-dead, but the predicate is not a pure algebraic identity.
 
 #include "morok/passes/StateOpaquePredicates.hpp"
 
@@ -80,9 +80,25 @@ Instruction *splitPoint(BasicBlock &BB) {
     return nullptr;
 }
 
+bool supportedFloatType(Type *Ty) {
+    return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+           Ty->isDoubleTy();
+}
+
+IntegerType *integerCarrierFor(Type *Ty) {
+    if (Ty->isHalfTy() || Ty->isBFloatTy())
+        return IntegerType::get(Ty->getContext(), 16);
+    if (Ty->isFloatTy())
+        return IntegerType::get(Ty->getContext(), 32);
+    if (Ty->isDoubleTy())
+        return IntegerType::get(Ty->getContext(), 64);
+    return nullptr;
+}
+
 void addTerm(Value *V, SmallPtrSetImpl<Value *> &Seen,
              std::vector<Value *> &Terms) {
-    if (!V || !V->getType()->isIntegerTy())
+    if (!V ||
+        (!V->getType()->isIntegerTy() && !supportedFloatType(V->getType())))
         return;
     if (Seen.insert(V).second)
         Terms.push_back(V);
@@ -121,6 +137,16 @@ Value *asI32(IRBuilder<NoFolder> &B, Value *V) {
             return B.CreateZExt(V, I32, "morok.stateop.term.zext");
         if (Bits > 32)
             return B.CreateTrunc(V, I32, "morok.stateop.term.trunc");
+    }
+    if (supportedFloatType(V->getType())) {
+        Value *Bits = B.CreateBitCast(V, integerCarrierFor(V->getType()),
+                                      "morok.stateop.term.fp");
+        auto *CarrierTy = cast<IntegerType>(Bits->getType());
+        if (CarrierTy->getBitWidth() < 32)
+            return B.CreateZExt(Bits, I32, "morok.stateop.term.zext");
+        if (CarrierTy->getBitWidth() > 32)
+            return B.CreateTrunc(Bits, I32, "morok.stateop.term.trunc");
+        return Bits;
     }
     return nullptr;
 }

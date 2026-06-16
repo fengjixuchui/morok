@@ -29,7 +29,8 @@ namespace morok::passes {
 struct StateOpParams {
     std::uint32_t probability = 45; ///< per-block chance, 0..100
     std::uint32_t max_blocks = 16;  ///< per-function transformed block cap
-    std::uint32_t max_terms = 4;    ///< live integer terms mixed into token
+    std::uint32_t max_terms = 4;    ///< live scalar integer/FP terms mixed into
+                                    ///< token
 };
 
 /// Add stateful MBA opaque predicates to an already-flattened function.
