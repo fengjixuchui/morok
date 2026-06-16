@@ -647,6 +647,38 @@ TEST_CASE("mbaFunction caps selected operators per layer") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("mbaFunction rewrites constant shift operators") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @mba_shift(i32 %a) {
+entry:
+  %0 = shl  i32 %a, 3
+  %1 = lshr i32 %0, 2
+  %2 = ashr i32 %1, 1
+  ret i32 %2
+}
+)ir");
+    Function *F = M->getFunction("mba_shift");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(73);
+    morok::ir::IRRandom rng(engine);
+    // Shifts used to be skipped entirely (emitMba returned nullptr); the pass
+    // must now report a change and emit the multiply form for `shl`.
+    CHECK(morok::passes::mbaFunction(
+        *F, {/*prob=*/100, /*layers=*/1, /*heuristic=*/false}, rng));
+    CHECK(countOpcode(*M, Instruction::Mul) >= 1u);
+    // The constant `shl a, 3` is gone — it became `a * 8`.
+    bool hasPlainShlByThree = false;
+    for (Instruction &I : instructions(*F))
+        if (auto *BO = dyn_cast<BinaryOperator>(&I))
+            if (BO->getOpcode() == Instruction::Shl)
+                if (auto *K = dyn_cast<ConstantInt>(BO->getOperand(1)))
+                    hasPlainShlByThree |= K->getZExtValue() == 3;
+    CHECK_FALSE(hasPlainShlByThree);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("optimizerAmplifyFunction builds input-selected equivalent forms") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

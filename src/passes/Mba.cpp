@@ -48,6 +48,7 @@ Value *emitMba(BinaryOperator *bo, const MbaParams &params, ir::IRRandom &rng) {
     Value *a = bo->getOperand(0);
     Value *b = bo->getOperand(1);
     auto *ty = cast<IntegerType>(bo->getType());
+    const unsigned width = ty->getBitWidth();
 
     auto two = [&](Value *v) {
         return B.CreateShl(v, ConstantInt::get(ty, 1));
@@ -75,6 +76,33 @@ Value *emitMba(BinaryOperator *bo, const MbaParams &params, ir::IRRandom &rng) {
         result = B.CreateSub(
             B.CreateMul(a, B.CreateAdd(b, ConstantInt::get(ty, 1))), a);
         break;
+    case Instruction::Shl: { // a << k  ==  a * 2^k  (constant k < width)
+        auto *k = dyn_cast<ConstantInt>(b);
+        if (!k || k->uge(width))
+            return nullptr;
+        APInt factor(width, 0);
+        factor.setBit(static_cast<unsigned>(k->getZExtValue()));
+        result = B.CreateMul(a, ConstantInt::get(ty, factor));
+        break;
+    }
+    case Instruction::LShr: { // a >>u k  ==  (a & high-bits) >>u k
+        auto *k = dyn_cast<ConstantInt>(b);
+        if (!k || k->isZero() || k->uge(width))
+            return nullptr;
+        const unsigned kk = static_cast<unsigned>(k->getZExtValue());
+        APInt mask = APInt::getHighBitsSet(width, width - kk);
+        result = B.CreateLShr(B.CreateAnd(a, ConstantInt::get(ty, mask)), kk);
+        break;
+    }
+    case Instruction::AShr: { // ((a^r) >>s k) ^ (r >>s k) — XOR distributes
+        auto *k = dyn_cast<ConstantInt>(b);
+        if (!k || k->isZero() || k->uge(width))
+            return nullptr;
+        Value *r = rng.constInt(ty);
+        result = B.CreateXor(B.CreateAShr(B.CreateXor(a, r), b),
+                             B.CreateAShr(r, b));
+        break;
+    }
     default:
         return nullptr;
     }

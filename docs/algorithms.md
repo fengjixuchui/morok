@@ -37,6 +37,10 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   eligible set in one pass invocation.
 - Heuristic noise = `zeroTerm` (k terms) added/subtracted; always nets to 0.
 - Carry lemma `x+r == (x^r)+2*(x&r)` underpins the random-constant variants.
+- Constant shifts are also rewritten (mirroring substitution): `shl a, k` ⇒
+  `a * 2^k`; `lshr a, k` ⇒ `(a & high-bits) >>u k`; `ashr a, k` ⇒
+  `((a^r) >>s k) ^ (r >>s k)`.  Variable / out-of-range shift amounts stay
+  untouched.
 
 ## String encryption — `core/Galois8`
 - i8 arrays: Vernam-GF8. Per byte: random pad `k1`, random non-zero `k2`; store
