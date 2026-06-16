@@ -131,9 +131,26 @@ std::uint32_t normalizedEntries(const MicrocodeStressParams &Params,
     return nextPow2(Requested);
 }
 
+bool isSupportedScalarFp(Type *Ty) {
+    return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+           Ty->isDoubleTy();
+}
+
+IntegerType *integerCarrierForFp(Type *Ty) {
+    if (Ty->isHalfTy() || Ty->isBFloatTy())
+        return IntegerType::get(Ty->getContext(), 16);
+    if (Ty->isFloatTy())
+        return IntegerType::get(Ty->getContext(), 32);
+    if (Ty->isDoubleTy())
+        return IntegerType::get(Ty->getContext(), 64);
+    return nullptr;
+}
+
 void addTerm(Value *V, SmallPtrSetImpl<Value *> &Seen,
              std::vector<Value *> &Terms) {
-    if (!V || (!V->getType()->isIntegerTy() && !V->getType()->isPointerTy()))
+    if (!V || (!V->getType()->isIntegerTy() &&
+               !V->getType()->isPointerTy() &&
+               !isSupportedScalarFp(V->getType())))
         return;
     if (Seen.insert(V).second)
         Terms.push_back(V);
@@ -161,6 +178,15 @@ Value *asI64(Builder &B, Value *V) {
         return V;
     if (V->getType()->isPointerTy())
         return B.CreatePtrToInt(V, I64, "morok.micro.term.ptr");
+    if (isSupportedScalarFp(V->getType())) {
+        auto *CarrierTy = integerCarrierForFp(V->getType());
+        if (!CarrierTy)
+            return nullptr;
+        Value *Bits = B.CreateBitCast(V, CarrierTy, "morok.micro.term.fp");
+        if (CarrierTy->getBitWidth() < 64)
+            return B.CreateZExt(Bits, I64, "morok.micro.term.zext");
+        return Bits;
+    }
     auto *IT = dyn_cast<IntegerType>(V->getType());
     if (!IT)
         return nullptr;

@@ -830,9 +830,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   larger than the number of unique destinations, so microcode sees a computed
   table with many opaque holes rather than a compact source switch.
 - The table index is derived from a volatile private `morok.micro.seed`, live
-  integer/pointer terms at the split point, and per-build odd multipliers, then
-  masked into the table range.  Because all entries are semantically safe, the
-  index may be genuinely data-derived without changing program results.
+  integer/pointer/scalar-FP terms at the split point, and per-build odd
+  multipliers, then masked into the table range.  FP terms are bitcast to
+  same-width integer carriers before the i64 mix reduction.  Because all entries
+  are semantically safe, the index may be genuinely data-derived without
+  changing program results.
 - Decoy destinations perform configurable volatile loads/stores through
   `ptrtoint -> xor -> xor -> inttoptr` aliases into a per-function
   `morok.micro.scratch` frame before branching to the original body.  This

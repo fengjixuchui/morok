@@ -4,9 +4,9 @@
 //
 // morok/passes/MicrocodeStress.hpp — sparse computed jump-table stress.
 //
-// Emits semantics-neutral blockaddress tables and aliased decoy destinations to
-// stress decompiler microcode CFG/lvar recovery without encoding source CFG
-// edges.
+// Emits live-data-keyed, semantics-neutral blockaddress tables and aliased decoy
+// destinations to stress decompiler microcode CFG/lvar recovery without
+// encoding source CFG edges.
 
 #ifndef MOROK_PASSES_MICROCODE_STRESS_HPP
 #define MOROK_PASSES_MICROCODE_STRESS_HPP

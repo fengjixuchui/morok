@@ -6586,6 +6586,60 @@ join:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("microcodeStressFunction mixes floating live terms") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @microstress_fp(float %a, double %b, i32 %salt) {
+entry:
+  %b32 = fptrunc double %b to float
+  %sum = fadd float %a, %b32
+  %bits = bitcast float %sum to i32
+  %x = xor i32 %bits, %salt
+  %c = icmp sgt i32 %x, 17
+  br i1 %c, label %left, label %right
+left:
+  %l = add i32 %x, %salt
+  br label %join
+right:
+  %r = sub i32 %x, %salt
+  br label %join
+join:
+  %p = phi i32 [ %l, %left ], [ %r, %right ]
+  ret i32 %p
+}
+)ir");
+    Function *F = M->getFunction("microstress_fp");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(413);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::microcodeStressFunction(
+        *F,
+        {/*probability=*/100, /*max_sites=*/1, /*table_entries=*/16,
+         /*decoy_blocks=*/4, /*alias_stores=*/2},
+        rng));
+
+    bool hasFpTerm = false;
+    bool hasMixTerm = false;
+    bool hasIndirect = false;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *BC = dyn_cast<BitCastInst>(&I))
+            hasFpTerm |=
+                BC->getName().starts_with("morok.micro.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
+        hasMixTerm |= I.getName().starts_with("morok.micro.mix.term");
+        hasIndirect |= isa<IndirectBrInst>(&I);
+    }
+
+    CHECK(hasFpTerm);
+    CHECK(hasMixTerm);
+    CHECK(hasIndirect);
+    CHECK(countGlobals(*M, "morok.micro.seed") == 1u);
+    CHECK(countGlobals(*M, "morok.micro.table") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("microcodeStressFunction honors zero probability") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
