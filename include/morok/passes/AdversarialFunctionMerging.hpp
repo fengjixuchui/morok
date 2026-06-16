@@ -30,8 +30,8 @@ struct AdversarialMergeParams {
 };
 
 /// Fuse unrelated same-signature functions behind hidden selector dispatchers
-/// and outline selected scalar operation/comparison fragments into shared
-/// noinline helpers.
+/// and outline selected scalar integer/floating operation/comparison fragments
+/// into shared noinline helpers.
 bool adversarialFunctionMergingModule(llvm::Module &M,
                                       const AdversarialMergeParams &params,
                                       morok::ir::IRRandom &rng);

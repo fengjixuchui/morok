@@ -59,12 +59,23 @@ struct MergedFunction {
 enum class OutlineKind : unsigned {
     Binary,
     ICmp,
+    FBinary,
+    FCmp,
+};
+
+enum class ScalarKind : unsigned {
+    Integer,
+    Half,
+    BFloat,
+    Float,
+    Double,
 };
 
 struct OutlineKey {
     OutlineKind kind = OutlineKind::Binary;
     unsigned code = 0;
     unsigned bits = 0;
+    ScalarKind scalar = ScalarKind::Integer;
 };
 
 struct OutlineHelper {
@@ -105,6 +116,19 @@ bool supportedOpcode(unsigned Opcode) {
     }
 }
 
+bool supportedFloatOpcode(unsigned Opcode) {
+    switch (Opcode) {
+    case Instruction::FAdd:
+    case Instruction::FSub:
+    case Instruction::FMul:
+    case Instruction::FDiv:
+    case Instruction::FRem:
+        return true;
+    default:
+        return false;
+    }
+}
+
 StringRef opcodeName(unsigned Opcode) {
     switch (Opcode) {
     case Instruction::Add:
@@ -124,6 +148,23 @@ StringRef opcodeName(unsigned Opcode) {
     }
 }
 
+StringRef floatOpcodeName(unsigned Opcode) {
+    switch (Opcode) {
+    case Instruction::FAdd:
+        return "fadd";
+    case Instruction::FSub:
+        return "fsub";
+    case Instruction::FMul:
+        return "fmul";
+    case Instruction::FDiv:
+        return "fdiv";
+    case Instruction::FRem:
+        return "frem";
+    default:
+        return "fop";
+    }
+}
+
 bool supportedPredicate(CmpInst::Predicate Pred) {
     switch (Pred) {
     case CmpInst::ICMP_EQ:
@@ -136,6 +177,30 @@ bool supportedPredicate(CmpInst::Predicate Pred) {
     case CmpInst::ICMP_SGE:
     case CmpInst::ICMP_SLT:
     case CmpInst::ICMP_SLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool supportedFloatPredicate(CmpInst::Predicate Pred) {
+    switch (Pred) {
+    case CmpInst::FCMP_FALSE:
+    case CmpInst::FCMP_OEQ:
+    case CmpInst::FCMP_OGT:
+    case CmpInst::FCMP_OGE:
+    case CmpInst::FCMP_OLT:
+    case CmpInst::FCMP_OLE:
+    case CmpInst::FCMP_ONE:
+    case CmpInst::FCMP_ORD:
+    case CmpInst::FCMP_UNO:
+    case CmpInst::FCMP_UEQ:
+    case CmpInst::FCMP_UGT:
+    case CmpInst::FCMP_UGE:
+    case CmpInst::FCMP_ULT:
+    case CmpInst::FCMP_ULE:
+    case CmpInst::FCMP_UNE:
+    case CmpInst::FCMP_TRUE:
         return true;
     default:
         return false;
@@ -169,9 +234,112 @@ StringRef predicateName(CmpInst::Predicate Pred) {
     }
 }
 
+StringRef floatPredicateName(CmpInst::Predicate Pred) {
+    switch (Pred) {
+    case CmpInst::FCMP_FALSE:
+        return "fcmp.false";
+    case CmpInst::FCMP_OEQ:
+        return "fcmp.oeq";
+    case CmpInst::FCMP_OGT:
+        return "fcmp.ogt";
+    case CmpInst::FCMP_OGE:
+        return "fcmp.oge";
+    case CmpInst::FCMP_OLT:
+        return "fcmp.olt";
+    case CmpInst::FCMP_OLE:
+        return "fcmp.ole";
+    case CmpInst::FCMP_ONE:
+        return "fcmp.one";
+    case CmpInst::FCMP_ORD:
+        return "fcmp.ord";
+    case CmpInst::FCMP_UNO:
+        return "fcmp.uno";
+    case CmpInst::FCMP_UEQ:
+        return "fcmp.ueq";
+    case CmpInst::FCMP_UGT:
+        return "fcmp.ugt";
+    case CmpInst::FCMP_UGE:
+        return "fcmp.uge";
+    case CmpInst::FCMP_ULT:
+        return "fcmp.ult";
+    case CmpInst::FCMP_ULE:
+        return "fcmp.ule";
+    case CmpInst::FCMP_UNE:
+        return "fcmp.une";
+    case CmpInst::FCMP_TRUE:
+        return "fcmp.true";
+    default:
+        return "fcmp";
+    }
+}
+
+bool supportedFloatType(Type *Ty) {
+    return Ty->isHalfTy() || Ty->isBFloatTy() || Ty->isFloatTy() ||
+           Ty->isDoubleTy();
+}
+
+unsigned scalarBits(Type *Ty) {
+    if (Ty->isHalfTy() || Ty->isBFloatTy())
+        return 16;
+    if (Ty->isFloatTy())
+        return 32;
+    if (Ty->isDoubleTy())
+        return 64;
+    return 0;
+}
+
+ScalarKind scalarKind(Type *Ty) {
+    if (Ty->isHalfTy())
+        return ScalarKind::Half;
+    if (Ty->isBFloatTy())
+        return ScalarKind::BFloat;
+    if (Ty->isFloatTy())
+        return ScalarKind::Float;
+    if (Ty->isDoubleTy())
+        return ScalarKind::Double;
+    return ScalarKind::Integer;
+}
+
+Type *typeForKey(LLVMContext &Ctx, const OutlineKey &Key) {
+    switch (Key.scalar) {
+    case ScalarKind::Integer:
+        return IntegerType::get(Ctx, Key.bits);
+    case ScalarKind::Half:
+        return Type::getHalfTy(Ctx);
+    case ScalarKind::BFloat:
+        return Type::getBFloatTy(Ctx);
+    case ScalarKind::Float:
+        return Type::getFloatTy(Ctx);
+    case ScalarKind::Double:
+        return Type::getDoubleTy(Ctx);
+    }
+    return nullptr;
+}
+
+std::string scalarSuffix(const OutlineKey &Key) {
+    switch (Key.scalar) {
+    case ScalarKind::Integer:
+        return (Twine("i") + Twine(Key.bits)).str();
+    case ScalarKind::Half:
+        return "f16";
+    case ScalarKind::BFloat:
+        return "bf16";
+    case ScalarKind::Float:
+        return "f32";
+    case ScalarKind::Double:
+        return "f64";
+    }
+    return "scalar";
+}
+
 std::string outlineName(const OutlineKey &Key) {
     if (Key.kind == OutlineKind::ICmp)
         return predicateName(static_cast<CmpInst::Predicate>(Key.code)).str();
+    if (Key.kind == OutlineKind::FCmp)
+        return floatPredicateName(static_cast<CmpInst::Predicate>(Key.code))
+            .str();
+    if (Key.kind == OutlineKind::FBinary)
+        return floatOpcodeName(Key.code).str();
     return opcodeName(Key.code).str();
 }
 
@@ -230,14 +398,20 @@ bool eligibleFunction(Function &F) {
 }
 
 bool eligibleOutline(BinaryOperator &BO) {
-    if (!supportedOpcode(BO.getOpcode()))
-        return false;
     if (BO.getName().starts_with("morok.afm."))
         return false;
-    auto *Ty = dyn_cast<IntegerType>(BO.getType());
-    if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 64)
+
+    if (supportedOpcode(BO.getOpcode())) {
+        auto *Ty = dyn_cast<IntegerType>(BO.getType());
+        if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 64)
+            return false;
+        return !BO.hasPoisonGeneratingFlags();
+    }
+
+    if (!supportedFloatOpcode(BO.getOpcode()) ||
+        !supportedFloatType(BO.getType()))
         return false;
-    return !BO.hasPoisonGeneratingFlags();
+    return BO.getFastMathFlags().none();
 }
 
 bool eligibleOutline(ICmpInst &CI) {
@@ -249,6 +423,17 @@ bool eligibleOutline(ICmpInst &CI) {
     if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 64)
         return false;
     return CI.getOperand(1)->getType() == Ty;
+}
+
+bool eligibleOutline(FCmpInst &FI) {
+    if (!supportedFloatPredicate(FI.getPredicate()))
+        return false;
+    if (FI.getName().starts_with("morok.afm."))
+        return false;
+    Type *Ty = FI.getOperand(0)->getType();
+    if (!supportedFloatType(Ty) || FI.getOperand(1)->getType() != Ty)
+        return false;
+    return FI.getFastMathFlags().none();
 }
 
 void addNoInlineBarrier(Function *F) {
@@ -467,7 +652,7 @@ GlobalVariable *createOutlineKey(Module &M, const OutlineKey &Key,
     auto *GV = new GlobalVariable(
         M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
         ConstantInt::get(I64, Rng.next()),
-        (Twine("morok.afm.key.outline.") + Name + ".i" + Twine(Key.bits))
+        (Twine("morok.afm.key.outline.") + Name + "." + scalarSuffix(Key))
             .str());
     GV->setAlignment(Align(8));
     GV->setDSOLocal(true);
@@ -486,15 +671,17 @@ Value *castZero(Builder &B, Value *Zero64, IntegerType *Ty) {
 Function *createOutlineHelper(Module &M, const OutlineKey &Key,
                               ir::IRRandom &Rng) {
     LLVMContext &Ctx = M.getContext();
-    auto *ArgTy = IntegerType::get(Ctx, Key.bits);
-    auto *RetTy = Key.kind == OutlineKind::ICmp ? Type::getInt1Ty(Ctx) : ArgTy;
+    auto *ArgTy = typeForKey(Ctx, Key);
+    const bool IsCompare =
+        Key.kind == OutlineKind::ICmp || Key.kind == OutlineKind::FCmp;
+    auto *RetTy = IsCompare ? Type::getInt1Ty(Ctx) : ArgTy;
     auto *I64 = Type::getInt64Ty(Ctx);
     auto *FT = FunctionType::get(RetTy, {ArgTy, ArgTy}, false);
     const std::string Name = outlineName(Key);
     auto *Fn =
         Function::Create(FT, GlobalValue::InternalLinkage,
-                         (Twine("morok.afm.outline.") + Name + ".i" +
-                          Twine(Key.bits))
+                         (Twine("morok.afm.outline.") + Name + "." +
+                          scalarSuffix(Key))
                              .str(),
                          &M);
     Fn->setDSOLocal(true);
@@ -513,6 +700,9 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
     if (Key.kind == OutlineKind::ICmp) {
         Base = B.CreateICmp(static_cast<CmpInst::Predicate>(Key.code), L, R,
                             "morok.afm.outline.base");
+    } else if (Key.kind == OutlineKind::FCmp) {
+        Base = B.CreateFCmp(static_cast<CmpInst::Predicate>(Key.code), L, R,
+                            "morok.afm.outline.base");
     } else {
         Base = B.CreateBinOp(static_cast<Instruction::BinaryOps>(Key.code), L,
                              R, "morok.afm.outline.base");
@@ -524,8 +714,20 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
     Bv->setVolatile(true);
     Bv->setAlignment(Align(8));
     Value *Zero64 = B.CreateXor(A, Bv, "morok.afm.outline.zero64");
-    Value *Zero = castZero(B, Zero64, cast<IntegerType>(RetTy));
-    B.CreateRet(B.CreateXor(Base, Zero, "morok.afm.outline.value"));
+    Value *Result = nullptr;
+    if (auto *RetIntTy = dyn_cast<IntegerType>(RetTy)) {
+        Value *Zero = castZero(B, Zero64, RetIntTy);
+        Result = B.CreateXor(Base, Zero, "morok.afm.outline.value");
+    } else {
+        auto *CarrierTy = IntegerType::get(Ctx, Key.bits);
+        Value *Bits =
+            B.CreateBitCast(Base, CarrierTy, "morok.afm.outline.bits");
+        Value *Zero = castZero(B, Zero64, CarrierTy);
+        Value *Mixed =
+            B.CreateXor(Bits, Zero, "morok.afm.outline.value.bits");
+        Result = B.CreateBitCast(Mixed, RetTy, "morok.afm.outline.value");
+    }
+    B.CreateRet(Result);
     return Fn;
 }
 
@@ -533,7 +735,7 @@ Function *getOutlineHelper(Module &M, std::vector<OutlineHelper> &Helpers,
                            const OutlineKey &Key, ir::IRRandom &Rng) {
     for (const OutlineHelper &H : Helpers)
         if (H.key.kind == Key.kind && H.key.code == Key.code &&
-            H.key.bits == Key.bits)
+            H.key.bits == Key.bits && H.key.scalar == Key.scalar)
             return H.helper;
     Function *Helper = createOutlineHelper(M, Key, Rng);
     Helpers.push_back({Key, Helper});
@@ -549,11 +751,19 @@ bool outlineFragments(Module &M, ArrayRef<Function *> ImplFunctions,
     for (Function *Impl : ImplFunctions) {
         for (Instruction &I : instructions(*Impl)) {
             if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
-                if (eligibleOutline(*BO))
-                    Targets.push_back({BO, {OutlineKind::Binary,
-                                            BO->getOpcode(),
-                                            cast<IntegerType>(BO->getType())
-                                                ->getBitWidth()}});
+                if (eligibleOutline(*BO)) {
+                    if (auto *Ty = dyn_cast<IntegerType>(BO->getType())) {
+                        Targets.push_back({BO, {OutlineKind::Binary,
+                                                BO->getOpcode(),
+                                                Ty->getBitWidth(),
+                                                ScalarKind::Integer}});
+                    } else {
+                        Targets.push_back({BO, {OutlineKind::FBinary,
+                                                BO->getOpcode(),
+                                                scalarBits(BO->getType()),
+                                                scalarKind(BO->getType())}});
+                    }
+                }
                 continue;
             }
             if (auto *CI = dyn_cast<ICmpInst>(&I)) {
@@ -562,7 +772,16 @@ bool outlineFragments(Module &M, ArrayRef<Function *> ImplFunctions,
                                             CI->getPredicate(),
                                             cast<IntegerType>(
                                                 CI->getOperand(0)->getType())
-                                                ->getBitWidth()}});
+                                                ->getBitWidth(),
+                                            ScalarKind::Integer}});
+                continue;
+            }
+            if (auto *FI = dyn_cast<FCmpInst>(&I)) {
+                Type *Ty = FI->getOperand(0)->getType();
+                if (eligibleOutline(*FI))
+                    Targets.push_back({FI, {OutlineKind::FCmp,
+                                            FI->getPredicate(),
+                                            scalarBits(Ty), scalarKind(Ty)}});
             }
         }
     }

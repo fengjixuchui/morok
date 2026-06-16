@@ -621,11 +621,15 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   call the shared dispatcher, whose switch calls the selected implementation.
   Function identity is preserved for external callers while call-graph recovery
   sees unrelated functions converge through one hidden selector surface.
-- Selected scalar integer `add/sub/mul/and/or/xor` and integer comparison
-  fragments inside the cloned implementations are outlined into shared
-  noinline/optnone `morok.afm.outline.*` helpers.  Helpers include volatile key
-  loads whose xor contributes a semantic zero, so they remain side-effecting to
-  the optimizer while returning the original operation result.
+- Selected scalar integer `add/sub/mul/and/or/xor`, unflagged scalar floating
+  `fadd/fsub/fmul/fdiv/frem`, integer comparison, and unflagged floating
+  comparison fragments inside the cloned implementations are outlined into
+  shared noinline/optnone `morok.afm.outline.*` helpers.  Helpers include
+  volatile key loads whose xor contributes a semantic zero, so they remain
+  side-effecting to the optimizer while returning the original operation
+  result.  Floating operation results apply that zero through raw integer
+  bitcasts rather than extra FP arithmetic, preserving signed-zero and NaN
+  payload bits from the outlined operation.
 - The pass skips varargs, declarations, generated `morok.*` functions,
   personality/EH functions, noreturn/naked functions, and functions already
   referenced by `blockaddress` constants.  The last guard avoids cloning
@@ -847,7 +851,7 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - Virtualization: encrypted per-function bytecode plus threaded computed-goto VM helpers.
 - HashGatedSelfDecrypt: VM bytecode globals get hash/context-gated lazy outer decryptors.
 - MutualGuardGraph: overlapping checksum nodes whose combined diff poisons scalar integer/FP returns.
-- AdversarialFunctionMerging: same-signature functions routed through shared selector dispatchers plus outlined integer scalar operation/comparison helpers (`i1..i64` operands, `i1` comparison results).
+- AdversarialFunctionMerging: same-signature functions routed through shared selector dispatchers plus outlined scalar integer/FP operation and comparison helpers.
 - AdversarialSelfTuning: cloned-candidate search over hardness metrics with best verified bundle replay.
 - PerBuildPolymorphism: seed-driven function/block order and volatile-zero scalar integer/FP return anchors.
 - PathExplosion: opaque-guarded input-derived loops with volatile symbolic stores and indirectbr dispatch.

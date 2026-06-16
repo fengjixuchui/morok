@@ -6345,6 +6345,128 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("adversarialFunctionMergingModule outlines floating operations") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define float @fp_a(float %a, float %b) {
+entry:
+  %x = fadd float %a, %b
+  %y = fmul float %x, %a
+  ret float %y
+}
+
+define float @fp_b(float %a, float %b) {
+entry:
+  %x = fsub float %a, %b
+  %y = fdiv float %x, %b
+  ret float %y
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(225);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::adversarialFunctionMergingModule(
+        *M,
+        {/*probability=*/100, /*max_groups=*/1, /*max_functions=*/2,
+         /*outline_probability=*/100, /*max_outlines=*/4},
+        rng));
+
+    CHECK(countFunctions(*M, "morok.afm.dispatch") == 1u);
+    CHECK(countFunctions(*M, "morok.afm.impl") == 2u);
+
+    bool hasFloatOutline = false;
+    bool helperHasBitCarrier = false;
+    unsigned implFloatOutlineCalls = 0;
+    for (Function &F : *M) {
+        if (F.getName().starts_with("morok.afm.outline.f")) {
+            hasFloatOutline = true;
+            CHECK(F.getReturnType()->isFloatTy());
+            CHECK(F.arg_size() == 2u);
+            for (Argument &A : F.args())
+                CHECK(A.getType()->isFloatTy());
+            for (Instruction &I : instructions(F))
+                if (auto *BC = dyn_cast<BitCastInst>(&I))
+                    helperHasBitCarrier |=
+                        BC->getSrcTy()->isFloatTy() ||
+                        BC->getDestTy()->isFloatTy();
+        }
+
+        if (!F.getName().starts_with("morok.afm.impl"))
+            continue;
+        for (Instruction &I : instructions(F))
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *Callee = CI->getCalledFunction())
+                    if (Callee->getName().starts_with("morok.afm.outline.f"))
+                        ++implFloatOutlineCalls;
+    }
+
+    CHECK(hasFloatOutline);
+    CHECK(helperHasBitCarrier);
+    CHECK(implFloatOutlineCalls == 4u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("adversarialFunctionMergingModule outlines floating comparisons") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i1 @fcmp_a(double %a, double %b) {
+entry:
+  %x = fcmp olt double %a, %b
+  ret i1 %x
+}
+
+define i1 @fcmp_b(double %a, double %b) {
+entry:
+  %x = fcmp uno double %a, %b
+  ret i1 %x
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(226);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::adversarialFunctionMergingModule(
+        *M,
+        {/*probability=*/100, /*max_groups=*/1, /*max_functions=*/2,
+         /*outline_probability=*/100, /*max_outlines=*/2},
+        rng));
+
+    CHECK(countFunctions(*M, "morok.afm.dispatch") == 1u);
+    CHECK(countFunctions(*M, "morok.afm.impl") == 2u);
+
+    bool hasFcmpOutline = false;
+    bool helperHasVolatileKey = false;
+    unsigned implFcmpOutlineCalls = 0;
+    for (Function &F : *M) {
+        if (F.getName().starts_with("morok.afm.outline.fcmp")) {
+            hasFcmpOutline = true;
+            CHECK(F.getReturnType()->isIntegerTy(1));
+            CHECK(F.arg_size() == 2u);
+            for (Argument &A : F.args())
+                CHECK(A.getType()->isDoubleTy());
+            for (Instruction &I : instructions(F))
+                if (auto *LI = dyn_cast<LoadInst>(&I))
+                    helperHasVolatileKey |=
+                        LI->isVolatile() &&
+                        LI->getPointerOperand()->getName().starts_with(
+                            "morok.afm.key.outline.fcmp");
+        }
+
+        if (!F.getName().starts_with("morok.afm.impl"))
+            continue;
+        for (Instruction &I : instructions(F))
+            if (auto *CI = dyn_cast<CallInst>(&I))
+                if (Function *Callee = CI->getCalledFunction())
+                    if (Callee->getName().starts_with(
+                            "morok.afm.outline.fcmp"))
+                        ++implFcmpOutlineCalls;
+    }
+
+    CHECK(hasFcmpOutline);
+    CHECK(helperHasVolatileKey);
+    CHECK(implFcmpOutlineCalls == 2u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("adversarialFunctionMergingModule honors zero probability") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
