@@ -406,16 +406,22 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - Eligible operations are wrapping scalar `i1` through `i8`
   `add/sub/mul/and/or/xor` binary operators, constant `shl/lshr/ashr` with
   shift amount less than the type width, plus scalar integer `icmp` predicates
-  over same-width `i1` through `i8` operands.  `nuw`/`nsw` arithmetic, `exact`
-  shifts, variable shifts, and out-of-range constant shifts are skipped because
-  replacing a potentially poison-producing operation with a total table load
-  would change LLVM semantics.
-- Each selected operator or comparison gets a private mutable `[65536 x i8]`
-  table indexed as `(zext(lhs) << 8) | zext(rhs)`.  Sub-byte operands are
-  zero-extended for the lookup; decoded arithmetic bytes are truncated back to
-  the source width, while decoded comparison bytes are truncated to `i1`.  The
-  table initializer is encrypted with a per-table affine/xor byte stream, so
-  the module does not contain the plaintext opcode/predicate truth table.
+  over same-width `i1` through `i8` operands.  The pass also lowers `i9` through
+  `i16` binary operations, constant shifts, and comparisons when exactly one
+  operand is a constant, using that constant to keep the lookup one-dimensional.
+  `nuw`/`nsw` arithmetic, `exact` shifts, variable shifts, out-of-range constant
+  shifts, and two-variable `i9..i16` operations are skipped because replacing a
+  potentially poison-producing operation with a total table load would change
+  LLVM semantics or require an explosive table.
+- Each selected `i1..i8` operator or comparison gets a private mutable
+  `[65536 x i8]` table indexed as `(zext(lhs) << 8) | zext(rhs)`.  Const-indexed
+  `i9..i16` arithmetic gets `[65536 x i16]` indexed by the non-constant operand;
+  const-indexed wider comparisons still use byte result tables.  Sub-byte
+  operands are zero-extended for the lookup; decoded arithmetic values are
+  truncated back to the source width, while decoded comparison bytes are
+  truncated to `i1`.  The table initializer is encrypted with a per-table
+  affine/xor integer stream, so the module does not contain the plaintext
+  opcode/predicate truth table.
 - A private `morok.tablearith.ensure` decoder materializes the table lazily on
   first use.  It loops over the table, decrypts in place, and sets a volatile
   readiness flag.  Function bodies call the decoder, compute the byte-pair

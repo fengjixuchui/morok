@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 using namespace llvm;
@@ -50,11 +51,14 @@ struct TableMaterial {
 };
 
 enum class TableOpKind { Binary, ICmp };
+enum class TableIndexKind { Pair8, ConstLhs, ConstRhs };
 
 struct TableOpSpec {
     TableOpKind kind;
     unsigned code;
     unsigned bitWidth;
+    TableIndexKind indexKind = TableIndexKind::Pair8;
+    std::uint64_t constant = 0;
 };
 
 struct Target {
@@ -102,113 +106,152 @@ bool supportedPredicate(CmpInst::Predicate pred) {
     }
 }
 
-bool eligible(BinaryOperator &BO) {
+std::uint64_t bitMask64(unsigned width) {
+    return width >= 64 ? ~0ULL : ((1ULL << width) - 1ULL);
+}
+
+std::optional<TableIndexKind> constantSide(Instruction &I) {
+    const bool LConst = isa<ConstantInt>(I.getOperand(0));
+    const bool RConst = isa<ConstantInt>(I.getOperand(1));
+    if (LConst == RConst)
+        return std::nullopt;
+    return LConst ? TableIndexKind::ConstLhs : TableIndexKind::ConstRhs;
+}
+
+std::optional<TableOpSpec> eligibleSpec(BinaryOperator &BO) {
     auto *Ty = dyn_cast<IntegerType>(BO.getType());
-    if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 8)
-        return false;
+    if (!Ty || Ty->getBitWidth() == 0 || Ty->getBitWidth() > 16)
+        return std::nullopt;
     if (!supportedOpcode(BO.getOpcode()))
-        return false;
+        return std::nullopt;
     if (shiftOpcode(BO.getOpcode())) {
         auto *Shift = dyn_cast<ConstantInt>(BO.getOperand(1));
         if (!Shift || Shift->getZExtValue() >= Ty->getBitWidth())
-            return false;
+            return std::nullopt;
         if (BO.getOpcode() == Instruction::Shl &&
             (BO.hasNoSignedWrap() || BO.hasNoUnsignedWrap()))
-            return false;
+            return std::nullopt;
         if ((BO.getOpcode() == Instruction::LShr ||
              BO.getOpcode() == Instruction::AShr) &&
             BO.isExact())
-            return false;
-        return true;
+            return std::nullopt;
+        TableOpSpec Spec{TableOpKind::Binary, BO.getOpcode(),
+                         Ty->getBitWidth()};
+        if (Ty->getBitWidth() > 8) {
+            Spec.indexKind = TableIndexKind::ConstRhs;
+            Spec.constant = Shift->getZExtValue() & bitMask64(Ty->getBitWidth());
+        }
+        return Spec;
     }
     if ((BO.getOpcode() == Instruction::Add ||
          BO.getOpcode() == Instruction::Sub ||
          BO.getOpcode() == Instruction::Mul) &&
         (BO.hasNoSignedWrap() || BO.hasNoUnsignedWrap()))
-        return false;
-    return true;
+        return std::nullopt;
+
+    TableOpSpec Spec{TableOpKind::Binary, BO.getOpcode(), Ty->getBitWidth()};
+    if (Ty->getBitWidth() > 8) {
+        std::optional<TableIndexKind> Side = constantSide(BO);
+        if (!Side)
+            return std::nullopt;
+        Spec.indexKind = *Side;
+        unsigned ConstIndex = *Side == TableIndexKind::ConstLhs ? 0 : 1;
+        auto *C = cast<ConstantInt>(BO.getOperand(ConstIndex));
+        Spec.constant = C->getZExtValue() & bitMask64(Ty->getBitWidth());
+    }
+    return Spec;
 }
 
-bool eligible(ICmpInst &CI) {
+std::optional<TableOpSpec> eligibleSpec(ICmpInst &CI) {
     auto *Ty = dyn_cast<IntegerType>(CI.getOperand(0)->getType());
     if (!Ty || Ty != CI.getOperand(1)->getType() || Ty->getBitWidth() == 0 ||
-        Ty->getBitWidth() > 8)
-        return false;
-    return supportedPredicate(CI.getPredicate());
+        Ty->getBitWidth() > 16)
+        return std::nullopt;
+    if (!supportedPredicate(CI.getPredicate()))
+        return std::nullopt;
+    TableOpSpec Spec{TableOpKind::ICmp,
+                     static_cast<unsigned>(CI.getPredicate()),
+                     Ty->getBitWidth()};
+    if (Ty->getBitWidth() > 8) {
+        std::optional<TableIndexKind> Side = constantSide(CI);
+        if (!Side)
+            return std::nullopt;
+        Spec.indexKind = *Side;
+        unsigned ConstIndex = *Side == TableIndexKind::ConstLhs ? 0 : 1;
+        auto *C = cast<ConstantInt>(CI.getOperand(ConstIndex));
+        Spec.constant = C->getZExtValue() & bitMask64(Ty->getBitWidth());
+    }
+    return Spec;
 }
 
-std::uint8_t bitMask(unsigned width) {
-    return width >= 8 ? 0xFFu : static_cast<std::uint8_t>((1u << width) - 1u);
+std::uint64_t bitMask(unsigned width) {
+    return width >= 64 ? ~0ULL : ((1ULL << width) - 1ULL);
 }
 
-std::int32_t signExtend(std::uint8_t value, unsigned width) {
-    const std::uint32_t mask =
-        width >= 8 ? 0xFFu : static_cast<std::uint32_t>((1u << width) - 1u);
-    std::uint32_t v = value & mask;
-    const std::uint32_t signBit = 1u << (width - 1u);
+std::int64_t signExtend(std::uint64_t value, unsigned width) {
+    const std::uint64_t mask = bitMask(width);
+    std::uint64_t v = value & mask;
+    const std::uint64_t signBit = 1ULL << (width - 1u);
     if ((v & signBit) == 0)
-        return static_cast<std::int32_t>(v);
-    return static_cast<std::int32_t>(v | ~mask);
+        return static_cast<std::int64_t>(v);
+    return static_cast<std::int64_t>(v | ~mask);
 }
 
-std::uint8_t eval(unsigned opcode, std::uint8_t lhs, std::uint8_t rhs,
-                  unsigned width) {
-    const std::uint8_t mask = bitMask(width);
+std::uint64_t eval(unsigned opcode, std::uint64_t lhs, std::uint64_t rhs,
+                   unsigned width) {
+    const std::uint64_t mask = bitMask(width);
     lhs &= mask;
     rhs &= mask;
-    std::uint8_t result = 0;
+    std::uint64_t result = 0;
     switch (opcode) {
     case Instruction::Add:
-        result = static_cast<std::uint8_t>(lhs + rhs);
+        result = lhs + rhs;
         break;
     case Instruction::Sub:
-        result = static_cast<std::uint8_t>(lhs - rhs);
+        result = lhs - rhs;
         break;
     case Instruction::Mul:
-        result = static_cast<std::uint8_t>(lhs * rhs);
+        result = lhs * rhs;
         break;
     case Instruction::And:
-        result = static_cast<std::uint8_t>(lhs & rhs);
+        result = lhs & rhs;
         break;
     case Instruction::Or:
-        result = static_cast<std::uint8_t>(lhs | rhs);
+        result = lhs | rhs;
         break;
     case Instruction::Xor:
-        result = static_cast<std::uint8_t>(lhs ^ rhs);
+        result = lhs ^ rhs;
         break;
     case Instruction::Shl: {
-        const unsigned shift = rhs & mask;
-        result = shift >= width ? 0u
-                                : static_cast<std::uint8_t>(lhs << shift);
+        const unsigned shift = static_cast<unsigned>(rhs & mask);
+        result = shift >= width ? 0u : lhs << shift;
         break;
     }
     case Instruction::LShr: {
-        const unsigned shift = rhs & mask;
-        result = shift >= width ? 0u
-                                : static_cast<std::uint8_t>(lhs >> shift);
+        const unsigned shift = static_cast<unsigned>(rhs & mask);
+        result = shift >= width ? 0u : lhs >> shift;
         break;
     }
     case Instruction::AShr: {
-        const unsigned shift = rhs & mask;
-        result = shift >= width
-                     ? 0u
-                     : static_cast<std::uint8_t>(signExtend(lhs, width) >>
-                                                 shift);
+        const unsigned shift = static_cast<unsigned>(rhs & mask);
+        result =
+            shift >= width ? 0u : static_cast<std::uint64_t>(
+                                      signExtend(lhs, width) >> shift);
         break;
     }
     default:
         break;
     }
-    return static_cast<std::uint8_t>(result & mask);
+    return result & mask;
 }
 
-std::uint8_t evalPredicate(CmpInst::Predicate pred, std::uint8_t lhs,
-                           std::uint8_t rhs, unsigned width) {
-    const std::uint8_t mask = bitMask(width);
-    const std::uint32_t ul = lhs & mask;
-    const std::uint32_t ur = rhs & mask;
-    const std::int32_t sl = signExtend(lhs, width);
-    const std::int32_t sr = signExtend(rhs, width);
+std::uint64_t evalPredicate(CmpInst::Predicate pred, std::uint64_t lhs,
+                            std::uint64_t rhs, unsigned width) {
+    const std::uint64_t mask = bitMask(width);
+    const std::uint64_t ul = lhs & mask;
+    const std::uint64_t ur = rhs & mask;
+    const std::int64_t sl = signExtend(lhs, width);
+    const std::int64_t sr = signExtend(rhs, width);
     bool result = false;
     switch (pred) {
     case CmpInst::ICMP_EQ:
@@ -244,26 +287,54 @@ std::uint8_t evalPredicate(CmpInst::Predicate pred, std::uint8_t lhs,
     default:
         break;
     }
-    return static_cast<std::uint8_t>(result);
+    return static_cast<std::uint64_t>(result);
 }
 
-std::uint8_t eval(const TableOpSpec &op, std::uint8_t lhs, std::uint8_t rhs) {
+std::uint64_t eval(const TableOpSpec &op, std::uint64_t lhs,
+                   std::uint64_t rhs) {
     if (op.kind == TableOpKind::ICmp)
         return evalPredicate(static_cast<CmpInst::Predicate>(op.code), lhs, rhs,
                              op.bitWidth);
     return eval(op.code, lhs, rhs, op.bitWidth);
 }
 
-std::uint8_t keyAt(std::uint32_t idx, const KeySchedule &key) {
+std::uint64_t evalAt(const TableOpSpec &op, std::uint32_t idx) {
+    std::uint64_t lhs = 0;
+    std::uint64_t rhs = 0;
+    switch (op.indexKind) {
+    case TableIndexKind::Pair8:
+        lhs = static_cast<std::uint8_t>(idx >> 8);
+        rhs = static_cast<std::uint8_t>(idx & 0xFFu);
+        break;
+    case TableIndexKind::ConstLhs:
+        lhs = op.constant;
+        rhs = idx;
+        break;
+    case TableIndexKind::ConstRhs:
+        lhs = idx;
+        rhs = op.constant;
+        break;
+    }
+    return eval(op, lhs, rhs);
+}
+
+unsigned tableElementBits(const TableOpSpec &op) {
+    if (op.kind == TableOpKind::ICmp || op.bitWidth <= 8)
+        return 8;
+    return 16;
+}
+
+std::uint64_t keyAt(std::uint32_t idx, const KeySchedule &key,
+                    unsigned elementBits) {
     std::uint32_t x = idx * key.mul + key.add;
     x ^= x >> 8;
     x ^= x >> 16;
-    return static_cast<std::uint8_t>(x) ^ key.xork;
+    return (x ^ key.xork) & bitMask(elementBits);
 }
 
-Value *emitKey(IRBuilder<> &B, Value *Idx, const KeySchedule &key) {
+Value *emitKey(IRBuilder<> &B, Value *Idx, const KeySchedule &key,
+               IntegerType *ElementTy) {
     auto *I32 = B.getInt32Ty();
-    auto *I8 = B.getInt8Ty();
     Value *X = B.CreateMul(Idx, ConstantInt::get(I32, key.mul),
                            "morok.tablearith.key.mul");
     X = B.CreateAdd(X, ConstantInt::get(I32, key.add),
@@ -272,8 +343,8 @@ Value *emitKey(IRBuilder<> &B, Value *Idx, const KeySchedule &key) {
                     "morok.tablearith.key.fold8");
     X = B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I32, 16)),
                     "morok.tablearith.key.fold16");
-    Value *K = B.CreateTrunc(X, I8, "morok.tablearith.key.trunc");
-    return B.CreateXor(K, ConstantInt::get(I8, key.xork),
+    Value *K = B.CreateTrunc(X, ElementTy, "morok.tablearith.key.trunc");
+    return B.CreateXor(K, ConstantInt::get(ElementTy, key.xork),
                        "morok.tablearith.key");
 }
 
@@ -282,9 +353,9 @@ Function *createEnsureFunction(Module &M, GlobalVariable *Table,
     LLVMContext &Ctx = M.getContext();
     auto *VoidTy = Type::getVoidTy(Ctx);
     auto *I1 = Type::getInt1Ty(Ctx);
-    auto *I8 = Type::getInt8Ty(Ctx);
     auto *I32 = Type::getInt32Ty(Ctx);
     auto *TableTy = cast<ArrayType>(Table->getValueType());
+    auto *ElementTy = cast<IntegerType>(TableTy->getElementType());
 
     auto *Fn = Function::Create(FunctionType::get(VoidTy, false),
                                 GlobalValue::InternalLinkage,
@@ -307,9 +378,10 @@ Function *createEnsureFunction(Module &M, GlobalVariable *Table,
     Value *Ptr =
         LB.CreateInBoundsGEP(TableTy, Table, {ConstantInt::get(I32, 0), Idx},
                              "morok.tablearith.cell");
-    Value *Enc = LB.CreateLoad(I8, Ptr, "morok.tablearith.enc");
+    Value *Enc = LB.CreateLoad(ElementTy, Ptr, "morok.tablearith.enc");
     Value *Dec =
-        LB.CreateXor(Enc, emitKey(LB, Idx, key), "morok.tablearith.dec");
+        LB.CreateXor(Enc, emitKey(LB, Idx, key, ElementTy),
+                     "morok.tablearith.dec");
     LB.CreateStore(Dec, Ptr);
     Value *Next =
         LB.CreateAdd(Idx, ConstantInt::get(I32, 1), "morok.tablearith.next");
@@ -331,21 +403,30 @@ Function *createEnsureFunction(Module &M, GlobalVariable *Table,
 TableMaterial createTable(Module &M, const TableOpSpec &op,
                           ir::IRRandom &rng) {
     LLVMContext &Ctx = M.getContext();
-    auto *I8 = Type::getInt8Ty(Ctx);
+    const unsigned ElementBits = tableElementBits(op);
+    auto *ElementTy = IntegerType::get(Ctx, ElementBits);
     auto *I1 = Type::getInt1Ty(Ctx);
-    auto *TableTy = ArrayType::get(I8, kTableSize);
+    auto *TableTy = ArrayType::get(ElementTy, kTableSize);
     const KeySchedule key{static_cast<std::uint32_t>(rng.next()) | 1u,
                           static_cast<std::uint32_t>(rng.next()),
                           static_cast<std::uint8_t>(rng.next())};
 
-    std::array<std::uint8_t, kTableSize> encrypted{};
-    for (std::uint32_t idx = 0; idx < kTableSize; ++idx) {
-        const auto lhs = static_cast<std::uint8_t>(idx >> 8);
-        const auto rhs = static_cast<std::uint8_t>(idx & 0xFFu);
-        encrypted[idx] = eval(op, lhs, rhs) ^ keyAt(idx, key);
+    Constant *Init = nullptr;
+    if (ElementBits == 8) {
+        std::array<std::uint8_t, kTableSize> encrypted{};
+        for (std::uint32_t idx = 0; idx < kTableSize; ++idx)
+            encrypted[idx] = static_cast<std::uint8_t>(
+                (evalAt(op, idx) ^ keyAt(idx, key, ElementBits)) &
+                bitMask(ElementBits));
+        Init = ConstantDataArray::get(Ctx, ArrayRef(encrypted));
+    } else {
+        std::array<std::uint16_t, kTableSize> encrypted{};
+        for (std::uint32_t idx = 0; idx < kTableSize; ++idx)
+            encrypted[idx] = static_cast<std::uint16_t>(
+                (evalAt(op, idx) ^ keyAt(idx, key, ElementBits)) &
+                bitMask(ElementBits));
+        Init = ConstantDataArray::get(Ctx, ArrayRef(encrypted));
     }
-
-    Constant *Init = ConstantDataArray::get(Ctx, ArrayRef(encrypted));
     auto *Table = new GlobalVariable(M, TableTy, /*isConstant=*/false,
                                      GlobalValue::PrivateLinkage, Init,
                                      "morok.tablearith.table");
@@ -362,32 +443,41 @@ Value *emitLookup(Module &M, Target &T, ir::IRRandom &rng) {
     const unsigned bitWidth = T.spec.bitWidth;
     TableMaterial Mat = createTable(M, T.spec, rng);
     IRBuilder<NoFolder> B(&I);
-    auto *I8 = B.getInt8Ty();
     auto *I16 = B.getInt16Ty();
     auto *I32 = B.getInt32Ty();
     auto *TableTy = cast<ArrayType>(Mat.table->getValueType());
+    auto *ElementTy = cast<IntegerType>(TableTy->getElementType());
 
     B.CreateCall(Mat.ensure);
     Value *Lhs = I.getOperand(0);
     Value *Rhs = I.getOperand(1);
-    Value *L8 = bitWidth == 8
-                    ? Lhs
-                    : B.CreateZExt(Lhs, I8, "morok.tablearith.lhs8");
-    Value *R8 = bitWidth == 8
-                    ? Rhs
-                    : B.CreateZExt(Rhs, I8, "morok.tablearith.rhs8");
-    Value *L = B.CreateZExt(L8, I16, "morok.tablearith.lhs");
-    Value *R = B.CreateZExt(R8, I16, "morok.tablearith.rhs");
-    Value *Hi = B.CreateShl(L, ConstantInt::get(I16, 8), "morok.tablearith.hi");
-    Value *Idx16 = B.CreateOr(Hi, R, "morok.tablearith.idx16");
-    Value *Idx = B.CreateZExt(Idx16, I32, "morok.tablearith.idx");
+    Value *Idx = nullptr;
+    if (T.spec.indexKind == TableIndexKind::Pair8) {
+        auto *I8 = B.getInt8Ty();
+        Value *L8 = bitWidth == 8
+                        ? Lhs
+                        : B.CreateZExt(Lhs, I8, "morok.tablearith.lhs8");
+        Value *R8 = bitWidth == 8
+                        ? Rhs
+                        : B.CreateZExt(Rhs, I8, "morok.tablearith.rhs8");
+        Value *L = B.CreateZExt(L8, I16, "morok.tablearith.lhs");
+        Value *R = B.CreateZExt(R8, I16, "morok.tablearith.rhs");
+        Value *Hi =
+            B.CreateShl(L, ConstantInt::get(I16, 8), "morok.tablearith.hi");
+        Value *Idx16 = B.CreateOr(Hi, R, "morok.tablearith.idx16");
+        Idx = B.CreateZExt(Idx16, I32, "morok.tablearith.idx");
+    } else {
+        Value *Variable =
+            T.spec.indexKind == TableIndexKind::ConstLhs ? Rhs : Lhs;
+        Idx = B.CreateZExt(Variable, I32, "morok.tablearith.idx");
+    }
     Value *Ptr =
         B.CreateInBoundsGEP(TableTy, Mat.table, {ConstantInt::get(I32, 0), Idx},
                             "morok.tablearith.ptr");
-    Value *Result = B.CreateLoad(I8, Ptr, "morok.tablearith.value");
+    Value *Result = B.CreateLoad(ElementTy, Ptr, "morok.tablearith.value");
     if (T.spec.kind == TableOpKind::ICmp)
         return B.CreateTrunc(Result, B.getInt1Ty(), "morok.tablearith.icmp");
-    if (bitWidth == 8)
+    if (Result->getType() == I.getType())
         return Result;
     auto *SourceTy = cast<IntegerType>(I.getType());
     return B.CreateTrunc(Result, SourceTy, "morok.tablearith.trunc");
@@ -416,17 +506,13 @@ bool tableArithmeticFunction(Function &F, const TableArithParams &params,
             if (targets.size() >= limit)
                 break;
             if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
-                if (eligible(*BO) && rng.chance(params.probability))
-                    targets.push_back(Target{
-                        BO, {TableOpKind::Binary, BO->getOpcode(),
-                             cast<IntegerType>(BO->getType())->getBitWidth()}});
+                if (std::optional<TableOpSpec> Spec = eligibleSpec(*BO);
+                    Spec && rng.chance(params.probability))
+                    targets.push_back(Target{BO, *Spec});
             } else if (auto *CI = dyn_cast<ICmpInst>(&I)) {
-                if (eligible(*CI) && rng.chance(params.probability))
-                    targets.push_back(Target{
-                        CI, {TableOpKind::ICmp,
-                             static_cast<unsigned>(CI->getPredicate()),
-                             cast<IntegerType>(CI->getOperand(0)->getType())
-                                 ->getBitWidth()}});
+                if (std::optional<TableOpSpec> Spec = eligibleSpec(*CI);
+                    Spec && rng.chance(params.probability))
+                    targets.push_back(Target{CI, *Spec});
             }
         }
     }
