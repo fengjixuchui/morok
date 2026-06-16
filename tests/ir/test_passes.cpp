@@ -542,6 +542,38 @@ TEST_CASE("MorokPass caps eligible function visits on wide modules") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("MorokPass demotes generated symbols to private linkage") {
+    LLVMContext ctx;
+    auto M = std::make_unique<Module>("strip-symbols", ctx);
+    GlobalVariable *Text = makePrivateString(*M, "plain.str", "hello-symbol");
+    makeExternalCallFunction(*M, Text);
+
+    morok::config::Config cfg;
+    cfg.seed = 909;
+    cfg.passes.str_enc.enabled = true;
+    cfg.passes.str_enc.probability = 100;
+    cfg.passes.fco.enabled = true;
+
+    ModuleAnalysisManager AM;
+    morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+    // Generated helpers exist (e.g. morok.gf8mul / morok.strdec) but must carry
+    // private linkage, so their descriptive names never reach the binary's
+    // symbol table.
+    std::size_t morokFns = 0;
+    for (Function &F : *M) {
+        if (!F.getName().starts_with("morok."))
+            continue;
+        ++morokFns;
+        CHECK(F.hasPrivateLinkage());
+    }
+    CHECK(morokFns >= 1u);
+    for (GlobalVariable &GV : M->globals())
+        if (GV.getName().starts_with("morok."))
+            CHECK(GV.hasPrivateLinkage());
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("substituteFunction grows the IR and preserves validity") {
     LLVMContext ctx;
     auto M = parse(ctx, kArith);

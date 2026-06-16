@@ -745,6 +745,20 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         changed |= passes::perBuildPolymorphismModule(M, p, rng);
     }
 
+    // Final symbol hygiene: every generated `morok.*` helper still carries its
+    // descriptive internal-linkage name (`morok.gf8mul`, `morok.strdec`, …),
+    // which leaks into the binary's symbol table and hands an analyst a labelled
+    // roadmap of the protection.  Demote them to private linkage — the IR name
+    // survives for any by-name coordination, but private symbols are dropped
+    // from the object symbol table (the encrypted string globals already rely on
+    // this), so the names never reach the artifact.
+    for (Function &F : M)
+        if (F.hasLocalLinkage() && F.getName().starts_with("morok."))
+            F.setLinkage(GlobalValue::PrivateLinkage);
+    for (GlobalVariable &GV : M.globals())
+        if (GV.hasLocalLinkage() && GV.getName().starts_with("morok."))
+            GV.setLinkage(GlobalValue::PrivateLinkage);
+
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
