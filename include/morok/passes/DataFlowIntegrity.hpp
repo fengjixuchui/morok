@@ -21,20 +21,21 @@ class Function;
 namespace morok::passes {
 
 struct DataFlowIntegrityParams {
-    std::uint32_t probability = 100;   ///< per eligible i1..i8 op/cmp, 0..100
-    std::uint32_t max_tables = 4;      ///< per-function table cap
-    std::uint32_t region_bytes = 32;   ///< bytes hashed by the runtime stub
+    std::uint32_t probability = 100; ///< per eligible op/cmp, 0..100
+    std::uint32_t max_tables = 4;    ///< per-function table cap
+    std::uint32_t region_bytes = 32; ///< bytes hashed by the runtime stub
 };
 
-/// Replace selected i1..i8 operations/constant shifts/comparisons with lookup
-/// tables decoded from a runtime integrity hash.  Tampering with the hashed
-/// region poisons table data.
+/// Replace selected i1..i8 operations/comparisons and const-indexed i9..i16
+/// operations/comparisons with lookup tables decoded from a runtime integrity
+/// hash.  Tampering with the hashed region poisons table data.
 bool dataFlowIntegrityFunction(llvm::Function &F,
                                const DataFlowIntegrityParams &params,
                                morok::ir::IRRandom &rng);
 
 /// New-PM wrapper for standalone use (`-passes=morok-dfi`).
-class DataFlowIntegrityPass : public llvm::PassInfoMixin<DataFlowIntegrityPass> {
+class DataFlowIntegrityPass
+    : public llvm::PassInfoMixin<DataFlowIntegrityPass> {
 public:
     explicit DataFlowIntegrityPass(DataFlowIntegrityParams params = {},
                                    std::uint64_t seed = 0x1337)

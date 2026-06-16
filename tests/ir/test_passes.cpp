@@ -4649,6 +4649,57 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("dataFlowIntegrityFunction lowers const-indexed i16 ops to tables") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i16 @dfi_wide_const(i16 %a) {
+entry:
+  %x = add i16 %a, 4660
+  %y = xor i16 21930, %x
+  %z = ashr i16 %y, 3
+  %c = icmp slt i16 %z, -17
+  %out = select i1 %c, i16 %z, i16 %x
+  ret i16 %out
+}
+)ir");
+    Function *F = M->getFunction("dfi_wide_const");
+    REQUIRE(F);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8421);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::dataFlowIntegrityFunction(
+        *F, {/*probability=*/100, /*max_tables=*/4, /*region_bytes=*/32},
+        rng));
+
+    CHECK(countGlobals(*M, "morok.dfi.table") == 4u);
+    CHECK(countGlobals(*M, "morok.dfi.region") == 1u);
+    CHECK(countGlobals(*M, "morok.dfi.expected") == 1u);
+    CHECK(M->getFunction("morok.dfi.hash.dfi_wide_const") != nullptr);
+
+    bool hasI16Table = false;
+    for (GlobalVariable &GV : M->globals()) {
+        if (!GV.getName().starts_with("morok.dfi.table"))
+            continue;
+        auto *ArrTy = dyn_cast<ArrayType>(GV.getValueType());
+        hasI16Table |= ArrTy && ArrTy->getElementType()->isIntegerTy(16);
+    }
+    CHECK(hasI16Table);
+
+    bool hasPlainWideOp = false;
+    for (Instruction &I : instructions(*F)) {
+        if (I.getName().starts_with("morok."))
+            continue;
+        if (auto *BO = dyn_cast<BinaryOperator>(&I))
+            hasPlainWideOp |= BO->getType()->isIntegerTy(16);
+        if (auto *CI = dyn_cast<ICmpInst>(&I)) {
+            auto *Ty = dyn_cast<IntegerType>(CI->getOperand(0)->getType());
+            hasPlainWideOp |= Ty && Ty->getBitWidth() == 16;
+        }
+    }
+    CHECK_FALSE(hasPlainWideOp);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("dataFlowIntegrityFunction supports constant narrow shifts") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

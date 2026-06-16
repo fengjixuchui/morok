@@ -119,7 +119,7 @@ Every obfuscation pass is implemented as a New-PM pass, each available standalon
 | Adversarial merge/outline | `morok-afm` | unrelated functions fused behind selector dispatchers and shared helpers |
 | Adversarial self-tuning | `morok-selftune` | cloned-candidate hardness search with selected bundle replay |
 | Per-build polymorphism | `morok-polymorph` | seed-driven function/block layout and neutral return anchors |
-| Data-flow integrity | `morok-dfi` | narrow lookup tables decoded from runtime integrity hashes |
+| Data-flow integrity | `morok-dfi` | narrow and const-indexed lookup tables decoded from runtime integrity hashes |
 | Mutual guard graph | `morok-mutualguard` | overlapping checksum nodes whose aggregate diff poisons returns |
 | Table arithmetic | `morok-tablearith` | narrow integer arithmetic lowered to encrypted lookup tables |
 | Uniform primitive lowering | `morok-uniform` | narrow ops and direct branches lowered to table/memory dispatch |

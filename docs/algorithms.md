@@ -556,17 +556,21 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - The pass generalizes checksum-fused constants from scalars to live lookup
   tables.  Selected `i1` through `i8` `a OP b` operations, in-range constant
   shifts, and same-width integer comparisons are replaced by volatile loads
-  from private `morok.dfi.table.*` globals.
+  from private `morok.dfi.table.*` globals.  It also handles `i9` through `i16`
+  operations/comparisons when exactly one operand is constant, using that
+  constant to keep the table indexed by one live value.
 - Table entries are encoded with a stream key derived from the expected hash of
   a private `morok.dfi.region.*` byte region.  The runtime helper
   `morok.dfi.hash.*` hashes that region with volatile loads, volatile-loads
   `morok.dfi.expected.*`, and returns `actual_hash ^ expected_hash`.
 - Each lookup derives its decode seed as `expected_hash_const ^ runtime_diff`.
   On the valid region the diff is zero and the loaded table byte decodes to the
-  original operation result.  Sub-byte operands are zero-extended for the table
-  index; decoded arithmetic bytes are truncated back to the source width and
-  decoded comparison bytes to `i1`.  Region or expected-hash tampering changes
-  the key and corrupts the value in data flow.
+  original operation result.  Sub-byte and pair-indexed narrow operands are
+  zero-extended for the table index; const-indexed wide operations index by the
+  non-constant operand and use `i16` table cells for arithmetic results or byte
+  cells for comparisons.  Decoded arithmetic values are truncated back to the
+  source width and decoded comparison bytes to `i1`.  Region or expected-hash
+  tampering changes the key and corrupts the value in data flow.
 - The table stays encoded at rest; unlike generic TableArithmetic, there is no
   lazy plaintext materialization pass.  There is also no trap or integrity
   branch, only data poisoning.
@@ -874,7 +878,7 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - AliasOpaquePredicates: maintained pointer/alias memory invariant guards with decoy edges.
 - ExternalOpaquePredicates: IPO-blocked volatile context helper guards with scratch decoy edges.
 - CoherentDecoys: opaque-dead alternate return computations, not junk blocks.
-- DataFlowIntegrity: `i1..i8` op tables decoded by runtime integrity hashes.
+- DataFlowIntegrity: `i1..i8` and const-indexed `i9..i16` op tables decoded by runtime integrity hashes.
 - OptimizerAmplification: early branchless select lattice over equivalent integer op / integer compare / FP compare forms.
 - SubThresholdPersistence: volatile local-seed opaque-zero terms for scalar integer/FP ops under a small cap.
 - TableArithmetic: encrypted lazy `i1..i8` op lookup tables.
