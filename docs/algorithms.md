@@ -1148,6 +1148,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   on-disk image, address-space census diffs are also treated as "extra module"
   evidence, a compact two-clock span asserts timing is not slow, and the Linux
   DR sentinel records when any debug-register zeroing write fails.
+  Aggressive responses are guarded by a corroboration score.  AntiHooking
+  accrues bounded evidence bits from clean-copy drift, GOT/fixup drift, W^X
+  failures, module census, syscall/wrapper divergence, sandbox/DBI probes, and
+  negative-space timing; the Linux hook-symbol exit path requires both the
+  symbol hit and a multi-signal score before taking the bail branch.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and

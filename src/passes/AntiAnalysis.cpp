@@ -5638,93 +5638,127 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     Function *ctor = makeCtorShell(M, "morok.antihook");
     GlobalVariable *state = antiHookState(M, rng);
     IRBuilder<> B(&ctor->getEntryBlock());
+    AllocaInst *corroboration =
+        B.CreateAlloca(B.getInt64Ty(), nullptr, "morok.corroborate.score");
+    B.CreateStore(ConstantInt::get(B.getInt64Ty(), 0), corroboration)
+        ->setVolatile(true);
 
     if (Function *clean = cleanCopyProbe(M, rng, tt)) {
         Value *diff = B.CreateCall(clean, {}, "morok.antihook.clean.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.clean.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.clean");
         foldState(B, state, diff, 0xE0B9CA7F2D341985ULL,
                   "morok.antihook.clean");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0x48C3F3A9127DE40BULL, "morok.antihook.clean.changed");
+        foldFlag(B, state, changed, 0x48C3F3A9127DE40BULL,
+                 "morok.antihook.clean.changed");
         prologueTargets.push_back(clean);
     }
     if (Function *got = linuxGotPltProbe(M, tt)) {
         Value *diff = B.CreateCall(got, {}, "morok.antihook.got.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.got.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.got");
         foldState(B, state, diff, 0xF93A8B7C62D514E1ULL, "morok.antihook.got");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0xB17D4E23C9A5806FULL, "morok.antihook.got.changed");
+        foldFlag(B, state, changed, 0xB17D4E23C9A5806FULL,
+                 "morok.antihook.got.changed");
     }
     if (Function *fixups = darwinFixupProbe(M, tt)) {
         Value *diff = B.CreateCall(fixups, {}, "morok.antihook.fixup.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.fixup.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.fixup");
         foldState(B, state, diff, 0x8D46E52CA7B9130FULL,
                   "morok.antihook.fixup");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0xD1C9A03F76542BE8ULL, "morok.antihook.fixup.changed");
+        foldFlag(B, state, changed, 0xD1C9A03F76542BE8ULL,
+                 "morok.antihook.fixup.changed");
     }
     if (Function *wx = wxEnforceProbe(M, tt)) {
         Value *diff = B.CreateCall(wx, {}, "morok.antihook.wxorx.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.wxorx.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.wxorx");
         foldState(B, state, diff, 0x14E2B7C95A680D3FULL,
                   "morok.antihook.wxorx");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0xD8F31C6A4B927E50ULL, "morok.antihook.wxorx.changed");
+        foldFlag(B, state, changed, 0xD8F31C6A4B927E50ULL,
+                 "morok.antihook.wxorx.changed");
     }
     if (Function *census = addressSpaceCensusProbe(M, rng, tt)) {
         Value *diff = B.CreateCall(census, {}, "morok.antihook.census.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.census.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.census");
         foldState(B, state, diff, 0x6B4E9D718C2A35F0ULL,
                   "morok.antihook.census");
-        Value *extraModules =
-            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
-                           "morok.negative.modules.extra");
-        foldFlag(B, state, extraModules,
+        changed->setName("morok.negative.modules.extra");
+        foldFlag(B, state, changed,
                  0xA7815E3C49D206BFULL, "morok.antihook.census.changed");
-        foldFlag(B, state, extraModules, 0xB2E746D9108CA53FULL,
+        foldFlag(B, state, changed, 0xB2E746D9108CA53FULL,
                  "morok.negative.modules.extra");
     }
     if (Function *diverge = methodDivergenceProbe(M, tt)) {
         Value *diff =
             B.CreateCall(diverge, {}, "morok.antihook.diverge.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.diverge.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.diverge");
         foldState(B, state, diff, 0x2F8D6C1E9A7453B0ULL,
                   "morok.antihook.diverge");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0xC58E90A37B42D16FULL, "morok.antihook.diverge.changed");
+        foldFlag(B, state, changed, 0xC58E90A37B42D16FULL,
+                 "morok.antihook.diverge.changed");
     }
     if (Function *sandbox = sandboxHeuristicProbe(M, tt)) {
         Value *score =
             B.CreateCall(sandbox, {}, "morok.antihook.sandbox.score");
+        Value *changed =
+            B.CreateICmpUGE(score, ConstantInt::get(B.getInt64Ty(), 2),
+                            "morok.corroborate.sandbox.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.sandbox");
         foldState(B, state, score, 0x9A01C7E52D63B48FULL,
                   "morok.antihook.sandbox");
-        foldFlag(B, state,
-                 B.CreateICmpUGE(score, ConstantInt::get(B.getInt64Ty(), 2)),
-                 0x4E87A61D39C205B3ULL, "morok.antihook.sandbox.changed");
+        foldFlag(B, state, changed, 0x4E87A61D39C205B3ULL,
+                 "morok.antihook.sandbox.changed");
     }
     if (Function *smc = dbiSmcTripwireProbe(M, tt)) {
         Value *diff = B.CreateCall(smc, {}, "morok.antihook.dbi.smc.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.dbi.smc.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.dbi.smc");
         foldState(B, state, diff, 0xE62D41B98A3F570CULL,
                   "morok.antihook.dbi.smc");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0x73B5D02E6C49A18FULL, "morok.antihook.dbi.smc.changed");
+        foldFlag(B, state, changed, 0x73B5D02E6C49A18FULL,
+                 "morok.antihook.dbi.smc.changed");
     }
     if (Function *dbi = linuxDbiSignatureProbe(M, rng, tt)) {
         Value *diff = B.CreateCall(dbi, {}, "morok.antihook.dbi.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.dbi.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.dbi");
         foldState(B, state, diff, 0x1B89E4C76F20DA53ULL,
                   "morok.antihook.dbi");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0xF4A7812C39D60E5BULL, "morok.antihook.dbi.changed");
+        foldFlag(B, state, changed, 0xF4A7812C39D60E5BULL,
+                 "morok.antihook.dbi.changed");
     }
     if (Function *negativeTiming = negativeTimingProbe(M, rng, tt)) {
         Value *diff =
             B.CreateCall(negativeTiming, {}, "morok.negative.timing.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.negative.timing.changed");
+        incrementDiff(B, corroboration, changed,
+                      "morok.corroborate.negative.timing");
         foldState(B, state, diff, 0x4D91C2A8F76E350BULL,
                   "morok.negative.timing");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
-                 0x8A6357D1C49E20BFULL, "morok.negative.timing.changed");
+        foldFlag(B, state, changed, 0x8A6357D1C49E20BFULL,
+                 "morok.negative.timing.changed");
     }
     insertStackOriginChecks(M, stackOriginCheck(M), state, prologueTargets, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);
@@ -5756,10 +5790,18 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     Value *rtldDefault = B.CreateIntToPtr(ConstantInt::getSigned(i64, -2), ptr);
     Value *found = B.CreateCall(dlsym, {rtldDefault, sym});
     Value *hooked = B.CreateICmpNE(found, ConstantPointerNull::get(ptr));
+    auto *score = B.CreateLoad(B.getInt64Ty(), corroboration,
+                               "morok.corroborate.score.final");
+    score->setVolatile(true);
+    Value *confirmed =
+        B.CreateICmpUGE(score, ConstantInt::get(B.getInt64Ty(), 2),
+                        "morok.corroborate.confirmed");
+    Value *aggressive = B.CreateAnd(hooked, confirmed,
+                                    "morok.corroborate.aggressive");
 
     auto *bail = BasicBlock::Create(ctx, "bail", ctor);
     auto *cont = BasicBlock::Create(ctx, "cont", ctor);
-    B.CreateCondBr(hooked, bail, cont);
+    B.CreateCondBr(aggressive, bail, cont);
 
     IRBuilder<> BB(bail);
     BB.CreateCall(exitFn, {ConstantInt::get(i32, 1)});

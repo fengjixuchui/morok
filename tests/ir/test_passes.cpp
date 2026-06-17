@@ -9100,6 +9100,12 @@ entry:
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.corroborate.score.final") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.corroborate.confirmed") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.corroborate.aggressive") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
