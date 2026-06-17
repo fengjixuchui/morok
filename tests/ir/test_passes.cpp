@@ -8385,6 +8385,36 @@ define i32 @caller() {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("functionCallObfuscateModule strips the asm-name escape for dlsym") {
+    LLVMContext ctx;
+    // macOS libc symbols carry a `\01`-escaped asm name (`\01_fwrite`); dlsym
+    // needs the plain C name "fwrite", else it returns null and the redirected
+    // call jumps to address 0.
+    auto M = parse(ctx, R"ir(
+target triple = "arm64-apple-macosx13.0.0"
+declare i64 @"\01_fwrite"(ptr, i64, i64, ptr)
+@.d = private constant [3 x i8] c"hi\00"
+define i64 @caller(ptr %f) {
+  %r = call i64 @"\01_fwrite"(ptr @.d, i64 1, i64 2, ptr %f)
+  ret i64 %r
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(55);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::functionCallObfuscateModule(*M, {/*prob=*/100}, rng));
+
+    // The cloaked symbol must be the plain C name "fwrite" (6 + NUL = 7 bytes),
+    // not the raw "\01_fwrite" (10 bytes).
+    bool hasStrippedCipher = false;
+    for (GlobalVariable &GV : M->globals())
+        if (GV.getName().starts_with("morok.cloak.c"))
+            if (auto *AT = dyn_cast<ArrayType>(GV.getValueType()))
+                hasStrippedCipher |= AT->getNumElements() == 7u;
+    CHECK(hasStrippedCipher);
+    CHECK(M->getFunction("dlsym") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("anti-analysis passes inject valid startup code") {
     LLVMContext ctx;
     auto M = parse(ctx, "define i32 @main() { ret i32 0 }\n");

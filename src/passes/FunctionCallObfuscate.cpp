@@ -104,7 +104,14 @@ bool functionCallObfuscateModule(Module &M, const FcoParams &params,
         Function *callee = cb->getCalledFunction();
 
         IRBuilder<> B(cb);
-        Value *name = ir::emitCloakedSymbol(B, M, callee->getName(), rng);
+        // dlsym needs the plain C symbol name.  LLVM may carry a `\01`-escaped
+        // asm name (e.g. macOS libc's `\01_fwrite`); strip the escape and the
+        // platform underscore, otherwise dlsym returns null and the redirected
+        // call jumps to address 0.
+        StringRef dlName = callee->getName();
+        if (dlName.consume_front(StringRef("\x01", 1)) && tt.isOSDarwin())
+            dlName.consume_front("_");
+        Value *name = ir::emitCloakedSymbol(B, M, dlName, rng);
         Value *rtld =
             B.CreateIntToPtr(ConstantInt::getSigned(i64, rtldDefaultVal), ptr);
         Value *resolved = B.CreateCall(dlsym, {rtld, name});

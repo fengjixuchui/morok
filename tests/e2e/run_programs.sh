@@ -42,6 +42,7 @@ PROGRAMS=(
   min_add_chain.c min_mul_chain.c min_shift_chain.c min_bitwise.c
   07_regex.c 08_json_parser.cpp 04_bst.cpp
   cpp_rtti.cpp cpp_virtual.cpp cpp_constexpr_variant_graph.cpp
+  cf_license_crackme.c
 )
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
