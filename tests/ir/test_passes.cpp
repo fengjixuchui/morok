@@ -8697,6 +8697,10 @@ define i32 @main() { ret i32 0 }
 
     Function *Clean = M->getFunction("morok.antihook.clean.macho");
     REQUIRE(Clean != nullptr);
+    Function *Fixups = M->getFunction("morok.antihook.macho.fixups");
+    REQUIRE(Fixups != nullptr);
+    Function *Text = M->getFunction("morok.antihook.macho.text");
+    REQUIRE(Text != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.mac.targets", true) != nullptr);
     CHECK(M->getFunction("morok.antihook.got.plt") == nullptr);
@@ -8711,9 +8715,17 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
           1u);
+    CHECK(countNamedInstructions(*Fixups,
+                                 "morok.antihook.fixup.section.got") >= 1u);
+    CHECK(countNamedInstructions(*Fixups,
+                                 "morok.antihook.fixup.section.lazy") >= 1u);
+    CHECK(countNamedInstructions(*Fixups, "morok.antihook.fixup.text") >= 1u);
+    CHECK(countNamedInstructions(*Text, "morok.antihook.macho.text.hit") >=
+          1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.antihook.prologue.x86.hit") >= 1u);
     CHECK(M->getFunction("_NSGetExecutablePath") != nullptr);
+    CHECK(M->getFunction("_dyld_image_count") != nullptr);
     CHECK(M->getFunction("_dyld_get_image_header") != nullptr);
     CHECK(M->getFunction("_dyld_get_image_vmaddr_slide") != nullptr);
     CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
@@ -8795,6 +8807,30 @@ entry:
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/status"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/stat"));
     CHECK_FALSE(hasReadableByteString(*M, "TracerPid"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiDebuggingModule can disable Linux self-trace for trap "
+          "compatibility") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8820);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng,
+                                             /*allowSelfTrace=*/false));
+
+    Function *Ctor = M->getFunction("morok.antidbg");
+    Function *Watch = M->getFunction("morok.antidbg.linux.watch");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Watch != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.status") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.stat4") != nullptr);
+    CHECK(countNamedInstructions(*Ctor, "morok.antidbg.ptrace.init") == 0u);
+    CHECK_FALSE(hasInlineAsmCall(*Watch));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -8932,10 +8968,13 @@ define i32 @main() { ret i32 0 }
     Function *Handler = M->getFunction("morok.trap.handler");
     REQUIRE(Ctor != nullptr);
     REQUIRE(Handler != nullptr);
+    CHECK(Handler->arg_size() == 3);
     CHECK(M->getGlobalVariable("morok.trap.state", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.trap.hits", true) != nullptr);
-    CHECK(M->getFunction("signal") != nullptr);
+    CHECK(M->getFunction("sigaction") != nullptr);
+    CHECK(M->getFunction("signal") == nullptr);
     CHECK(hasInlineAsmCall(*Ctor));
+    CHECK(countNamedInstructions(*Handler, "morok.trap.icebp") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

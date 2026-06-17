@@ -293,7 +293,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     if (config_.passes.anti_class_dump.enabled.value_or(false))
         changed |= passes::antiClassDumpModule(M);
     if (config_.passes.anti_dbg.enabled.value_or(false))
-        changed |= passes::antiDebuggingModule(M, rng);
+        changed |= passes::antiDebuggingModule(
+            M, rng, !config_.passes.trap_oracles.enabled.value_or(false));
     if (config_.passes.timing_oracles.enabled.value_or(false))
         changed |= passes::timingOracleModule(M, rng);
     if (config_.passes.trap_oracles.enabled.value_or(false))

@@ -893,7 +893,8 @@ Function *linuxStatField4Check(Module &M, ir::IRRandom &rng, const Triple &TT) {
 }
 
 Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
-                           GlobalVariable *State, const Triple &TT) {
+                           GlobalVariable *State, const Triple &TT,
+                           bool AllowSelfTrace) {
     if (Function *existing = M.getFunction("morok.antidbg.linux.watch"))
         return existing;
 
@@ -922,7 +923,8 @@ Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
     FunctionCallee sleepFn =
         M.getOrInsertFunction("sleep", FunctionType::get(i32, {i32}, false));
     BB.CreateCall(sleepFn, {ConstantInt::get(i32, 1)});
-    emitLinuxPtrace(BB, M, TT, 0);
+    if (AllowSelfTrace)
+        emitLinuxPtrace(BB, M, TT, 0);
     Value *status = BB.CreateCall(StatusFn);
     Value *stat4 = BB.CreateCall(StatFn);
     foldFlag(BB, State, BB.CreateICmpNE(status, ConstantInt::get(i32, 0)),
@@ -1067,7 +1069,8 @@ void emitLinuxLandlockSandbox(IRBuilder<> &B, Module &M, GlobalVariable *State,
     B.SetInsertPoint(contBB);
 }
 
-void emitLinuxSeccompFilter(IRBuilder<> &B, Module &M, const Triple &TT) {
+void emitLinuxSeccompFilter(IRBuilder<> &B, Module &M, const Triple &TT,
+                            bool AllowSelfTrace) {
     std::uint32_t ptraceNr = 0;
     std::uint32_t readvNr = 0;
     std::uint32_t writevNr = 0;
@@ -1085,10 +1088,8 @@ void emitLinuxSeccompFilter(IRBuilder<> &B, Module &M, const Triple &TT) {
     constexpr std::uint16_t kBpfJmpJeqK = 0x15;
     constexpr std::uint16_t kBpfRetK = 0x06;
     constexpr std::uint32_t kSeccompDataNr = 0;
-    constexpr std::uint32_t kSeccompDataArg0 = 16;
     constexpr std::uint32_t kSeccompRetKillProcess = 0x80000000U;
     constexpr std::uint32_t kSeccompRetAllow = 0x7fff0000U;
-    constexpr std::uint32_t kPtraceTraceme = 0;
     constexpr std::uint32_t kPrSetSeccomp = 22;
     constexpr std::uint32_t kSeccompModeFilter = 2;
 
@@ -1115,14 +1116,27 @@ void emitLinuxSeccompFilter(IRBuilder<> &B, Module &M, const Triple &TT) {
     };
 
     storeFilter(0, kBpfLdWAbs, 0, 0, kSeccompDataNr);
-    storeFilter(1, kBpfJmpJeqK, 0, 3, ptraceNr);
-    storeFilter(2, kBpfLdWAbs, 0, 0, kSeccompDataArg0);
-    storeFilter(3, kBpfJmpJeqK, 5, 0, kPtraceTraceme);
-    storeFilter(4, kBpfRetK, 0, 0, kSeccompRetKillProcess);
-    storeFilter(5, kBpfLdWAbs, 0, 0, kSeccompDataNr);
-    storeFilter(6, kBpfJmpJeqK, 1, 0, readvNr);
-    storeFilter(7, kBpfJmpJeqK, 0, 1, writevNr);
-    storeFilter(8, kBpfRetK, 0, 0, kSeccompRetKillProcess);
+    if (AllowSelfTrace) {
+        constexpr std::uint32_t kSeccompDataArg0 = 16;
+        constexpr std::uint32_t kPtraceTraceme = 0;
+        storeFilter(1, kBpfJmpJeqK, 0, 3, ptraceNr);
+        storeFilter(2, kBpfLdWAbs, 0, 0, kSeccompDataArg0);
+        storeFilter(3, kBpfJmpJeqK, 5, 0, kPtraceTraceme);
+        storeFilter(4, kBpfRetK, 0, 0, kSeccompRetKillProcess);
+        storeFilter(5, kBpfLdWAbs, 0, 0, kSeccompDataNr);
+        storeFilter(6, kBpfJmpJeqK, 1, 0, readvNr);
+        storeFilter(7, kBpfJmpJeqK, 0, 1, writevNr);
+        storeFilter(8, kBpfRetK, 0, 0, kSeccompRetKillProcess);
+    } else {
+        storeFilter(1, kBpfJmpJeqK, 6, 0, ptraceNr);
+        storeFilter(2, kBpfJmpJeqK, 5, 0, readvNr);
+        storeFilter(3, kBpfJmpJeqK, 4, 0, writevNr);
+        storeFilter(4, kBpfRetK, 0, 0, kSeccompRetAllow);
+        storeFilter(5, kBpfRetK, 0, 0, kSeccompRetAllow);
+        storeFilter(6, kBpfRetK, 0, 0, kSeccompRetAllow);
+        storeFilter(7, kBpfRetK, 0, 0, kSeccompRetAllow);
+        storeFilter(8, kBpfRetK, 0, 0, kSeccompRetKillProcess);
+    }
     storeFilter(9, kBpfRetK, 0, 0, kSeccompRetAllow);
 
     Value *filterPtr = B.CreateInBoundsGEP(
@@ -1229,15 +1243,19 @@ Function *probeWatchThread(Module &M, Function *Probe) {
 }
 
 void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
-                        ir::IRRandom &rng, const Triple &TT) {
+                        ir::IRRandom &rng, const Triple &TT,
+                        bool AllowSelfTrace) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     IRBuilder<> B(&Ctor->getEntryBlock());
 
     emitLinuxHardening(B, M, TT);
-    Value *traceRc = emitLinuxPtrace(B, M, TT, 0);
-    foldFlag(B, State, B.CreateICmpSLT(traceRc, ConstantInt::getSigned(i32, 0)),
-             0x3D2D7F2BAE63D5C9ULL, "morok.antidbg.ptrace.init");
+    if (AllowSelfTrace) {
+        Value *traceRc = emitLinuxPtrace(B, M, TT, 0);
+        foldFlag(B, State,
+                 B.CreateICmpSLT(traceRc, ConstantInt::getSigned(i32, 0)),
+                 0x3D2D7F2BAE63D5C9ULL, "morok.antidbg.ptrace.init");
+    }
 
     Function *statusFn = linuxStatusTracerCheck(M, rng, TT);
     Function *statFn = linuxStatField4Check(M, rng, TT);
@@ -1247,9 +1265,10 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
              0xA4756E49F2D31219ULL, "morok.antidbg.status");
     foldState(B, State, stat4, 0xDA942042E4DD58B5ULL, "morok.antidbg.stat4");
     emitLinuxLandlockSandbox(B, M, State, TT);
-    emitLinuxSeccompFilter(B, M, TT);
+    emitLinuxSeccompFilter(B, M, TT, AllowSelfTrace);
 
-    Function *watch = linuxWatchThread(M, statusFn, statFn, State, TT);
+    Function *watch =
+        linuxWatchThread(M, statusFn, statFn, State, TT, AllowSelfTrace);
     emitLinuxWatcherStart(B, M, watch);
     B.CreateRetVoid();
 }
@@ -2471,6 +2490,302 @@ Function *linuxGotPltProbe(Module &M, const Triple &TT) {
     return fn;
 }
 
+Function *darwinTextTargetInDyldImages(Module &M) {
+    if (Function *existing = M.getFunction("morok.antihook.macho.text"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(i32, {ip}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.macho.text", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    auto *target = fn->getArg(0);
+    target->setName("target");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *imageLoopBB = BasicBlock::Create(ctx, "image.loop", fn);
+    auto *imageBodyBB = BasicBlock::Create(ctx, "image.body", fn);
+    auto *cmdLoopBB = BasicBlock::Create(ctx, "cmd.loop", fn);
+    auto *cmdBodyBB = BasicBlock::Create(ctx, "cmd.body", fn);
+    auto *cmdNextBB = BasicBlock::Create(ctx, "cmd.next", fn);
+    auto *imageNextBB = BasicBlock::Create(ctx, "image.next", fn);
+    auto *ret1BB = BasicBlock::Create(ctx, "ret1", fn);
+    auto *ret0BB = BasicBlock::Create(ctx, "ret0", fn);
+
+    FunctionCallee imageCount = M.getOrInsertFunction(
+        "_dyld_image_count", FunctionType::get(i32, false));
+    FunctionCallee imageHeader = M.getOrInsertFunction(
+        "_dyld_get_image_header", FunctionType::get(ptr, {i32}, false));
+    FunctionCallee imageSlide = M.getOrInsertFunction(
+        "_dyld_get_image_vmaddr_slide", FunctionType::get(ip, {i32}, false));
+
+    IRBuilder<> B(entry);
+    Value *count = B.CreateCall(imageCount, {}, "morok.macho.image.count");
+    B.CreateBr(imageLoopBB);
+
+    IRBuilder<> ILB(imageLoopBB);
+    auto *imageIdx = ILB.CreatePHI(i32, 2, "morok.antihook.macho.image.idx");
+    imageIdx->addIncoming(ConstantInt::get(i32, 0), entry);
+    Value *imageInRange =
+        ILB.CreateAnd(ILB.CreateICmpULT(imageIdx, count),
+                      ILB.CreateICmpULT(imageIdx, ConstantInt::get(i32, 128)));
+    ILB.CreateCondBr(imageInRange, imageBodyBB, ret0BB);
+
+    IRBuilder<> IBB(imageBodyBB);
+    Value *hdr = IBB.CreateCall(imageHeader, {imageIdx}, "morok.macho.hdr");
+    Value *slide = IBB.CreateCall(imageSlide, {imageIdx}, "morok.macho.slide");
+    Value *magic = loadAt(IBB, M, i32, hdr, 0ULL, "morok.antihook.macho.magic");
+    Value *ncmds = loadAt(IBB, M, i32, hdr, 16, "morok.antihook.macho.ncmds");
+    Value *validImage = IBB.CreateAnd(
+        IBB.CreateICmpNE(hdr, ConstantPointerNull::get(ptr)),
+        IBB.CreateICmpEQ(magic, ConstantInt::get(i32, 0xFEEDFACF)));
+    IBB.CreateCondBr(validImage, cmdLoopBB, imageNextBB);
+
+    IRBuilder<> CLB(cmdLoopBB);
+    auto *cmdIdx = CLB.CreatePHI(i32, 2, "morok.antihook.macho.cmd.idx");
+    auto *cmdOff = CLB.CreatePHI(ip, 2, "morok.antihook.macho.cmd.off");
+    cmdIdx->addIncoming(ConstantInt::get(i32, 0), imageBodyBB);
+    cmdOff->addIncoming(ConstantInt::get(ip, 32), imageBodyBB);
+    Value *cmdInRange =
+        CLB.CreateAnd(CLB.CreateICmpULT(cmdIdx, ncmds),
+                      CLB.CreateICmpULT(cmdIdx, ConstantInt::get(i32, 128)));
+    CLB.CreateCondBr(cmdInRange, cmdBodyBB, imageNextBB);
+
+    IRBuilder<> CBB(cmdBodyBB);
+    Value *cmdPtr = gepI8(CBB, M, hdr, cmdOff, "morok.antihook.macho.cmd.ptr");
+    Value *cmd = loadAt(CBB, M, i32, cmdPtr, 0ULL, "morok.antihook.macho.cmd");
+    Value *cmdSize32 =
+        loadAt(CBB, M, i32, cmdPtr, 4, "morok.antihook.macho.cmd.size");
+    Value *cmdSize =
+        CBB.CreateZExt(cmdSize32, ip, "morok.antihook.macho.cmd.size.w");
+    Value *vmaddr =
+        loadAt(CBB, M, i64, cmdPtr, 24, "morok.antihook.macho.seg.vmaddr");
+    Value *vmsize =
+        loadAt(CBB, M, i64, cmdPtr, 32, "morok.antihook.macho.seg.vmsize");
+    Value *initprot =
+        loadAt(CBB, M, i32, cmdPtr, 60, "morok.antihook.macho.seg.initprot");
+    Value *isSegment = CBB.CreateICmpEQ(cmd, ConstantInt::get(i32, 0x19),
+                                        "morok.antihook.macho.seg");
+    Value *isExec = CBB.CreateICmpNE(
+        CBB.CreateAnd(initprot, ConstantInt::get(i32, 4)),
+        ConstantInt::get(i32, 0), "morok.antihook.macho.seg.exec");
+    Value *segStart =
+        CBB.CreateAdd(slide, vmaddr, "morok.antihook.macho.text.start");
+    Value *segEnd =
+        CBB.CreateAdd(segStart, vmsize, "morok.antihook.macho.text.end");
+    Value *hit =
+        CBB.CreateAnd(CBB.CreateAnd(isSegment, isExec),
+                      CBB.CreateAnd(CBB.CreateICmpUGE(target, segStart),
+                                    CBB.CreateICmpULT(target, segEnd)),
+                      "morok.antihook.macho.text.hit");
+    CBB.CreateCondBr(hit, ret1BB, cmdNextBB);
+
+    IRBuilder<> CNB(cmdNextBB);
+    Value *nextCmdIdx = CNB.CreateAdd(cmdIdx, ConstantInt::get(i32, 1),
+                                      "morok.antihook.macho.cmd.next");
+    Value *nextCmdOff =
+        CNB.CreateAdd(cmdOff, cmdSize, "morok.antihook.macho.cmd.off.next");
+    CNB.CreateBr(cmdLoopBB);
+    cmdIdx->addIncoming(nextCmdIdx, cmdNextBB);
+    cmdOff->addIncoming(nextCmdOff, cmdNextBB);
+
+    IRBuilder<> INB(imageNextBB);
+    Value *nextImageIdx = INB.CreateAdd(imageIdx, ConstantInt::get(i32, 1),
+                                        "morok.antihook.macho.image.next");
+    INB.CreateBr(imageLoopBB);
+    imageIdx->addIncoming(nextImageIdx, imageNextBB);
+
+    IRBuilder<> R1(ret1BB);
+    R1.CreateRet(ConstantInt::get(i32, 1));
+
+    IRBuilder<> R0(ret0BB);
+    R0.CreateRet(ConstantInt::get(i32, 0));
+    return fn;
+}
+
+Function *darwinFixupProbe(Module &M, const Triple &TT) {
+    if (!TT.isOSDarwin())
+        return nullptr;
+    if (intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.macho.fixups"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    Function *textCheck = darwinTextTargetInDyldImages(M);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.macho.fixups", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *cmdLoopBB = BasicBlock::Create(ctx, "cmd.loop", fn);
+    auto *cmdBodyBB = BasicBlock::Create(ctx, "cmd.body", fn);
+    auto *secLoopBB = BasicBlock::Create(ctx, "section.loop", fn);
+    auto *secBodyBB = BasicBlock::Create(ctx, "section.body", fn);
+    auto *entryLoopBB = BasicBlock::Create(ctx, "entry.loop", fn);
+    auto *entryBodyBB = BasicBlock::Create(ctx, "entry.body", fn);
+    auto *entryCheckBB = BasicBlock::Create(ctx, "entry.check", fn);
+    auto *entryNextBB = BasicBlock::Create(ctx, "entry.next", fn);
+    auto *secNextBB = BasicBlock::Create(ctx, "section.next", fn);
+    auto *cmdNextBB = BasicBlock::Create(ctx, "cmd.next", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *diff =
+        B.CreateAlloca(i64, nullptr, "morok.antihook.macho.fixup.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    FunctionCallee imageHeader = M.getOrInsertFunction(
+        "_dyld_get_image_header", FunctionType::get(ptr, {i32}, false));
+    FunctionCallee imageSlide = M.getOrInsertFunction(
+        "_dyld_get_image_vmaddr_slide", FunctionType::get(ip, {i32}, false));
+    Value *hdr = B.CreateCall(imageHeader, {ConstantInt::get(i32, 0)},
+                              "morok.fixup.hdr");
+    Value *slide = B.CreateCall(imageSlide, {ConstantInt::get(i32, 0)},
+                                "morok.fixup.slide");
+    Value *magic = loadAt(B, M, i32, hdr, 0ULL, "morok.antihook.fixup.magic");
+    Value *ncmds = loadAt(B, M, i32, hdr, 16, "morok.antihook.fixup.ncmds");
+    Value *valid =
+        B.CreateAnd(B.CreateICmpNE(hdr, ConstantPointerNull::get(ptr)),
+                    B.CreateICmpEQ(magic, ConstantInt::get(i32, 0xFEEDFACF)));
+    B.CreateCondBr(valid, cmdLoopBB, retBB);
+
+    IRBuilder<> CLB(cmdLoopBB);
+    auto *cmdIdx = CLB.CreatePHI(i32, 2, "morok.antihook.fixup.cmd.idx");
+    auto *cmdOff = CLB.CreatePHI(ip, 2, "morok.antihook.fixup.cmd.off");
+    cmdIdx->addIncoming(ConstantInt::get(i32, 0), entry);
+    cmdOff->addIncoming(ConstantInt::get(ip, 32), entry);
+    Value *cmdInRange =
+        CLB.CreateAnd(CLB.CreateICmpULT(cmdIdx, ncmds),
+                      CLB.CreateICmpULT(cmdIdx, ConstantInt::get(i32, 128)));
+    CLB.CreateCondBr(cmdInRange, cmdBodyBB, retBB);
+
+    IRBuilder<> CBB(cmdBodyBB);
+    Value *cmdPtr = gepI8(CBB, M, hdr, cmdOff, "morok.antihook.fixup.cmd.ptr");
+    Value *cmd = loadAt(CBB, M, i32, cmdPtr, 0ULL, "morok.antihook.fixup.cmd");
+    Value *cmdSize32 =
+        loadAt(CBB, M, i32, cmdPtr, 4, "morok.antihook.fixup.cmd.size");
+    Value *cmdSize =
+        CBB.CreateZExt(cmdSize32, ip, "morok.antihook.fixup.cmd.size.w");
+    Value *nsects =
+        loadAt(CBB, M, i32, cmdPtr, 64, "morok.antihook.fixup.nsects");
+    Value *isSegment = CBB.CreateICmpEQ(cmd, ConstantInt::get(i32, 0x19),
+                                        "morok.antihook.fixup.segment");
+    Value *canScanSections = CBB.CreateAnd(
+        isSegment,
+        CBB.CreateAnd(CBB.CreateICmpUGT(nsects, ConstantInt::get(i32, 0)),
+                      CBB.CreateICmpUGE(cmdSize, ConstantInt::get(ip, 72))));
+    Value *firstSecOff = CBB.CreateAdd(cmdOff, ConstantInt::get(ip, 72),
+                                       "morok.antihook.fixup.section.first");
+    CBB.CreateCondBr(canScanSections, secLoopBB, cmdNextBB);
+
+    IRBuilder<> SLB(secLoopBB);
+    auto *secIdx = SLB.CreatePHI(i32, 2, "morok.antihook.fixup.section.idx");
+    auto *secOff = SLB.CreatePHI(ip, 2, "morok.antihook.fixup.section.off");
+    secIdx->addIncoming(ConstantInt::get(i32, 0), cmdBodyBB);
+    secOff->addIncoming(firstSecOff, cmdBodyBB);
+    Value *secInRange =
+        SLB.CreateAnd(SLB.CreateICmpULT(secIdx, nsects),
+                      SLB.CreateICmpULT(secIdx, ConstantInt::get(i32, 64)));
+    SLB.CreateCondBr(secInRange, secBodyBB, cmdNextBB);
+
+    IRBuilder<> SBB(secBodyBB);
+    Value *secPtr =
+        gepI8(SBB, M, hdr, secOff, "morok.antihook.fixup.section.ptr");
+    Value *secAddr =
+        loadAt(SBB, M, i64, secPtr, 32, "morok.antihook.fixup.section.addr");
+    Value *secSize =
+        loadAt(SBB, M, i64, secPtr, 40, "morok.antihook.fixup.section.size");
+    Value *secFlags =
+        loadAt(SBB, M, i32, secPtr, 64, "morok.antihook.fixup.section.flags");
+    Value *secType = SBB.CreateAnd(secFlags, ConstantInt::get(i32, 0xff),
+                                   "morok.antihook.fixup.section.type");
+    Value *isNonLazy = SBB.CreateICmpEQ(secType, ConstantInt::get(i32, 6),
+                                        "morok.antihook.fixup.section.got");
+    Value *isLazy = SBB.CreateICmpEQ(secType, ConstantInt::get(i32, 7),
+                                     "morok.antihook.fixup.section.lazy");
+    Value *entryCount = SBB.CreateUDiv(secSize, ConstantInt::get(i64, 8),
+                                       "morok.antihook.fixup.entry.count");
+    Value *sectionRuntime =
+        SBB.CreateAdd(slide, secAddr, "morok.antihook.fixup.section.runtime");
+    Value *scanSection =
+        SBB.CreateAnd(SBB.CreateOr(isNonLazy, isLazy),
+                      SBB.CreateICmpUGT(entryCount, ConstantInt::get(i64, 0)),
+                      "morok.antihook.fixup.section.scan");
+    SBB.CreateCondBr(scanSection, entryLoopBB, secNextBB);
+
+    IRBuilder<> ELB(entryLoopBB);
+    auto *entryIdx = ELB.CreatePHI(i64, 2, "morok.antihook.fixup.entry.idx");
+    entryIdx->addIncoming(ConstantInt::get(i64, 0), secBodyBB);
+    Value *entryInRange =
+        ELB.CreateAnd(ELB.CreateICmpULT(entryIdx, entryCount),
+                      ELB.CreateICmpULT(entryIdx, ConstantInt::get(i64, 4096)));
+    ELB.CreateCondBr(entryInRange, entryBodyBB, secNextBB);
+
+    IRBuilder<> EBB(entryBodyBB);
+    Value *slotAddr = EBB.CreateAdd(
+        sectionRuntime, EBB.CreateMul(entryIdx, ConstantInt::get(i64, 8)),
+        "morok.antihook.fixup.slot");
+    Value *slotPtr =
+        EBB.CreateIntToPtr(slotAddr, ptr, "morok.antihook.fixup.slot.ptr");
+    auto *targetPtr =
+        EBB.CreateLoad(ptr, slotPtr, "morok.antihook.fixup.target");
+    targetPtr->setVolatile(true);
+    Value *targetAddr =
+        EBB.CreatePtrToInt(targetPtr, ip, "morok.antihook.fixup.target.addr");
+    EBB.CreateCondBr(EBB.CreateICmpNE(targetPtr, ConstantPointerNull::get(ptr)),
+                     entryCheckBB, entryNextBB);
+
+    IRBuilder<> ECB(entryCheckBB);
+    Value *textOk =
+        ECB.CreateCall(textCheck, {targetAddr}, "morok.antihook.fixup.text");
+    incrementDiff(
+        ECB, diff,
+        ECB.CreateICmpEQ(textOk, ConstantInt::get(Type::getInt32Ty(ctx), 0)),
+        "morok.antihook.fixup.violation");
+    ECB.CreateBr(entryNextBB);
+
+    IRBuilder<> ENB(entryNextBB);
+    Value *nextEntryIdx = ENB.CreateAdd(entryIdx, ConstantInt::get(i64, 1),
+                                        "morok.antihook.fixup.entry.next");
+    ENB.CreateBr(entryLoopBB);
+    entryIdx->addIncoming(nextEntryIdx, entryNextBB);
+
+    IRBuilder<> SNB(secNextBB);
+    Value *nextSecIdx = SNB.CreateAdd(secIdx, ConstantInt::get(i32, 1),
+                                      "morok.antihook.fixup.section.next");
+    Value *nextSecOff = SNB.CreateAdd(secOff, ConstantInt::get(ip, 80),
+                                      "morok.antihook.fixup.section.off.next");
+    SNB.CreateBr(secLoopBB);
+    secIdx->addIncoming(nextSecIdx, secNextBB);
+    secOff->addIncoming(nextSecOff, secNextBB);
+
+    IRBuilder<> CNB(cmdNextBB);
+    Value *nextCmdIdx = CNB.CreateAdd(cmdIdx, ConstantInt::get(i32, 1),
+                                      "morok.antihook.fixup.cmd.next");
+    Value *nextCmdOff =
+        CNB.CreateAdd(cmdOff, cmdSize, "morok.antihook.fixup.cmd.off.next");
+    CNB.CreateBr(cmdLoopBB);
+    cmdIdx->addIncoming(nextCmdIdx, cmdNextBB);
+    cmdOff->addIncoming(nextCmdOff, cmdNextBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
 void emitProloguePatternChecks(IRBuilder<> &B, Module &M, const Triple &TT,
                                GlobalVariable *State,
                                const std::vector<Function *> &Targets,
@@ -2823,19 +3138,33 @@ GlobalVariable *trapHitCounter(Module &M) {
     return gv;
 }
 
+bool useLinuxX86SiginfoTrapHandler(const Triple &TT) {
+    return TT.isOSLinux() && TT.getArch() == Triple::x86_64;
+}
+
 Function *trapSignalHandler(Module &M, GlobalVariable *Counter,
-                            GlobalVariable *State) {
+                            GlobalVariable *State, const Triple &TT) {
     if (Function *existing = M.getFunction("morok.trap.handler"))
         return existing;
 
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
-    auto *fn =
-        Function::Create(FunctionType::get(Type::getVoidTy(ctx), {i32}, false),
-                         GlobalValue::PrivateLinkage, "morok.trap.handler", &M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    const bool siginfo = useLinuxX86SiginfoTrapHandler(TT);
+    SmallVector<Type *, 3> args{i32};
+    if (siginfo) {
+        args.push_back(ptr);
+        args.push_back(ptr);
+    }
+    auto *fn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), args, false),
+        GlobalValue::PrivateLinkage, "morok.trap.handler", &M);
     fn->setDSOLocal(true);
     Argument *sig = fn->getArg(0);
     sig->setName("sig");
+    Argument *uctx = siginfo ? fn->getArg(2) : nullptr;
+    if (uctx)
+        uctx->setName("uctx");
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
     IRBuilder<> B(entry);
@@ -2847,6 +3176,44 @@ Function *trapSignalHandler(Module &M, GlobalVariable *Counter,
     store->setVolatile(true);
     foldState(B, State, sig, 0xC286B9F2B77D6A41ULL, "morok.trap.signal");
     foldState(B, State, next, 0x4F3C2D1E9876A5B1ULL, "morok.trap.count");
+
+    if (siginfo) {
+        auto *ip = intPtrTy(M);
+        auto *i8 = Type::getInt8Ty(ctx);
+        auto *checkCtx = BasicBlock::Create(ctx, "morok.trap.ill.ctx", fn);
+        auto *checkByte = BasicBlock::Create(ctx, "morok.trap.ill.byte", fn);
+        auto *advance = BasicBlock::Create(ctx, "morok.trap.ill.advance", fn);
+        auto *done = BasicBlock::Create(ctx, "done", fn);
+
+        Value *isIll =
+            B.CreateICmpEQ(sig, ConstantInt::get(i32, 4), "morok.trap.ill");
+        B.CreateCondBr(isIll, checkCtx, done);
+
+        IRBuilder<> CB(checkCtx);
+        CB.CreateCondBr(CB.CreateICmpNE(uctx, ConstantPointerNull::get(ptr)),
+                        checkByte, done);
+
+        IRBuilder<> BB(checkByte);
+        // Linux x86_64 ucontext_t: uc_mcontext.gregs[REG_RIP] at byte 168.
+        // Orb reports ICEBP (0xf1) as SIGILL at the same PC, so advance only
+        // when the trapped byte is exactly the ICEBP stimulus.
+        Value *ripSlot = gepI8(BB, M, uctx, constIp(M, 168),
+                               "morok.trap.rip.slot");
+        Value *rip = BB.CreateLoad(ip, ripSlot, "morok.trap.rip");
+        Value *pc = BB.CreateIntToPtr(rip, ptr, "morok.trap.pc");
+        Value *byte = BB.CreateLoad(i8, pc, "morok.trap.icebp.byte");
+        BB.CreateCondBr(
+            BB.CreateICmpEQ(byte, ConstantInt::get(i8, 0xF1),
+                            "morok.trap.icebp"),
+            advance, done);
+
+        IRBuilder<> AB(advance);
+        AB.CreateStore(AB.CreateAdd(rip, ConstantInt::get(ip, 1)), ripSlot);
+        AB.CreateBr(done);
+
+        B.SetInsertPoint(done);
+    }
+
     B.CreateRetVoid();
     return fn;
 }
@@ -2859,9 +3226,40 @@ FunctionCallee signalDecl(Module &M) {
                                  FunctionType::get(ptr, {i32, ptr}, false));
 }
 
+FunctionCallee sigactionDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    return M.getOrInsertFunction(
+        "sigaction", FunctionType::get(i32, {i32, ptr, ptr}, false));
+}
+
 FunctionCallee raiseDecl(Module &M) {
     auto *i32 = Type::getInt32Ty(M.getContext());
     return M.getOrInsertFunction("raise", FunctionType::get(i32, {i32}, false));
+}
+
+void zeroActionBytes(IRBuilder<> &B, Module &M, AllocaInst *Action,
+                     std::uint64_t Bytes) {
+    auto *i8 = Type::getInt8Ty(M.getContext());
+    for (std::uint64_t i = 0; i < Bytes; ++i)
+        B.CreateStore(ConstantInt::get(i8, 0),
+                      gepI8(B, M, Action, constIp(M, i)));
+}
+
+void storeSiginfoAction(IRBuilder<> &B, Module &M, AllocaInst *Action,
+                        Function *Handler) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    constexpr std::uint64_t kSigactionSize = 152;
+    constexpr std::uint64_t kFlagsOffset = 136;
+    constexpr std::uint32_t kSaSiginfo = 4;
+
+    zeroActionBytes(B, M, Action, kSigactionSize);
+    B.CreateStore(Handler, gepI8(B, M, Action, constIp(M, 0),
+                                 "morok.trap.sa.handler"));
+    B.CreateStore(ConstantInt::get(i32, kSaSiginfo),
+                  gepI8(B, M, Action, constIp(M, kFlagsOffset),
+                        "morok.trap.sa.flags"));
 }
 
 void emitTrapInlineAsm(IRBuilder<> &B, StringRef Asm, StringRef Constraints) {
@@ -2901,13 +3299,13 @@ unsigned emitTrapStimuli(IRBuilder<> &B, Module &M, const Triple &TT) {
 
 } // namespace
 
-bool antiDebuggingModule(Module &M, ir::IRRandom &rng) {
+bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace) {
     const Triple tt(M.getTargetTriple());
 
     Function *ctor = makeCtorShell(M, "morok.antidbg");
     GlobalVariable *state = antiDebugState(M, rng);
     if (tt.isOSLinux())
-        emitLinuxAntiDebug(M, ctor, state, rng, tt);
+        emitLinuxAntiDebug(M, ctor, state, rng, tt, AllowSelfTrace);
     else if (tt.isOSDarwin())
         emitDarwinAntiDebug(M, ctor, state, rng, tt);
     else {
@@ -2956,20 +3354,55 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
     Function *ctor = makeCtorShell(M, "morok.trap");
     GlobalVariable *state = trapOracleState(M, rng);
     GlobalVariable *counter = trapHitCounter(M);
-    Function *handler = trapSignalHandler(M, counter, state);
+    Function *handler = trapSignalHandler(M, counter, state, tt);
 
     IRBuilder<> B(&ctor->getEntryBlock());
     B.CreateStore(ConstantInt::get(i32, 0), counter)->setVolatile(true);
-    Value *oldHandler =
-        B.CreateCall(signalDecl(M), {ConstantInt::get(i32, kSigTrap), handler},
-                     "morok.trap.old.handler");
+
+    Value *oldHandler = nullptr;
+    AllocaInst *oldTrapAction = nullptr;
+    AllocaInst *oldIllAction = nullptr;
+    if (useLinuxX86SiginfoTrapHandler(tt)) {
+        constexpr int kSigIll = 4;
+        auto *actionTy = ArrayType::get(Type::getInt8Ty(ctx), 152);
+        AllocaInst *newAction =
+            B.CreateAlloca(actionTy, nullptr, "morok.trap.sa");
+        oldTrapAction = B.CreateAlloca(actionTy, nullptr, "morok.trap.old.trap");
+        oldIllAction = B.CreateAlloca(actionTy, nullptr, "morok.trap.old.ill");
+        storeSiginfoAction(B, M, newAction, handler);
+        FunctionCallee sigactionFn = sigactionDecl(M);
+        B.CreateCall(sigactionFn,
+                     {ConstantInt::get(i32, kSigTrap), newAction,
+                      oldTrapAction},
+                     "morok.trap.sigaction.trap");
+        B.CreateCall(sigactionFn,
+                     {ConstantInt::get(i32, kSigIll), newAction, oldIllAction},
+                     "morok.trap.sigaction.ill");
+    } else {
+        oldHandler = B.CreateCall(
+            signalDecl(M), {ConstantInt::get(i32, kSigTrap), handler},
+            "morok.trap.old.handler");
+    }
+
     unsigned expected = emitTrapStimuli(B, M, tt);
     auto *hits = B.CreateLoad(i32, counter, "morok.trap.hits.final");
     hits->setVolatile(true);
     foldState(B, state, hits, 0x91D0F736B52C48EAULL, "morok.trap.final");
     foldFlag(B, state, B.CreateICmpULT(hits, ConstantInt::get(i32, expected)),
              0xE2AB41739D08C6F5ULL, "morok.trap.missing");
-    B.CreateCall(signalDecl(M), {ConstantInt::get(i32, kSigTrap), oldHandler});
+    if (useLinuxX86SiginfoTrapHandler(tt)) {
+        constexpr int kSigIll = 4;
+        FunctionCallee sigactionFn = sigactionDecl(M);
+        B.CreateCall(sigactionFn,
+                     {ConstantInt::get(i32, kSigTrap), oldTrapAction,
+                      ConstantPointerNull::get(PointerType::getUnqual(ctx))});
+        B.CreateCall(sigactionFn,
+                     {ConstantInt::get(i32, kSigIll), oldIllAction,
+                      ConstantPointerNull::get(PointerType::getUnqual(ctx))});
+    } else {
+        B.CreateCall(signalDecl(M),
+                     {ConstantInt::get(i32, kSigTrap), oldHandler});
+    }
     B.CreateRetVoid();
     appendToGlobalCtors(M, ctor, 0);
     return true;
@@ -3011,6 +3444,14 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldFlag(B, state,
                  B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
                  0xB17D4E23C9A5806FULL, "morok.antihook.got.changed");
+    }
+    if (Function *fixups = darwinFixupProbe(M, tt)) {
+        Value *diff = B.CreateCall(fixups, {}, "morok.antihook.fixup.diff");
+        foldState(B, state, diff, 0x8D46E52CA7B9130FULL,
+                  "morok.antihook.fixup");
+        foldFlag(B, state,
+                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+                 0xD1C9A03F76542BE8ULL, "morok.antihook.fixup.changed");
     }
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);
 

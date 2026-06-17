@@ -20,7 +20,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 
 ## S — quick wins
 
-- [x] Re-arm `ptrace(PTRACE_TRACEME)` and re-check `TracerPid` on a late cadence to catch late attach, not just at init `[linux · extends antidbg]`
+- [x] Re-arm `ptrace(PTRACE_TRACEME)` where compatible and re-check `TracerPid` on a late cadence to catch late attach, not just at init `[linux · extends antidbg]`
 - [x] Read `/proc/self/status` `TracerPid:` and `/proc/self/stat` field 4 directly as a debugger check `[linux · extends antidbg]`
 - [x] Add `ptrace(PT_DENY_ATTACH)` debugger denial for macOS targets `[macos · extends antidbg]`
 - [x] Check `sysctl(KERN_PROC_PID)` → `kinfo_proc.kp_proc.p_flag & P_TRACED` (harder to fake than ptrace) `[macos · new]`
@@ -43,7 +43,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Prologue-pattern hook detector on critical functions (`E9`/`FF25`/`68..C3`/`EB`/`jcc` as first bytes) `[xplat · new]`
 - [x] Per-function keyed-MAC code baseline verified at runtime to catch mid-body patches `[xplat · extends selfcheck]`
 - [x] Runtime GOT/PLT validator: verify each entry points inside its owning library's executable range, re-`mprotect` the GOT read-only, poison on deviation (pairs with `-z relro,-z now`) `[linux · new]`
-- [ ] Mach-O `__got`/`__la_symbol_ptr` fixup validator: verify each pointer lands in the expected dylib `__TEXT` `[macos · new]`
+- [x] Mach-O `__got`/`__la_symbol_ptr` fixup validator: verify each pointer lands in the expected dylib `__TEXT` `[macos · new]`
 - [ ] VTable integrity: store expected vptr + per-vtable hash and verify before virtual dispatch `[xplat C++ · new]`
 - [ ] Keep critical function pointers / imports XOR-/encode-obfuscated and decrypt only at the call site `[xplat · extends fco/constenc]`
 - [ ] DR-register sentinel thread: scan and continuously zero `Dr0–7` on all threads (detects HW breakpoints and wipes DR-based hooks) `[xplat · new]`

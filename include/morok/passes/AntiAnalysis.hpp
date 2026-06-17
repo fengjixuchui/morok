@@ -32,7 +32,8 @@ namespace morok::passes {
 
 /// Inject startup debugger-denial and source-state checks.  Runtime strings are
 /// cloaked with per-site material from `rng`.  Returns true if code was added.
-bool antiDebuggingModule(llvm::Module &M, morok::ir::IRRandom &rng);
+bool antiDebuggingModule(llvm::Module &M, morok::ir::IRRandom &rng,
+                         bool allowSelfTrace = true);
 
 /// Compatibility overload for standalone tests / direct use.
 bool antiDebuggingModule(llvm::Module &M);

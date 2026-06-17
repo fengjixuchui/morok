@@ -977,9 +977,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   startup path also applies a Landlock ruleset, when the kernel supports it, to
   deny destructive filesystem rights (writes, creates, removes, renames,
   truncates, and device ioctls by ABI level) while keeping reads/exec available.
-  It then installs a seccomp-BPF filter that kills `ptrace` requests other than
-  Morok's own `PTRACE_TRACEME` re-arm and kills
-  `process_vm_readv`/`process_vm_writev` in the protected process lineage.
+  It then installs a seccomp-BPF filter that kills `ptrace` requests and
+  `process_vm_readv`/`process_vm_writev` in the protected process lineage.  In
+  configurations without TrapOracle, the filter can allow Morok's own
+  `PTRACE_TRACEME` re-arm.  When TrapOracle is enabled, Linux self-tracing is
+  omitted so `SIGTRAP` stimuli are delivered to Morok's handler instead of
+  job-stopping under the parent shell.
   On x86_64 Linux, sensitive anti-debug syscalls (`ptrace`, `prctl`,
   `openat`/`read`/`close` for `/proc` probes, Landlock, and seccomp install)
   are emitted as inline `syscall` instructions instead of libc imports.
@@ -1013,16 +1016,25 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   re-applies read-only protection to the slot page with an inline x86_64
   `mprotect` syscall path; bad targets or failed reprotection are folded into
   delayed anti-hook state.
+  On macOS, AntiHooking walks the main Mach-O load commands, scans
+  `S_NON_LAZY_SYMBOL_POINTERS` and `S_LAZY_SYMBOL_POINTERS` sections such as
+  `__got` and `__la_symbol_ptr`, volatile-loads each non-null pointer, and
+  checks it against executable segments from dyld's loaded image list.  Pointers
+  that do not land in any loaded image `__TEXT`-style executable range are
+  folded into the delayed anti-hook state.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and
   `CLOCK_MONOTONIC_RAW`.  Slow or divergent sample distributions are folded
   into private state instead of causing immediate false-positive-prone exits.
-- TrapOracle temporarily installs a `SIGTRAP` handler during startup, fires
-  x86 `int3`/`icebp`/trap-flag stimuli where supported, falls back to portable
+- TrapOracle temporarily installs a trap handler during startup, fires x86
+  `int3`/`icebp`/trap-flag stimuli where supported, falls back to portable
   `raise(SIGTRAP)` on non-x86 POSIX targets, and folds missing or swallowed trap
-  delivery into private state before restoring the previous handler.  Windows
-  `INT 2Dh`/VEH coverage remains gated on the future Windows foundation.
+  delivery into private state before restoring the previous handler.  Linux
+  x86_64 uses a `sigaction` `SA_SIGINFO` handler for both `SIGTRAP` and
+  `SIGILL`, advancing RIP over `icebp` when emulators such as Orb report byte
+  `0xf1` as a non-resumable illegal instruction.  Windows `INT 2Dh`/VEH
+  coverage remains gated on the future Windows foundation.
 
 ## Scheduler memory guardrails
 - The scheduler re-measures instruction and block counts before each
