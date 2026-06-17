@@ -51,7 +51,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Self-enforce W^X on own pages (`mprotect` to RX, ban RWX) `[xplat · new]`
 - [x] Call-stack origin validation at sensitive functions: every return frame must lie in a known module's executable range, never in private/unbacked RWX (defeats ROP / injected calls / DBI trampolines) `[xplat · new]`
 - [x] Method-divergence oracle: call the same primitive two ways (direct syscall vs wrapper); divergent results ⇒ one path is hooked `[posix · new]`
-- [ ] Guard-network topology: ensure overlapping checksum guards cover every byte under ≥k guards (Chang–Atallah) `[xplat · extends mutualguard]`
+- [x] Guard-network topology: ensure overlapping checksum guards cover every byte under ≥k guards (Chang–Atallah) `[xplat · extends mutualguard]`
 - [ ] Oblivious hashing: hash the runtime value/branch trace of a computation (not static bytes) to detect semantic tampering and emulation `[xplat · extends tracekey]`
 - [ ] Functional entanglement — derive real runtime values (crypto keys, jump-table indices, S-box bytes, next-block decryption keys) **from** the checksum / DR-state / watchdog-liveness so there is no `jz` to NOP `[xplat · extends selfcheck/dfi]`
 - [ ] Delayed, probabilistic, decoupled failure: record tamper in obscure state, continue normally, degrade/crash much later at an unrelated site `[xplat · extends selfcheck/tracekey]`

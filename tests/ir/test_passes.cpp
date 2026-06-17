@@ -197,6 +197,17 @@ bool constantReferencesGlobal(const Constant *C, const GlobalValue *GV) {
     return false;
 }
 
+bool instructionReferencesGlobal(const Instruction &I, const GlobalValue *GV) {
+    for (const Use &U : I.operands()) {
+        if (U.get() == GV)
+            return true;
+        if (auto *C = dyn_cast<Constant>(U.get()))
+            if (constantReferencesGlobal(C, GV))
+                return true;
+    }
+    return false;
+}
+
 std::size_t countFunctions(Module &M, StringRef prefix) {
     std::size_t n = 0;
     for (Function &F : M)
@@ -6592,11 +6603,13 @@ entry:
         }
     }
 
+    std::vector<unsigned> regionCoverage(regions.size(), 0);
     for (Function *Node : nodes) {
-        bool hasRegionLoad = false;
+        unsigned regionLoads = 0;
         unsigned expectedLoads = 0;
         bool hasPeerMix = false;
         bool hasNodeDiff = false;
+        std::vector<bool> nodeCovers(regions.size(), false);
         for (Instruction &I : instructions(*Node)) {
             hasPeerMix |= I.getName().starts_with("morok.mg.peer");
             hasNodeDiff |= I.getName().starts_with("morok.mg.node.diff");
@@ -6604,20 +6617,29 @@ entry:
                 if (Function *Callee = CI->getCalledFunction())
                     hasTrap |= Callee->getName() == "llvm.trap";
             if (auto *LI = dyn_cast<LoadInst>(&I)) {
-                hasRegionLoad |= LI->isVolatile() &&
-                                 LI->getPointerOperand()->getName().starts_with(
-                                     "morok.mg.region.ptr");
+                if (LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.mg.region.ptr"))
+                    ++regionLoads;
                 if (LI->isVolatile() &&
                     LI->getPointerOperand()->getName().starts_with(
                         "morok.mg.expected"))
                     ++expectedLoads;
             }
+            for (std::size_t R = 0; R != regions.size(); ++R)
+                nodeCovers[R] = nodeCovers[R] ||
+                                instructionReferencesGlobal(I, regions[R]);
         }
-        CHECK(hasRegionLoad);
+        for (std::size_t R = 0; R != nodeCovers.size(); ++R)
+            if (nodeCovers[R])
+                ++regionCoverage[R];
+        CHECK(regionLoads >= 3u);
         CHECK(expectedLoads >= 3u);
         CHECK(hasPeerMix);
         CHECK(hasNodeDiff);
     }
+    for (unsigned Coverage : regionCoverage)
+        CHECK(Coverage >= 3u);
 
     CHECK(callsDiff);
     CHECK(hasReturnPoison);

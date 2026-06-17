@@ -667,18 +667,22 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `morok.mg.expected.*` hash globals; a post-link rewriter can replace both
   with native ranges and final expected hashes after layout is fixed.
 - Each selected function receives several internal `morok.mg.node.*` helpers.
-  A node hashes its own region with volatile byte loads, volatile-loads its own
-  expected hash, and also volatile-loads two neighboring nodes' expected hashes.
-  The node returns a mixed diff that is zero only when its own region and peer
-  expected globals match the baked graph constants.
+  A node hashes its own region and adjacent peer regions with volatile byte
+  loads, volatile-loads each covered region's expected hash, and also compares
+  those expected globals against baked constants.  With three or more nodes,
+  every region byte is covered by three independent node helpers; two-node
+  graphs still cover every byte twice.  The node returns a mixed diff that is
+  zero only when all covered regions and expected globals match the baked graph
+  constants.
 - The internal `morok.mg.diff.*` aggregator calls every node and xors/mixes the
   node diffs.  Valid graphs contribute zero.  Tampering with one region or
-  expected hash makes that node and its neighbors contribute nonzero data.
+  expected hash makes every covering node contribute nonzero data.
 - The pass also emits a retained `morok.postlink.mg.*` manifest in
   `llvm.compiler.used`.  The manifest records magic/version, node count, region
-  byte count, and per-node records containing the region pointer, expected-hash
-  pointer, hash seed, and current expected hash.  A post-link rewriter can patch
-  every node region and expected global from that single graph record.
+  byte count, coverage depth, and per-node records containing the region pointer,
+  expected-hash pointer, hash seed, and current expected hash.  A post-link
+  rewriter can patch every node region and expected global from that single
+  graph record, while preserving the ring-derived coverage topology.
 - Selected scalar integer and floating-point returns are rewritten as
   `ret_value ^ graph_diff` (truncated to the return width as needed).  Floating
   returns (`half`, `bfloat`, `float`, `double`) are bitcast to an equal-width
