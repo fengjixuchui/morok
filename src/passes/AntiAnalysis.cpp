@@ -19,6 +19,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -61,6 +62,18 @@ GlobalVariable *antiDebugState(Module &M, ir::IRRandom &rng) {
     return gv;
 }
 
+GlobalVariable *antiHookState(Module &M, ir::IRRandom &rng) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antihook.state", /*AllowInternal=*/true))
+        return existing;
+    auto *i64 = Type::getInt64Ty(M.getContext());
+    auto *gv = new GlobalVariable(
+        M, i64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i64, rng.next()), "morok.antihook.state");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
 Value *toI64(IRBuilderBase &B, Value *V) {
     auto *i64 = B.getInt64Ty();
     if (V->getType()->isIntegerTy(64))
@@ -91,6 +104,47 @@ void foldState(IRBuilderBase &B, GlobalVariable *State, Value *V,
 void foldFlag(IRBuilderBase &B, GlobalVariable *State, Value *Flag,
               std::uint64_t Salt, const Twine &Name) {
     foldState(B, State, B.CreateZExtOrTrunc(Flag, B.getInt64Ty()), Salt, Name);
+}
+
+Value *constIp(Module &M, std::uint64_t V) {
+    return ConstantInt::get(intPtrTy(M), V);
+}
+
+Value *constSignedIp(Module &M, std::int64_t V) {
+    return ConstantInt::getSigned(intPtrTy(M), V);
+}
+
+Value *gepI8(IRBuilderBase &B, Module &M, Value *Base, Value *Offset,
+             const Twine &Name = "") {
+    return B.CreateGEP(Type::getInt8Ty(M.getContext()), Base, {Offset}, Name);
+}
+
+LoadInst *loadUnaligned(IRBuilderBase &B, Type *Ty, Value *Ptr,
+                        const Twine &Name = "") {
+    auto *LI = B.CreateLoad(Ty, Ptr, Name);
+    LI->setAlignment(Align(1));
+    return LI;
+}
+
+Value *loadAt(IRBuilderBase &B, Module &M, Type *Ty, Value *Base, Value *Offset,
+              const Twine &Name = "") {
+    return loadUnaligned(B, Ty, gepI8(B, M, Base, Offset, Name + ".ptr"), Name);
+}
+
+Value *loadAt(IRBuilderBase &B, Module &M, Type *Ty, Value *Base,
+              std::uint64_t Offset, const Twine &Name = "") {
+    return loadAt(B, M, Ty, Base, constIp(M, Offset), Name);
+}
+
+void incrementDiff(IRBuilderBase &B, AllocaInst *Diff, Value *Flag,
+                   const Twine &Name) {
+    auto *i64 = B.getInt64Ty();
+    auto *old = B.CreateLoad(i64, Diff, Name + ".old");
+    old->setVolatile(true);
+    Value *next =
+        B.CreateAdd(old, B.CreateZExtOrTrunc(Flag, i64), Name + ".next");
+    auto *st = B.CreateStore(next, Diff);
+    st->setVolatile(true);
 }
 
 Value *arrayBytePtr(IRBuilderBase &B, ArrayType *ArrTy, Value *Base,
@@ -245,6 +299,103 @@ Value *emitLinuxPrctl(IRBuilder<> &B, Module &M, const Triple &TT,
     return B.CreateTruncOrBitCast(rc, i32);
 }
 
+bool useDirectDarwinSyscalls(const Triple &TT) {
+    return TT.isOSDarwin() && TT.getArch() == Triple::x86_64;
+}
+
+Value *emitDarwinSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
+                         std::uint32_t Number,
+                         std::initializer_list<Value *> Args) {
+    auto *ip = intPtrTy(M);
+    std::array<Value *, 6> sysArgs = {
+        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
+        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
+        ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)};
+    std::size_t i = 0;
+    for (Value *arg : Args) {
+        if (i >= sysArgs.size())
+            break;
+        sysArgs[i++] = toSyscallArg(B, arg);
+    }
+
+    if (useDirectDarwinSyscalls(TT)) {
+        std::vector<Type *> params(7, ip);
+        auto *asmTy = FunctionType::get(ip, params, false);
+        InlineAsm *syscall = InlineAsm::get(
+            asmTy, "syscall\nsbbq %r11, %r11\norq %r11, %rax",
+            "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
+            "~{memory},~{dirflag},~{fpsr},~{flags}",
+            /*hasSideEffects=*/true);
+        return B.CreateCall(asmTy, syscall,
+                            {ConstantInt::get(ip, 0x02000000U | Number),
+                             sysArgs[0], sysArgs[1], sysArgs[2], sysArgs[3],
+                             sysArgs[4], sysArgs[5]},
+                            "morok.darwin.syscall");
+    }
+
+    return B.CreateCall(syscallDecl(M),
+                        {ConstantInt::get(ip, Number), sysArgs[0], sysArgs[1],
+                         sysArgs[2], sysArgs[3], sysArgs[4], sysArgs[5]},
+                        "morok.darwin.syscall.wrap");
+}
+
+Value *emitDarwinGetpid(IRBuilder<> &B, Module &M, const Triple &TT) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    if (useDirectDarwinSyscalls(TT))
+        return B.CreateTruncOrBitCast(emitDarwinSyscall(B, M, TT, 20, {}), i32);
+    FunctionCallee getpid =
+        M.getOrInsertFunction("getpid", FunctionType::get(i32, false));
+    return B.CreateCall(getpid);
+}
+
+Value *emitDarwinPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
+                        std::int32_t Request) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    if (useDirectDarwinSyscalls(TT))
+        return B.CreateTruncOrBitCast(
+            emitDarwinSyscall(
+                B, M, TT, 26,
+                {ConstantInt::getSigned(i32, Request), ConstantInt::get(i32, 0),
+                 ConstantPointerNull::get(ptr), ConstantInt::get(i32, 0)}),
+            i32);
+    return emitPtrace(B, M, Request);
+}
+
+Value *emitDarwinSysctl(IRBuilder<> &B, Module &M, const Triple &TT, Value *Mib,
+                        Value *MibLen, Value *OldP, Value *OldLenP, Value *NewP,
+                        Value *NewLen) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    if (useDirectDarwinSyscalls(TT))
+        return B.CreateTruncOrBitCast(
+            emitDarwinSyscall(B, M, TT, 202,
+                              {Mib, MibLen, OldP, OldLenP, NewP, NewLen}),
+            i32);
+    FunctionCallee sysctl = M.getOrInsertFunction(
+        "sysctl", FunctionType::get(i32, {ptr, i32, ptr, ptr, ptr, ip}, false));
+    return B.CreateCall(sysctl,
+                        {Mib, B.CreateTruncOrBitCast(MibLen, i32), OldP,
+                         OldLenP, NewP, B.CreateZExtOrTrunc(NewLen, ip)});
+}
+
+Value *emitDarwinCsops(IRBuilder<> &B, Module &M, const Triple &TT, Value *Pid,
+                       Value *Ops, Value *UserAddr, Value *UserSize) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    if (useDirectDarwinSyscalls(TT))
+        return B.CreateTruncOrBitCast(
+            emitDarwinSyscall(B, M, TT, 169, {Pid, Ops, UserAddr, UserSize}),
+            i32);
+    FunctionCallee csops = M.getOrInsertFunction(
+        "csops", FunctionType::get(i32, {i32, i32, ptr, ip}, false));
+    return B.CreateCall(csops, {B.CreateTruncOrBitCast(Pid, i32),
+                                B.CreateTruncOrBitCast(Ops, i32), UserAddr,
+                                B.CreateZExtOrTrunc(UserSize, ip)});
+}
+
 FunctionCallee openDecl(Module &M) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
@@ -266,6 +417,221 @@ FunctionCallee closeDecl(Module &M) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     return M.getOrInsertFunction("close", FunctionType::get(i32, {i32}, false));
+}
+
+FunctionCallee readlinkDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *ip = intPtrTy(M);
+    return M.getOrInsertFunction("readlink",
+                                 FunctionType::get(ip, {ptr, ptr, ip}, false));
+}
+
+FunctionCallee lseekDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    return M.getOrInsertFunction("lseek",
+                                 FunctionType::get(ip, {i32, ip, i32}, false));
+}
+
+FunctionCallee mmapDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *ip = intPtrTy(M);
+    return M.getOrInsertFunction(
+        "mmap", FunctionType::get(ptr, {ptr, ip, i32, i32, i32, ip}, false));
+}
+
+FunctionCallee munmapDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *ip = intPtrTy(M);
+    return M.getOrInsertFunction("munmap",
+                                 FunctionType::get(i32, {ptr, ip}, false));
+}
+
+bool linuxCleanCopySyscalls(const Triple &TT, std::uint32_t &Readlink,
+                            std::uint32_t &Lseek, std::uint32_t &Mmap,
+                            std::uint32_t &Munmap) {
+    switch (TT.getArch()) {
+    case Triple::x86_64:
+        Readlink = 89;
+        Lseek = 8;
+        Mmap = 9;
+        Munmap = 11;
+        return true;
+    default:
+        return false;
+    }
+}
+
+Value *emitLinuxReadlink(IRBuilder<> &B, Module &M, const Triple &TT,
+                         Value *Path, Value *Buf, Value *Size) {
+    std::uint32_t readlinkNr = 0;
+    std::uint32_t lseekNr = 0;
+    std::uint32_t mmapNr = 0;
+    std::uint32_t munmapNr = 0;
+    if (useDirectLinuxSyscalls(TT) &&
+        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr))
+        return emitLinuxSyscall(B, M, TT, readlinkNr, {Path, Buf, Size});
+    return B.CreateCall(readlinkDecl(M), {Path, Buf, Size},
+                        "morok.clean.readlink");
+}
+
+Value *emitLinuxLseek(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd,
+                      std::int64_t Offset, std::int32_t Whence) {
+    std::uint32_t readlinkNr = 0;
+    std::uint32_t lseekNr = 0;
+    std::uint32_t mmapNr = 0;
+    std::uint32_t munmapNr = 0;
+    if (useDirectLinuxSyscalls(TT) &&
+        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr))
+        return emitLinuxSyscall(
+            B, M, TT, lseekNr,
+            {Fd, constSignedIp(M, Offset),
+             ConstantInt::getSigned(Type::getInt32Ty(M.getContext()), Whence)});
+    return B.CreateCall(
+        lseekDecl(M),
+        {B.CreateTruncOrBitCast(Fd, Type::getInt32Ty(M.getContext())),
+         constSignedIp(M, Offset),
+         ConstantInt::getSigned(Type::getInt32Ty(M.getContext()), Whence)},
+        "morok.clean.lseek");
+}
+
+Value *emitLinuxMmapAddr(IRBuilder<> &B, Module &M, const Triple &TT,
+                         Value *Size, Value *Fd) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    constexpr std::uint32_t kProtRead = 1;
+    constexpr std::uint32_t kMapPrivate = 2;
+
+    std::uint32_t readlinkNr = 0;
+    std::uint32_t lseekNr = 0;
+    std::uint32_t mmapNr = 0;
+    std::uint32_t munmapNr = 0;
+    if (useDirectLinuxSyscalls(TT) &&
+        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr))
+        return emitLinuxSyscall(B, M, TT, mmapNr,
+                                {ConstantPointerNull::get(ptr), Size,
+                                 ConstantInt::get(i32, kProtRead),
+                                 ConstantInt::get(i32, kMapPrivate), Fd,
+                                 ConstantInt::get(ip, 0)});
+
+    Value *mapped = B.CreateCall(
+        mmapDecl(M),
+        {ConstantPointerNull::get(ptr), Size, ConstantInt::get(i32, kProtRead),
+         ConstantInt::get(i32, kMapPrivate), B.CreateTruncOrBitCast(Fd, i32),
+         ConstantInt::get(ip, 0)},
+        "morok.clean.mmap");
+    return B.CreatePtrToInt(mapped, ip);
+}
+
+void emitLinuxMunmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Addr,
+                     Value *Size) {
+    std::uint32_t readlinkNr = 0;
+    std::uint32_t lseekNr = 0;
+    std::uint32_t mmapNr = 0;
+    std::uint32_t munmapNr = 0;
+    if (useDirectLinuxSyscalls(TT) &&
+        linuxCleanCopySyscalls(TT, readlinkNr, lseekNr, mmapNr, munmapNr)) {
+        emitLinuxSyscall(B, M, TT, munmapNr, {Addr, Size});
+        return;
+    }
+    B.CreateCall(
+        munmapDecl(M),
+        {B.CreateIntToPtr(Addr, PointerType::getUnqual(M.getContext())), Size});
+}
+
+void emitLinuxClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
+    std::uint32_t ptraceNr = 0;
+    std::uint32_t prctlNr = 0;
+    std::uint32_t openatNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    if (linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
+        emitLinuxSyscall(B, M, TT, closeNr, {Fd});
+        return;
+    }
+    B.CreateCall(closeDecl(M), {B.CreateTruncOrBitCast(
+                                   Fd, Type::getInt32Ty(M.getContext()))});
+}
+
+Value *emitDarwinOpen(IRBuilder<> &B, Module &M, const Triple &TT, Value *Path,
+                      std::int32_t Flags, std::int32_t Mode) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    if (useDirectDarwinSyscalls(TT))
+        return B.CreateTruncOrBitCast(
+            emitDarwinSyscall(B, M, TT, 5,
+                              {Path, ConstantInt::getSigned(i32, Flags),
+                               ConstantInt::getSigned(i32, Mode)}),
+            i32);
+    return B.CreateCall(openDecl(M),
+                        {Path, ConstantInt::getSigned(i32, Flags),
+                         ConstantInt::getSigned(i32, Mode)},
+                        "morok.clean.open");
+}
+
+void emitDarwinClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
+    if (useDirectDarwinSyscalls(TT)) {
+        emitDarwinSyscall(B, M, TT, 6, {Fd});
+        return;
+    }
+    B.CreateCall(closeDecl(M), {B.CreateTruncOrBitCast(
+                                   Fd, Type::getInt32Ty(M.getContext()))});
+}
+
+Value *emitDarwinLseek(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd,
+                       std::int64_t Offset, std::int32_t Whence) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    if (useDirectDarwinSyscalls(TT))
+        return emitDarwinSyscall(B, M, TT, 199,
+                                 {Fd, constSignedIp(M, Offset),
+                                  ConstantInt::getSigned(i32, Whence)});
+    return B.CreateCall(lseekDecl(M),
+                        {B.CreateTruncOrBitCast(Fd, i32),
+                         constSignedIp(M, Offset),
+                         ConstantInt::getSigned(i32, Whence)},
+                        "morok.clean.lseek");
+}
+
+Value *emitDarwinMmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Size,
+                      Value *Fd) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    constexpr std::uint32_t kProtRead = 1;
+    constexpr std::uint32_t kMapPrivate = 2;
+
+    if (useDirectDarwinSyscalls(TT)) {
+        Value *addr = emitDarwinSyscall(B, M, TT, 197,
+                                        {ConstantPointerNull::get(ptr), Size,
+                                         ConstantInt::get(i32, kProtRead),
+                                         ConstantInt::get(i32, kMapPrivate), Fd,
+                                         ConstantInt::get(ip, 0)});
+        return B.CreateIntToPtr(addr, ptr, "morok.clean.mmap.ptr");
+    }
+
+    return B.CreateCall(
+        mmapDecl(M),
+        {ConstantPointerNull::get(ptr), Size, ConstantInt::get(i32, kProtRead),
+         ConstantInt::get(i32, kMapPrivate), B.CreateTruncOrBitCast(Fd, i32),
+         ConstantInt::get(ip, 0)},
+        "morok.clean.mmap");
+}
+
+void emitDarwinMunmap(IRBuilder<> &B, Module &M, const Triple &TT,
+                      Value *Mapped, Value *Size) {
+    if (useDirectDarwinSyscalls(TT)) {
+        emitDarwinSyscall(B, M, TT, 73, {Mapped, Size});
+        return;
+    }
+    B.CreateCall(munmapDecl(M), {Mapped, Size});
 }
 
 struct ReadFileIR {
@@ -863,17 +1229,13 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
     B.CreateRetVoid();
 }
 
-void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
+void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State,
+                           const Triple &TT) {
     LLVMContext &ctx = M.getContext();
     auto *i8 = Type::getInt8Ty(ctx);
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(ctx);
-
-    FunctionCallee getpid =
-        M.getOrInsertFunction("getpid", FunctionType::get(i32, false));
-    FunctionCallee sysctl = M.getOrInsertFunction(
-        "sysctl", FunctionType::get(i32, {ptr, i32, ptr, ptr, ptr, ip}, false));
 
     auto *mibTy = ArrayType::get(i32, 4);
     auto *mib = B.CreateAlloca(mibTy, nullptr, "morok.antidbg.mib");
@@ -885,7 +1247,7 @@ void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
     storeMib(0, ConstantInt::get(i32, 1));  // CTL_KERN
     storeMib(1, ConstantInt::get(i32, 14)); // KERN_PROC
     storeMib(2, ConstantInt::get(i32, 1));  // KERN_PROC_PID
-    storeMib(3, B.CreateCall(getpid));
+    storeMib(3, emitDarwinGetpid(B, M, TT));
 
     constexpr std::uint64_t kKinfoProcBytes = 648;
     constexpr std::uint64_t kPFlagOffset = 32;
@@ -902,9 +1264,9 @@ void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
         mibTy, mib, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
     Value *bufPtr = B.CreateInBoundsGEP(
         bufTy, buf, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
-    Value *rc = B.CreateCall(sysctl, {mibPtr, ConstantInt::get(i32, 4), bufPtr,
-                                      len, ConstantPointerNull::get(ptr),
-                                      ConstantInt::get(ip, 0)});
+    Value *rc = emitDarwinSysctl(B, M, TT, mibPtr, ConstantInt::get(i32, 4),
+                                 bufPtr, len, ConstantPointerNull::get(ptr),
+                                 ConstantInt::get(ip, 0));
     Value *pflag = B.CreateLoad(i32, pflagPtr);
     Value *traced =
         B.CreateICmpNE(B.CreateAnd(pflag, ConstantInt::get(i32, 0x800)),
@@ -914,22 +1276,17 @@ void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
              "morok.antidbg.sysctl");
 }
 
-void emitDarwinCsopsCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
+void emitDarwinCsopsCheck(IRBuilder<> &B, Module &M, GlobalVariable *State,
+                          const Triple &TT) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ip = intPtrTy(M);
-    auto *ptr = PointerType::getUnqual(ctx);
-
-    FunctionCallee getpid =
-        M.getOrInsertFunction("getpid", FunctionType::get(i32, false));
-    FunctionCallee csops = M.getOrInsertFunction(
-        "csops", FunctionType::get(i32, {i32, i32, ptr, ip}, false));
 
     auto *status = B.CreateAlloca(i32, nullptr, "morok.antidbg.cs");
     B.CreateStore(ConstantInt::get(i32, 0), status);
-    Value *rc =
-        B.CreateCall(csops, {B.CreateCall(getpid), ConstantInt::get(i32, 0),
-                             status, ConstantInt::get(ip, 4)});
+    Value *rc = emitDarwinCsops(B, M, TT, emitDarwinGetpid(B, M, TT),
+                                ConstantInt::get(i32, 0), status,
+                                ConstantInt::get(ip, 4));
     Value *flags = B.CreateLoad(i32, status);
     Value *debugged =
         B.CreateICmpNE(B.CreateAnd(flags, ConstantInt::get(i32, 0x10000000)),
@@ -971,13 +1328,393 @@ void emitDarwinDyldCensus(IRBuilder<> &B, Module &M, GlobalVariable *State,
 }
 
 void emitDarwinAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
-                         ir::IRRandom &rng) {
+                         ir::IRRandom &rng, const Triple &TT) {
     IRBuilder<> B(&Ctor->getEntryBlock());
-    emitPtrace(B, M, 31); // PT_DENY_ATTACH
-    emitDarwinSysctlCheck(B, M, State);
-    emitDarwinCsopsCheck(B, M, State);
+    emitDarwinPtrace(B, M, TT, 31); // PT_DENY_ATTACH
+    emitDarwinSysctlCheck(B, M, State, TT);
+    emitDarwinCsopsCheck(B, M, State, TT);
     emitDarwinDyldCensus(B, M, State, rng);
     B.CreateRetVoid();
+}
+
+void emitRetDiff(IRBuilder<> &B, AllocaInst *Diff) {
+    auto *load = B.CreateLoad(B.getInt64Ty(), Diff, "morok.clean.diff.ret");
+    load->setVolatile(true);
+    B.CreateRet(load);
+}
+
+void emitByteDiffLoop(IRBuilder<> &B, Module &M, Function *Fn, Value *MemAddr,
+                      Value *CleanPtr, Value *Len, AllocaInst *Diff,
+                      BasicBlock *Done) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *loopBB = BasicBlock::Create(ctx, "morok.clean.byte.loop", Fn);
+    auto *bodyBB = BasicBlock::Create(ctx, "morok.clean.byte.body", Fn);
+    B.CreateBr(loopBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *idx = LB.CreatePHI(ip, 2, "morok.clean.byte.idx");
+    idx->addIncoming(ConstantInt::get(ip, 0), B.GetInsertBlock());
+    LB.CreateCondBr(LB.CreateICmpULT(idx, Len), bodyBB, Done);
+
+    IRBuilder<> BB(bodyBB);
+    Value *memPtr =
+        BB.CreateIntToPtr(BB.CreateAdd(MemAddr, idx, "morok.clean.mem.addr"),
+                          ptr, "morok.clean.mem.ptr");
+    auto *memByte = BB.CreateLoad(i8, memPtr, "morok.clean.mem.byte");
+    memByte->setVolatile(true);
+    Value *cleanByte =
+        BB.CreateLoad(i8, gepI8(BB, M, CleanPtr, idx, "morok.clean.file.ptr"),
+                      "morok.clean.file.byte");
+    incrementDiff(BB, Diff, BB.CreateICmpNE(memByte, cleanByte),
+                  "morok.clean.byte.diff");
+    Value *next =
+        BB.CreateAdd(idx, ConstantInt::get(ip, 1), "morok.clean.byte.next");
+    BB.CreateBr(loopBB);
+    idx->addIncoming(next, bodyBB);
+}
+
+Function *linuxCleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
+    if (!TT.isOSLinux())
+        return nullptr;
+    if (intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.clean.elf"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i16 = Type::getInt16Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.clean.elf", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *openBB = BasicBlock::Create(ctx, "open", fn);
+    auto *sizeBB = BasicBlock::Create(ctx, "size", fn);
+    auto *badSizeBB = BasicBlock::Create(ctx, "bad.size", fn);
+    auto *mapBB = BasicBlock::Create(ctx, "map", fn);
+    auto *badMapBB = BasicBlock::Create(ctx, "bad.map", fn);
+    auto *parseBB = BasicBlock::Create(ctx, "parse", fn);
+    auto *badElfBB = BasicBlock::Create(ctx, "bad.elf", fn);
+    auto *phLoopBB = BasicBlock::Create(ctx, "ph.loop", fn);
+    auto *phBodyBB = BasicBlock::Create(ctx, "ph.body", fn);
+    auto *phCompareBB = BasicBlock::Create(ctx, "ph.compare", fn);
+    auto *phNextBB = BasicBlock::Create(ctx, "ph.next", fn);
+    auto *unmapBB = BasicBlock::Create(ctx, "unmap", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    auto *pathTy = ArrayType::get(i8, 4096);
+    AllocaInst *path = B.CreateAlloca(pathTy, nullptr, "morok.clean.path");
+    AllocaInst *diff = B.CreateAlloca(i64, nullptr, "morok.clean.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    Value *pathBuf = B.CreateInBoundsGEP(
+        pathTy, path, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        "morok.clean.path.buf");
+    Value *selfPath = ir::emitCloakedSymbol(B, M, "/proc/self/exe", rng);
+    Value *pathLen = emitLinuxReadlink(B, M, TT, selfPath, pathBuf,
+                                       ConstantInt::get(ip, 4095));
+    Value *lenOk =
+        B.CreateAnd(B.CreateICmpSGT(pathLen, ConstantInt::get(ip, 0)),
+                    B.CreateICmpULT(pathLen, ConstantInt::get(ip, 4095)));
+    B.CreateCondBr(lenOk, openBB, retBB);
+
+    IRBuilder<> OB(openBB);
+    OB.CreateStore(ConstantInt::get(i8, 0),
+                   gepI8(OB, M, pathBuf, pathLen, "morok.clean.path.nul"));
+    std::uint32_t ptraceNr = 0;
+    std::uint32_t prctlNr = 0;
+    std::uint32_t openatNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    Value *fdLong = nullptr;
+    if (linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
+        fdLong = emitLinuxSyscall(OB, M, TT, openatNr,
+                                  {constSignedIp(M, -100), pathBuf,
+                                   ConstantInt::get(i32, 0),
+                                   ConstantInt::get(i32, 0)});
+    } else {
+        fdLong = OB.CreateSExtOrTrunc(
+            OB.CreateCall(openDecl(M), {pathBuf, ConstantInt::get(i32, 0)}),
+            ip);
+    }
+    Value *fd = OB.CreateTruncOrBitCast(fdLong, i32, "morok.clean.fd");
+    OB.CreateCondBr(OB.CreateICmpSLT(fd, ConstantInt::getSigned(i32, 0)), retBB,
+                    sizeBB);
+
+    IRBuilder<> SB(sizeBB);
+    Value *fileSize = emitLinuxLseek(SB, M, TT, fd, 0, 2 /* SEEK_END */);
+    SB.CreateCondBr(SB.CreateICmpSGT(fileSize, ConstantInt::get(ip, 64)), mapBB,
+                    badSizeBB);
+
+    IRBuilder<> BSB(badSizeBB);
+    emitLinuxClose(BSB, M, TT, fd);
+    BSB.CreateBr(retBB);
+
+    IRBuilder<> MB(mapBB);
+    Value *mapAddr = emitLinuxMmapAddr(MB, M, TT, fileSize, fd);
+    emitLinuxClose(MB, M, TT, fd);
+    Value *mapFailed =
+        MB.CreateOr(MB.CreateICmpSLT(mapAddr, ConstantInt::getSigned(ip, 0)),
+                    MB.CreateICmpEQ(mapAddr, ConstantInt::get(ip, 0)));
+    MB.CreateCondBr(mapFailed, badMapBB, parseBB);
+
+    IRBuilder<> BMB(badMapBB);
+    BMB.CreateBr(retBB);
+
+    IRBuilder<> PB(parseBB);
+    Value *mapPtr = PB.CreateIntToPtr(mapAddr, ptr, "morok.clean.map.ptr");
+    Value *magic = loadAt(PB, M, i32, mapPtr, 0ULL, "morok.clean.elf.magic");
+    Value *elfType = loadAt(PB, M, i16, mapPtr, 16, "morok.clean.elf.type");
+    Value *isElf64 = PB.CreateICmpEQ(magic, ConstantInt::get(i32, 0x464C457F));
+    Value *phOff = loadAt(PB, M, i64, mapPtr, 32, "morok.clean.elf.phoff");
+    Value *phEntRaw =
+        loadAt(PB, M, i16, mapPtr, 54, "morok.clean.elf.phentsize");
+    Value *phNumRaw = loadAt(PB, M, i16, mapPtr, 56, "morok.clean.elf.phnum");
+    Value *phEnt = PB.CreateZExt(phEntRaw, ip, "morok.clean.elf.phent");
+    Value *phNum = PB.CreateZExt(phNumRaw, ip, "morok.clean.elf.phnum.w");
+    FunctionCallee getauxval =
+        M.getOrInsertFunction("getauxval", FunctionType::get(ip, {ip}, false));
+    Value *atPhdr = PB.CreateCall(getauxval, {ConstantInt::get(ip, 3)},
+                                  "morok.clean.atphdr");
+    Value *phBytes = PB.CreateMul(phEnt, phNum, "morok.clean.elf.phbytes");
+    Value *phEnd = PB.CreateAdd(phOff, phBytes, "morok.clean.elf.phend");
+    Value *validPh =
+        PB.CreateAnd(PB.CreateICmpUGE(phEnt, ConstantInt::get(ip, 56)),
+                     PB.CreateICmpULE(phEnd, fileSize));
+    Value *valid = PB.CreateAnd(
+        isElf64, PB.CreateAnd(validPh, PB.CreateICmpNE(
+                                           atPhdr, ConstantInt::get(ip, 0))));
+    PB.CreateCondBr(valid, phLoopBB, badElfBB);
+
+    IRBuilder<> BEB(badElfBB);
+    BEB.CreateBr(unmapBB);
+
+    IRBuilder<> PLB(phLoopBB);
+    auto *phIdx = PLB.CreatePHI(ip, 2, "morok.clean.ph.idx");
+    phIdx->addIncoming(ConstantInt::get(ip, 0), parseBB);
+    PLB.CreateCondBr(PLB.CreateICmpULT(phIdx, phNum), phBodyBB, unmapBB);
+
+    IRBuilder<> PBB(phBodyBB);
+    Value *phPtr = gepI8(
+        PBB, M, mapPtr,
+        PBB.CreateAdd(phOff, PBB.CreateMul(phIdx, phEnt), "morok.clean.ph.off"),
+        "morok.clean.ph.ptr");
+    Value *pType = loadAt(PBB, M, i32, phPtr, 0ULL, "morok.clean.ph.type");
+    Value *pFlags = loadAt(PBB, M, i32, phPtr, 4, "morok.clean.ph.flags");
+    Value *pOffset = loadAt(PBB, M, i64, phPtr, 8, "morok.clean.ph.fileoff");
+    Value *pVaddr = loadAt(PBB, M, i64, phPtr, 16, "morok.clean.ph.vaddr");
+    Value *pFilesz = loadAt(PBB, M, i64, phPtr, 32, "morok.clean.ph.filesz");
+    Value *isLoad = PBB.CreateICmpEQ(pType, ConstantInt::get(i32, 1),
+                                     "morok.clean.ph.load");
+    Value *isExec =
+        PBB.CreateICmpNE(PBB.CreateAnd(pFlags, ConstantInt::get(i32, 1)),
+                         ConstantInt::get(i32, 0), "morok.clean.ph.exec");
+    Value *hasBytes = PBB.CreateICmpUGT(pFilesz, ConstantInt::get(ip, 0),
+                                        "morok.clean.ph.bytes");
+    Value *fileEnd = PBB.CreateAdd(pOffset, pFilesz, "morok.clean.ph.fileend");
+    Value *inFile =
+        PBB.CreateICmpULE(fileEnd, fileSize, "morok.clean.ph.infile");
+    Value *shouldCompare =
+        PBB.CreateAnd(PBB.CreateAnd(isLoad, isExec),
+                      PBB.CreateAnd(hasBytes, inFile), "morok.clean.ph.should");
+    PBB.CreateCondBr(shouldCompare, phCompareBB, phNextBB);
+
+    IRBuilder<> PCB(phCompareBB);
+    Value *dynLoadBase = PCB.CreateSub(atPhdr, phOff, "morok.clean.load.base");
+    Value *loadBase = PCB.CreateSelect(
+        PCB.CreateICmpEQ(elfType, ConstantInt::get(i16, 3)), dynLoadBase,
+        ConstantInt::get(ip, 0), "morok.clean.load.bias");
+    Value *memAddr = PCB.CreateAdd(loadBase, pVaddr, "morok.clean.ph.mem.addr");
+    Value *cleanPtr =
+        gepI8(PCB, M, mapPtr, pOffset, "morok.clean.ph.clean.ptr");
+    emitByteDiffLoop(PCB, M, fn, memAddr, cleanPtr, pFilesz, diff, phNextBB);
+
+    IRBuilder<> PNB(phNextBB);
+    Value *phNext =
+        PNB.CreateAdd(phIdx, ConstantInt::get(ip, 1), "morok.clean.ph.next");
+    PNB.CreateBr(phLoopBB);
+    phIdx->addIncoming(phNext, phNextBB);
+
+    IRBuilder<> UB(unmapBB);
+    emitLinuxMunmap(UB, M, TT, mapAddr, fileSize);
+    UB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
+Function *darwinCleanCopyProbe(Module &M) {
+    const Triple TT(M.getTargetTriple());
+    if (!TT.isOSDarwin())
+        return nullptr;
+    if (intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.clean.macho"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.clean.macho", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *openBB = BasicBlock::Create(ctx, "open", fn);
+    auto *sizeBB = BasicBlock::Create(ctx, "size", fn);
+    auto *badSizeBB = BasicBlock::Create(ctx, "bad.size", fn);
+    auto *mapBB = BasicBlock::Create(ctx, "map", fn);
+    auto *parseBB = BasicBlock::Create(ctx, "parse", fn);
+    auto *badMachBB = BasicBlock::Create(ctx, "bad.mach", fn);
+    auto *cmdLoopBB = BasicBlock::Create(ctx, "cmd.loop", fn);
+    auto *cmdBodyBB = BasicBlock::Create(ctx, "cmd.body", fn);
+    auto *cmdCompareBB = BasicBlock::Create(ctx, "cmd.compare", fn);
+    auto *cmdNextBB = BasicBlock::Create(ctx, "cmd.next", fn);
+    auto *unmapBB = BasicBlock::Create(ctx, "unmap", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    auto *pathTy = ArrayType::get(i8, 4096);
+    AllocaInst *path = B.CreateAlloca(pathTy, nullptr, "morok.clean.path");
+    AllocaInst *pathSize =
+        B.CreateAlloca(i32, nullptr, "morok.clean.path.size");
+    AllocaInst *diff = B.CreateAlloca(i64, nullptr, "morok.clean.diff");
+    B.CreateStore(ConstantInt::get(i32, 4096), pathSize);
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    Value *pathBuf = B.CreateInBoundsGEP(
+        pathTy, path, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        "morok.clean.path.buf");
+    FunctionCallee nsGetPath = M.getOrInsertFunction(
+        "_NSGetExecutablePath", FunctionType::get(i32, {ptr, ptr}, false));
+    Value *pathRc =
+        B.CreateCall(nsGetPath, {pathBuf, pathSize}, "morok.clean.nsgetpath");
+    B.CreateCondBr(B.CreateICmpEQ(pathRc, ConstantInt::get(i32, 0)), openBB,
+                   retBB);
+
+    IRBuilder<> OB(openBB);
+    Value *fd = emitDarwinOpen(OB, M, TT, pathBuf, 0, 0);
+    OB.CreateCondBr(OB.CreateICmpSLT(fd, ConstantInt::getSigned(i32, 0)), retBB,
+                    sizeBB);
+
+    IRBuilder<> SB(sizeBB);
+    Value *fileSize = emitDarwinLseek(SB, M, TT, fd, 0, 2);
+    SB.CreateCondBr(SB.CreateICmpSGT(fileSize, ConstantInt::get(ip, 64)), mapBB,
+                    badSizeBB);
+
+    IRBuilder<> BSB(badSizeBB);
+    emitDarwinClose(BSB, M, TT, fd);
+    BSB.CreateBr(retBB);
+
+    IRBuilder<> MB(mapBB);
+    Value *mapped = emitDarwinMmap(MB, M, TT, fileSize, fd);
+    emitDarwinClose(MB, M, TT, fd);
+    Value *mapAddr = MB.CreatePtrToInt(mapped, ip, "morok.clean.map.addr");
+    Value *mapFailed =
+        MB.CreateOr(MB.CreateICmpEQ(mapped, ConstantPointerNull::get(ptr)),
+                    MB.CreateICmpEQ(mapAddr, ConstantInt::getSigned(ip, -1)));
+    MB.CreateCondBr(mapFailed, retBB, parseBB);
+
+    IRBuilder<> PB(parseBB);
+    Value *magic = loadAt(PB, M, i32, mapped, 0ULL, "morok.clean.macho.magic");
+    Value *ncmds = loadAt(PB, M, i32, mapped, 16, "morok.clean.macho.ncmds");
+    FunctionCallee imageHeader = M.getOrInsertFunction(
+        "_dyld_get_image_header", FunctionType::get(ptr, {i32}, false));
+    FunctionCallee imageSlide = M.getOrInsertFunction(
+        "_dyld_get_image_vmaddr_slide", FunctionType::get(ip, {i32}, false));
+    Value *hdr = PB.CreateCall(imageHeader, {ConstantInt::get(i32, 0)},
+                               "morok.clean.hdr");
+    Value *slide = PB.CreateCall(imageSlide, {ConstantInt::get(i32, 0)},
+                                 "morok.clean.slide");
+    Value *valid =
+        PB.CreateAnd(PB.CreateICmpEQ(magic, ConstantInt::get(i32, 0xFEEDFACF)),
+                     PB.CreateICmpNE(hdr, ConstantPointerNull::get(ptr)));
+    PB.CreateCondBr(valid, cmdLoopBB, badMachBB);
+
+    IRBuilder<> BMB(badMachBB);
+    BMB.CreateBr(unmapBB);
+
+    IRBuilder<> CLB(cmdLoopBB);
+    auto *cmdIdx = CLB.CreatePHI(i32, 2, "morok.clean.cmd.idx");
+    auto *cmdOff = CLB.CreatePHI(ip, 2, "morok.clean.cmd.off");
+    cmdIdx->addIncoming(ConstantInt::get(i32, 0), parseBB);
+    cmdOff->addIncoming(ConstantInt::get(ip, 32), parseBB);
+    CLB.CreateCondBr(CLB.CreateICmpULT(cmdIdx, ncmds), cmdBodyBB, unmapBB);
+
+    IRBuilder<> CBB(cmdBodyBB);
+    Value *cmdPtr = gepI8(CBB, M, mapped, cmdOff, "morok.clean.cmd.ptr");
+    Value *cmd = loadAt(CBB, M, i32, cmdPtr, 0ULL, "morok.clean.cmd.kind");
+    Value *cmdSize32 = loadAt(CBB, M, i32, cmdPtr, 4, "morok.clean.cmd.size");
+    Value *cmdSize = CBB.CreateZExt(cmdSize32, ip, "morok.clean.cmd.size.w");
+    Value *vmaddr = loadAt(CBB, M, i64, cmdPtr, 24, "morok.clean.seg.vmaddr");
+    Value *fileoff = loadAt(CBB, M, i64, cmdPtr, 40, "morok.clean.seg.fileoff");
+    Value *filesize =
+        loadAt(CBB, M, i64, cmdPtr, 48, "morok.clean.seg.filesize");
+    Value *initprot =
+        loadAt(CBB, M, i32, cmdPtr, 60, "morok.clean.seg.initprot");
+    Value *isSegment = CBB.CreateICmpEQ(cmd, ConstantInt::get(i32, 0x19));
+    Value *isExec =
+        CBB.CreateICmpNE(CBB.CreateAnd(initprot, ConstantInt::get(i32, 4)),
+                         ConstantInt::get(i32, 0));
+    Value *hasBytes = CBB.CreateICmpUGT(filesize, ConstantInt::get(ip, 0));
+    Value *fileEnd =
+        CBB.CreateAdd(fileoff, filesize, "morok.clean.seg.fileend");
+    Value *inFile = CBB.CreateICmpULE(fileEnd, fileSize);
+    Value *cmdInFile =
+        CBB.CreateICmpULE(CBB.CreateAdd(cmdOff, cmdSize), fileSize);
+    Value *shouldCompare = CBB.CreateAnd(
+        CBB.CreateAnd(isSegment, isExec),
+        CBB.CreateAnd(CBB.CreateAnd(hasBytes, inFile), cmdInFile));
+    CBB.CreateCondBr(shouldCompare, cmdCompareBB, cmdNextBB);
+
+    IRBuilder<> CCB(cmdCompareBB);
+    Value *memAddr = CCB.CreateAdd(slide, vmaddr, "morok.clean.seg.mem.addr");
+    Value *cleanPtr =
+        gepI8(CCB, M, mapped, fileoff, "morok.clean.seg.clean.ptr");
+    emitByteDiffLoop(CCB, M, fn, memAddr, cleanPtr, filesize, diff, cmdNextBB);
+
+    IRBuilder<> CNB(cmdNextBB);
+    Value *nextCmdIdx =
+        CNB.CreateAdd(cmdIdx, ConstantInt::get(i32, 1), "morok.clean.cmd.next");
+    Value *nextCmdOff =
+        CNB.CreateAdd(cmdOff, cmdSize, "morok.clean.cmd.next.off");
+    CNB.CreateBr(cmdLoopBB);
+    cmdIdx->addIncoming(nextCmdIdx, cmdNextBB);
+    cmdOff->addIncoming(nextCmdOff, cmdNextBB);
+
+    IRBuilder<> UB(unmapBB);
+    emitDarwinMunmap(UB, M, TT, mapped, fileSize);
+    UB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
+Function *cleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
+    if (TT.isOSLinux())
+        return linuxCleanCopyProbe(M, rng, TT);
+    if (TT.isOSDarwin())
+        return darwinCleanCopyProbe(M);
+    return nullptr;
 }
 
 Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
@@ -1011,8 +1748,8 @@ Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
         foldState(B, State, stat4, 0x84379D6FA21708C9ULL,
                   "morok.antidbg.probe.stat4");
     } else if (TT.isOSDarwin()) {
-        emitDarwinSysctlCheck(B, M, State);
-        emitDarwinCsopsCheck(B, M, State);
+        emitDarwinSysctlCheck(B, M, State, TT);
+        emitDarwinCsopsCheck(B, M, State, TT);
     } else {
         auto *i32 = Type::getInt32Ty(ctx);
         Value *rc = emitPtrace(B, M, 0);
@@ -1395,7 +2132,7 @@ bool antiDebuggingModule(Module &M, ir::IRRandom &rng) {
     if (tt.isOSLinux())
         emitLinuxAntiDebug(M, ctor, state, rng, tt);
     else if (tt.isOSDarwin())
-        emitDarwinAntiDebug(M, ctor, state, rng);
+        emitDarwinAntiDebug(M, ctor, state, rng, tt);
     else {
         IRBuilder<> B(&ctor->getEntryBlock());
         emitPtrace(B, M, 0);
@@ -1462,19 +2199,38 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
 }
 
 bool antiHookingModule(Module &M, ir::IRRandom &rng) {
+    const Triple tt(M.getTargetTriple());
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ptr = PointerType::getUnqual(ctx);
 
+    Function *ctor = makeCtorShell(M, "morok.antihook");
+    GlobalVariable *state = antiHookState(M, rng);
+    IRBuilder<> B(&ctor->getEntryBlock());
+
+    if (Function *clean = cleanCopyProbe(M, rng, tt)) {
+        Value *diff = B.CreateCall(clean, {}, "morok.antihook.clean.diff");
+        foldState(B, state, diff, 0xE0B9CA7F2D341985ULL,
+                  "morok.antihook.clean");
+        foldFlag(B, state,
+                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+                 0x48C3F3A9127DE40BULL, "morok.antihook.clean.changed");
+    }
+
+    if (tt.isOSDarwin()) {
+        B.CreateRetVoid();
+        appendToGlobalCtors(M, ctor, 0);
+        return true;
+    }
+
     // Detect a resident function-hooking framework: if its entry point
-    // resolves, the process is being instrumented — bail out.
+    // resolves, the process is being instrumented — bail out.  Darwin uses the
+    // clean-copy checker here until the Mach-O export-by-hash resolver exists.
     FunctionCallee dlsym = M.getOrInsertFunction(
         "dlsym", FunctionType::get(ptr, {ptr, ptr}, false));
     FunctionCallee exitFn = M.getOrInsertFunction(
         "exit", FunctionType::get(Type::getVoidTy(ctx), {i32}, false));
 
-    Function *ctor = makeCtorShell(M, "morok.antihook");
-    IRBuilder<> B(&ctor->getEntryBlock());
     // The probed symbol is cloaked inline — never a readable "MSHookFunction".
     Value *sym = ir::emitCloakedSymbol(B, M, "MSHookFunction", rng);
     // RTLD_DEFAULT == (void*)-2; build it at pointer width so inttoptr does not

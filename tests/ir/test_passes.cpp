@@ -8639,6 +8639,64 @@ TEST_CASE("anti-analysis passes inject valid startup code") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("antiHookingModule emits Linux clean-copy byte diff with direct "
+          "syscalls") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8801);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiHookingModule(*M, rng));
+
+    Function *Clean = M->getFunction("morok.antihook.clean.elf");
+    REQUIRE(Clean != nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
+    CHECK(hasInlineAsmCall(*Clean));
+    CHECK(M->getFunction("dlsym") != nullptr);
+    CHECK(M->getFunction("readlink") == nullptr);
+    CHECK(M->getFunction("open") == nullptr);
+    CHECK(M->getFunction("lseek") == nullptr);
+    CHECK(M->getFunction("mmap") == nullptr);
+    CHECK(M->getFunction("munmap") == nullptr);
+    CHECK(M->getFunction("close") == nullptr);
+    CHECK(M->getFunction("syscall") == nullptr);
+    CHECK_FALSE(hasReadableByteString(*M, "/proc/self/exe"));
+    CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiHookingModule emits Darwin clean-copy checker without dlsym") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-apple-macosx13.0.0"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8802);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiHookingModule(*M, rng));
+
+    Function *Clean = M->getFunction("morok.antihook.clean.macho");
+    REQUIRE(Clean != nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
+    CHECK(hasInlineAsmCall(*Clean));
+    CHECK(M->getFunction("dlsym") == nullptr);
+    CHECK(M->getFunction("open") == nullptr);
+    CHECK(M->getFunction("lseek") == nullptr);
+    CHECK(M->getFunction("mmap") == nullptr);
+    CHECK(M->getFunction("munmap") == nullptr);
+    CHECK(M->getFunction("close") == nullptr);
+    CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(M->getFunction("_NSGetExecutablePath") != nullptr);
+    CHECK(M->getFunction("_dyld_get_image_header") != nullptr);
+    CHECK(M->getFunction("_dyld_get_image_vmaddr_slide") != nullptr);
+    CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("antiDebuggingModule emits layered Linux checks without readable "
           "proc strings") {
     LLVMContext ctx;
@@ -8684,6 +8742,46 @@ entry:
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/status"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/stat"));
     CHECK_FALSE(hasReadableByteString(*M, "TracerPid"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiDebuggingModule emits x86_64 Darwin source checks through "
+          "direct syscalls") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-apple-macosx13.0.0"
+define i32 @work(i32 %x) {
+entry:
+  %a = add i32 %x, 5
+  ret i32 %a
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 9)
+  ret i32 %v
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8821);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.antidbg");
+    Function *Probe = M->getFunction("morok.antidbg.probe");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Probe != nullptr);
+    CHECK(hasInlineAsmCall(*Ctor));
+    CHECK(hasInlineAsmCall(*Probe));
+    CHECK(M->getFunction("ptrace") == nullptr);
+    CHECK(M->getFunction("sysctl") == nullptr);
+    CHECK(M->getFunction("csops") == nullptr);
+    CHECK(M->getFunction("getpid") == nullptr);
+    CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(M->getFunction("getenv") != nullptr);
+    CHECK(M->getFunction("pthread_create") != nullptr);
+    CHECK(M->getFunction("pthread_detach") != nullptr);
+    CHECK(M->getFunction("sleep") != nullptr);
+    CHECK_FALSE(hasReadableByteString(*M, "DYLD_INSERT_LIBRARIES"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

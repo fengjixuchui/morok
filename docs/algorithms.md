@@ -983,6 +983,18 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   On x86_64 Linux, sensitive anti-debug syscalls (`ptrace`, `prctl`,
   `openat`/`read`/`close` for `/proc` probes, Landlock, and seccomp install)
   are emitted as inline `syscall` instructions instead of libc imports.
+  On x86_64 macOS, BSD anti-debug probes (`ptrace`, `getpid`, `sysctl`,
+  `csops`) are likewise emitted as inline Darwin syscall instructions.  dyld
+  symbol resolution such as `dlsym` is not a syscall; replacing that surface is
+  handled by the later manual export-by-hash resolver.
+  AntiHooking also emits a clean-copy byte-diff checker for POSIX targets.  The
+  checker resolves the current executable path, maps a fresh read-only copy of
+  the on-disk ELF or Mach-O image, applies the runtime load bias/slide, compares
+  executable load segments byte-for-byte against memory, and folds any mismatch
+  into private anti-hook state.  Linux x86_64 uses inline syscalls for the file
+  and mapping path; macOS x86_64 uses inline Darwin BSD syscalls for
+  `open`/`lseek`/`mmap`/`munmap`/`close` and avoids adding the legacy `dlsym`
+  anti-hook probe on Darwin.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and
