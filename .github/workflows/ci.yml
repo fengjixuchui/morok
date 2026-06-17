@@ -59,7 +59,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build clang lld g++
+          # libstdc++-14-dev provides the C++ headers for gcc-14, which the
+          # freshly-built trunk clang selects as the newest GCC install (without
+          # it, <initializer_list> et al. are "not found").
+          sudo apt-get install -y --no-install-recommends ninja-build clang lld g++ g++-14 libstdc++-14-dev
 
       - name: Install CMake + Ninja
         if: runner.os != 'Linux'
@@ -120,14 +123,21 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           )
           if [ "$RUNNER_OS" = "Linux" ]; then
-            # The freshly-built trunk clang does not auto-detect ubuntu's gcc
-            # install, so point it at libstdc++ explicitly (else <initializer_list>
-            # and friends are "not found").
-            gccdir="$(dirname "$(gcc -print-libgcc-file-name)")"
+            # Point the freshly-built trunk clang at the newest installed
+            # libstdc++ (it otherwise picks a GCC dir whose headers are absent,
+            # making <initializer_list> et al. "not found").
+            ver="$(ls /usr/include/c++/ 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)"
+            gccdir="/usr/lib/gcc/$(gcc -dumpmachine)/${ver}"
             args+=(
               -DCMAKE_C_FLAGS="--gcc-install-dir=$gccdir"
               -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gccdir"
             )
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # clang targeting MSVC promotes narrowing in braced-init to an error
+            # (it is ill-formed C++); the GNU-driver clang on Linux/macOS only
+            # warns, and the codebase relies on that leniency. Match it here.
+            args+=( -DCMAKE_CXX_FLAGS=-Wno-c++11-narrowing )
           fi
           cmake "${args[@]}"
 
