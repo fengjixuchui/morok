@@ -285,6 +285,30 @@ bool hasReadableByteString(Module &M, StringRef needle) {
     return false;
 }
 
+bool i64HasPrintableRun(std::uint64_t value, unsigned minRun = 6) {
+    unsigned run = 0;
+    for (unsigned i = 0; i != 8; ++i) {
+        const auto byte =
+            static_cast<unsigned char>((value >> (i * 8u)) & 0xffu);
+        if (byte >= 0x20 && byte <= 0x7e) {
+            if (++run >= minRun)
+                return true;
+        } else {
+            run = 0;
+        }
+    }
+    return false;
+}
+
+std::uint64_t manifestMagic(const GlobalVariable *Manifest) {
+    auto *Init = dyn_cast_or_null<ConstantStruct>(
+        Manifest ? Manifest->getInitializer() : nullptr);
+    if (!Init || Init->getNumOperands() == 0)
+        return 0;
+    auto *Magic = dyn_cast<ConstantInt>(Init->getOperand(0));
+    return Magic ? Magic->getZExtValue() : 0;
+}
+
 std::vector<std::string> functionOrder(Module &M) {
     std::vector<std::string> Names;
     for (Function &F : M)
@@ -6368,6 +6392,10 @@ entry:
     REQUIRE(CodeSize);
     REQUIRE(Manifest);
     REQUIRE(Manifest->hasInitializer());
+    const std::uint64_t ScMagic = manifestMagic(Manifest);
+    CHECK(ScMagic != 0u);
+    CHECK(ScMagic != 0x4D4F524F4B534331ULL);
+    CHECK_FALSE(i64HasPrintableRun(ScMagic));
     CHECK(constantReferencesGlobal(Manifest->getInitializer(), Region));
     CHECK(constantReferencesGlobal(Manifest->getInitializer(), Expected));
     CHECK(constantReferencesGlobal(Manifest->getInitializer(), CodeSize));
@@ -6900,6 +6928,10 @@ entry:
             Manifest = &GV;
     REQUIRE(Manifest);
     REQUIRE(Manifest->hasInitializer());
+    const std::uint64_t MgMagic = manifestMagic(Manifest);
+    CHECK(MgMagic != 0u);
+    CHECK(MgMagic != 0x4D4F524F4B4D4731ULL);
+    CHECK_FALSE(i64HasPrintableRun(MgMagic));
 
     Function *Diff = M->getFunction("morok.mg.diff.mutual");
     REQUIRE(Diff);

@@ -42,7 +42,9 @@ namespace {
 
 using Builder = IRBuilder<NoFolder>;
 
-constexpr std::uint64_t kPostlinkMagic = 0x4D4F524F4B534331ULL; // MOROKSC1
+// Fixed post-link manifest sentinel. Keep this non-printable: readable product
+// markers in emitted binaries become cheap static-analysis anchors.
+constexpr std::uint64_t kPostlinkMagic = 0xA7D13C5E9000C3B2ULL;
 
 struct Target {
     Instruction *user = nullptr;
