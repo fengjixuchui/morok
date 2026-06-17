@@ -967,7 +967,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   diversity means cracking one site does not crack the others. The recovered
   name is decrypted into a stack buffer that feeds `dlsym`, so a decompiler sees
   `dlsym(RTLD_DEFAULT, <computed buffer>)` with no symbol to annotate.
-- AntiClassDump / AntiDebugging / AntiHooking: platform anti-analysis (module passes).
+- AntiClassDump / AntiDebugging / AntiHooking: platform anti-analysis
+  (module passes). AntiDebugging combines startup checks with a mutable hidden
+  state word, platform-specific recheck helpers, pthread watchdogs where
+  available, and once-gated randomized calls inserted into user functions so
+  debugger evidence is sampled from both constructors and normal execution paths
+  without repeatedly running expensive probes in hot loops.
 
 ## Scheduler memory guardrails
 - The scheduler re-measures instruction and block counts before each

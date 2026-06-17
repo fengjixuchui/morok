@@ -212,6 +212,14 @@ std::size_t countCallsTo(Function &F, StringRef name) {
     return n;
 }
 
+std::size_t countUserCallsTo(Module &M, StringRef name) {
+    std::size_t n = 0;
+    for (Function &F : M)
+        if (!F.isDeclaration() && !F.getName().starts_with("morok."))
+            n += countCallsTo(F, name);
+    return n;
+}
+
 bool hasReadableByteString(Module &M, StringRef needle) {
     for (GlobalVariable &GV : M.globals()) {
         if (!GV.hasInitializer())
@@ -8628,7 +8636,17 @@ TEST_CASE("antiDebuggingModule emits layered Linux checks without readable "
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 target triple = "x86_64-unknown-linux-gnu"
-define i32 @main() { ret i32 0 }
+define i32 @work(i32 %x) {
+entry:
+  %a = add i32 %x, 7
+  %b = xor i32 %a, 19
+  ret i32 %b
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 41)
+  ret i32 %v
+}
 )ir");
     auto engine = morok::core::Xoshiro256pp::fromSeed(881);
     morok::ir::IRRandom rng(engine);
@@ -8639,6 +8657,8 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("morok.antidbg.linux.status") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.stat4") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.watch") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
+    CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
     CHECK(M->getFunction("ptrace") != nullptr);
     CHECK(M->getFunction("prctl") != nullptr);
     CHECK(M->getFunction("pthread_create") != nullptr);
@@ -8659,7 +8679,17 @@ TEST_CASE("antiDebuggingModule emits Darwin source checks and cloaked DYLD "
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 target triple = "arm64-apple-macosx13.0.0"
-define i32 @main() { ret i32 0 }
+define i32 @work(i32 %x) {
+entry:
+  %a = add i32 %x, 5
+  %b = mul i32 %a, 3
+  ret i32 %b
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 9)
+  ret i32 %v
+}
 )ir");
     auto engine = morok::core::Xoshiro256pp::fromSeed(882);
     morok::ir::IRRandom rng(engine);
@@ -8671,6 +8701,12 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("sysctl") != nullptr);
     CHECK(M->getFunction("csops") != nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.probe.watch") != nullptr);
+    CHECK(M->getFunction("pthread_create") != nullptr);
+    CHECK(M->getFunction("pthread_detach") != nullptr);
+    CHECK(M->getFunction("sleep") != nullptr);
+    CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
     CHECK(countGlobals(*M, "morok.cloak.c") >= 8u);
     CHECK_FALSE(hasReadableByteString(*M, "DYLD_INSERT_LIBRARIES"));
     CHECK_FALSE(hasReadableByteString(*M, "DYLD_PRINT"));

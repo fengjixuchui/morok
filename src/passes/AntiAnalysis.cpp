@@ -11,6 +11,7 @@
 
 #include "morok/ir/SymbolCloak.hpp"
 
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
@@ -18,10 +19,12 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Triple.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <array>
 #include <cstdint>
+#include <vector>
 
 using namespace llvm;
 
@@ -435,6 +438,52 @@ void emitLinuxWatcherStart(IRBuilder<> &B, Module &M, Function *WatchFn) {
     B.SetInsertPoint(contBB);
 }
 
+Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
+                         const Triple &TT);
+
+Function *probeWatchThread(Module &M, Function *Probe) {
+    if (Function *existing = M.getFunction("morok.antidbg.probe.watch"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(ptr, {ptr}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.probe.watch", &M);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *loopBB = BasicBlock::Create(ctx, "loop", fn);
+    auto *bodyBB = BasicBlock::Create(ctx, "body", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> EB(entry);
+    EB.CreateBr(loopBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *iter = LB.CreatePHI(i32, 2, "morok.antidbg.probe.iter");
+    iter->addIncoming(ConstantInt::get(i32, 0), entry);
+    LB.CreateCondBr(LB.CreateICmpULT(iter, ConstantInt::get(i32, 8)), bodyBB,
+                    retBB);
+
+    IRBuilder<> BB(bodyBB);
+    FunctionCallee sleepFn =
+        M.getOrInsertFunction("sleep", FunctionType::get(i32, {i32}, false));
+    BB.CreateCall(sleepFn, {ConstantInt::get(i32, 1)});
+    Value *tag = BB.CreateAdd(BB.CreateZExt(iter, i64),
+                              ConstantInt::get(i64, 0xD14B2E3520B47A11ULL),
+                              "morok.antidbg.probe.watch.tag");
+    BB.CreateCall(Probe->getFunctionType(), Probe, {tag});
+    Value *next = BB.CreateAdd(iter, ConstantInt::get(i32, 1));
+    BB.CreateBr(loopBB);
+    iter->addIncoming(next, bodyBB);
+
+    IRBuilder<> RB(retBB);
+    RB.CreateRet(ConstantPointerNull::get(ptr));
+    return fn;
+}
+
 void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
                         ir::IRRandom &rng) {
     LLVMContext &ctx = M.getContext();
@@ -576,6 +625,130 @@ void emitDarwinAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
     B.CreateRetVoid();
 }
 
+Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
+                         const Triple &TT) {
+    if (Function *existing = M.getFunction("morok.antidbg.probe"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *voidTy = Type::getVoidTy(ctx);
+    auto *fn = Function::Create(FunctionType::get(voidTy, {i64}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.probe", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *tag = fn->getArg(0);
+    tag->setName("tag");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    foldState(B, State, tag, 0x9A86B1D32F4C79E5ULL, "morok.antidbg.probe.tag");
+
+    if (TT.isOSLinux()) {
+        auto *i32 = Type::getInt32Ty(ctx);
+        Function *statusFn = linuxStatusTracerCheck(M, rng);
+        Function *statFn = linuxStatField4Check(M, rng);
+        Value *status = B.CreateCall(statusFn);
+        Value *stat4 = B.CreateCall(statFn);
+        foldFlag(B, State, B.CreateICmpNE(status, ConstantInt::get(i32, 0)),
+                 0x3FEC9A6245A7DB13ULL, "morok.antidbg.probe.status");
+        foldState(B, State, stat4, 0x84379D6FA21708C9ULL,
+                  "morok.antidbg.probe.stat4");
+    } else if (TT.isOSDarwin()) {
+        emitDarwinSysctlCheck(B, M, State);
+        emitDarwinCsopsCheck(B, M, State);
+    } else {
+        auto *i32 = Type::getInt32Ty(ctx);
+        Value *rc = emitPtrace(B, M, 0);
+        foldFlag(B, State, B.CreateICmpSLT(rc, ConstantInt::getSigned(i32, 0)),
+                 0xA082B7C1D94E530FULL, "morok.antidbg.probe.ptrace");
+    }
+
+    B.CreateRetVoid();
+    return fn;
+}
+
+bool isProbeInsertionPoint(Instruction &I) {
+    if (isa<PHINode>(I) || isa<AllocaInst>(I) || I.isTerminator() ||
+        I.isEHPad())
+        return false;
+    return true;
+}
+
+void insertGuardedProbeCall(Module &M, Instruction &I, Function *Probe,
+                            std::uint64_t Tag, std::uint8_t ArmedByte,
+                            std::uint32_t SiteId) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+
+    auto *gate = new GlobalVariable(
+        M, i8, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i8, 0), "morok.antidbg.site");
+    gate->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+
+    Function *parent = I.getFunction();
+    BasicBlock *headBB = I.getParent();
+    BasicBlock *contBB =
+        headBB->splitBasicBlock(I.getIterator(), "morok.antidbg.site.cont");
+    headBB->getTerminator()->eraseFromParent();
+    auto *callBB =
+        BasicBlock::Create(ctx, "morok.antidbg.site.call", parent, contBB);
+
+    IRBuilder<> HB(headBB);
+    auto *seen = HB.CreateLoad(i8, gate, "morok.antidbg.site.seen");
+    seen->setVolatile(true);
+    Value *shouldRun = HB.CreateICmpEQ(seen, ConstantInt::get(i8, 0));
+    HB.CreateCondBr(shouldRun, callBB, contBB);
+
+    IRBuilder<> CB(callBB);
+    auto *armed = CB.CreateStore(ConstantInt::get(i8, ArmedByte), gate);
+    armed->setVolatile(true);
+    CB.CreateCall(Probe->getFunctionType(), Probe,
+                  {ConstantInt::get(CB.getInt64Ty(),
+                                    Tag ^ (0x9E3779B97F4A7C15ULL * SiteId))});
+    CB.CreateBr(contBB);
+}
+
+bool insertAntiDebugCallsiteProbes(Module &M, Function *Probe,
+                                   ir::IRRandom &rng) {
+    constexpr std::uint32_t kMaxProbeSites = 32;
+    constexpr std::uint32_t kFunctionChance = 100;
+
+    std::vector<Instruction *> sites;
+    sites.reserve(kMaxProbeSites);
+    for (Function &F : M) {
+        if (sites.size() >= kMaxProbeSites)
+            break;
+        if (F.isDeclaration() || F.hasAvailableExternallyLinkage() ||
+            F.getName().starts_with("morok."))
+            continue;
+        if (!rng.chance(kFunctionChance))
+            continue;
+
+        std::vector<Instruction *> candidates;
+        candidates.reserve(8);
+        for (BasicBlock &BB : F) {
+            if (BB.isEHPad() || BB.isLandingPad())
+                continue;
+            for (Instruction &I : BB)
+                if (isProbeInsertionPoint(I))
+                    candidates.push_back(&I);
+        }
+        if (candidates.empty())
+            continue;
+        sites.push_back(candidates[rng.range(
+            static_cast<std::uint32_t>(candidates.size()))]);
+    }
+
+    std::uint32_t siteId = 1;
+    for (Instruction *I : sites)
+        insertGuardedProbeCall(
+            M, *I, Probe, rng.next(),
+            static_cast<std::uint8_t>((rng.next() | 1) & 0xffu), siteId++);
+    return !sites.empty();
+}
+
 } // namespace
 
 bool antiDebuggingModule(Module &M, ir::IRRandom &rng) {
@@ -592,6 +765,15 @@ bool antiDebuggingModule(Module &M, ir::IRRandom &rng) {
         emitPtrace(B, M, 0);
         B.CreateRetVoid();
     }
+    Function *probe = antiDebugProbe(M, state, rng, tt);
+    if (tt.isOSDarwin()) {
+        Instruction *term = ctor->getEntryBlock().getTerminator();
+        term->eraseFromParent();
+        IRBuilder<> B(&ctor->getEntryBlock());
+        emitLinuxWatcherStart(B, M, probeWatchThread(M, probe));
+        B.CreateRetVoid();
+    }
+    insertAntiDebugCallsiteProbes(M, probe, rng);
     appendToGlobalCtors(M, ctor, 0);
     return true;
 }
