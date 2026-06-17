@@ -140,6 +140,12 @@ jobs:
             args+=(
               -DCMAKE_C_FLAGS="--gcc-install-dir=${gccdir}"
               -DCMAKE_CXX_FLAGS="${cxxinc}"
+              # CMake orders some Morok static libs after the LLVM libs they
+              # depend on; GNU ld is single-pass and leaves those cross-archive
+              # references undefined (ld64/lld-link rescan automatically). Wrap
+              # the whole link in a group so GNU ld rescans.
+              -DCMAKE_EXE_LINKER_FLAGS=-Wl,--start-group
+              -DCMAKE_CXX_STANDARD_LIBRARIES=-Wl,--end-group
             )
           fi
           if [ "$RUNNER_OS" = "Windows" ]; then
