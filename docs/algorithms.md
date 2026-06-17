@@ -1143,6 +1143,11 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `/proc/net/tcp`, and current-thread names for Frida-style signatures without
   embedding readable signature strings, and a cold SMC tripwire touches a code
   page through a volatile gate to stress DBI code-cache coherence.
+  Negative-space verification is folded into the same delayed state: clean-copy
+  executable-section scans report foreign `0xCC` bytes that are absent from the
+  on-disk image, address-space census diffs are also treated as "extra module"
+  evidence, a compact two-clock span asserts timing is not slow, and the Linux
+  DR sentinel records when any debug-register zeroing write fails.
 - TimingOracle emits a private constructor helper that samples several short
   volatile spans with two clock sources.  x86 targets use serialized `rdtscp`
   paired with a raw OS clock; Darwin targets use `mach_absolute_time` and

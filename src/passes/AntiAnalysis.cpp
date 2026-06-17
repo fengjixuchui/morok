@@ -1058,13 +1058,21 @@ Function *linuxDrScrubThread(Module &M, const Triple &TT) {
     acc = PB.CreateXor(acc, PB.CreateZExtOrTrunc(interrupt, i64),
                        "morok.antidbg.dr.acc.interrupt");
     constexpr std::uint64_t kDebugReg0Offset = 848;
+    Value *allZeroed = ConstantInt::getTrue(ctx);
     for (std::uint64_t i = 0; i < 8; ++i) {
         Value *rc = emitLinuxPtraceRaw(
             PB, M, TT, 6, tid, ConstantInt::get(ip, kDebugReg0Offset + i * 8),
             ConstantInt::get(ip, 0), "morok.antidbg.dr.poke");
+        allZeroed = PB.CreateAnd(
+            allZeroed, PB.CreateICmpEQ(rc, ConstantInt::get(ip, 0)),
+            "morok.negative.dr.zero.acc");
         acc = PB.CreateXor(acc, PB.CreateZExtOrTrunc(rc, i64),
                            "morok.antidbg.dr.acc.poke");
     }
+    Value *drNotZeroed =
+        PB.CreateNot(allZeroed, "morok.negative.dr.notzero");
+    acc = PB.CreateXor(acc, PB.CreateZExt(drNotZeroed, i64),
+                       "morok.antidbg.dr.acc.negative");
     Value *cont =
         emitLinuxPtraceRaw(PB, M, TT, 7, tid, ConstantInt::get(ip, 0),
                            ConstantInt::get(ip, 0), "morok.antidbg.dr.cont");
@@ -1962,6 +1970,11 @@ void emitByteDiffLoop(IRBuilder<> &B, Module &M, Function *Fn, Value *MemAddr,
     Value *cleanByte =
         BB.CreateLoad(i8, gepI8(BB, M, CleanPtr, idx, "morok.clean.file.ptr"),
                       "morok.clean.file.byte");
+    Value *foreignInt3 = BB.CreateAnd(
+        BB.CreateICmpEQ(memByte, ConstantInt::get(i8, 0xCC)),
+        BB.CreateICmpNE(cleanByte, ConstantInt::get(i8, 0xCC)),
+        "morok.negative.text.int3");
+    incrementDiff(BB, Diff, foreignInt3, "morok.negative.text.int3.hit");
     incrementDiff(BB, Diff, BB.CreateICmpNE(memByte, cleanByte),
                   "morok.clean.byte.diff");
     Value *next =
@@ -5129,12 +5142,29 @@ Value *emitMachAbsoluteTime(IRBuilder<> &B, Module &M, const Twine &Name) {
     return B.CreateCall(mach, {}, Name);
 }
 
+Value *emitWindowsQpc(IRBuilder<> &B, Module &M, const Twine &Name) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *i64 = Type::getInt64Ty(M.getContext());
+    auto *slot = B.CreateAlloca(i64, nullptr, Name + ".slot");
+    B.CreateStore(ConstantInt::get(i64, 0), slot);
+    FunctionCallee qpc = M.getOrInsertFunction(
+        "QueryPerformanceCounter",
+        FunctionType::get(i32, {PointerType::getUnqual(M.getContext())},
+                          false));
+    Value *rc = B.CreateCall(qpc, {slot}, Name + ".rc");
+    Value *ticks = B.CreateLoad(i64, slot, Name + ".ticks");
+    return B.CreateSelect(B.CreateICmpNE(rc, ConstantInt::get(i32, 0)), ticks,
+                          ConstantInt::get(i64, 0), Name + ".ok");
+}
+
 Value *emitTimingPrimaryClock(IRBuilder<> &B, Module &M, const Triple &TT,
                               const Twine &Name) {
     if (isX86Target(TT))
         return emitRdtscp(B, M);
     if (TT.isOSDarwin())
         return emitMachAbsoluteTime(B, M, Name + ".mach");
+    if (TT.isOSWindows())
+        return emitWindowsQpc(B, M, Name + ".qpc");
     return emitClockGettimeNanos(B, M, 1, Name + ".mono");
 }
 
@@ -5142,6 +5172,8 @@ Value *emitTimingSecondaryClock(IRBuilder<> &B, Module &M, const Triple &TT,
                                 const Twine &Name) {
     if (TT.isOSDarwin() && isX86Target(TT))
         return emitMachAbsoluteTime(B, M, Name + ".mach");
+    if (TT.isOSWindows())
+        return emitWindowsQpc(B, M, Name + ".qpc");
     return emitClockGettimeNanos(B, M, 4, Name + ".raw");
 }
 
@@ -5239,6 +5271,56 @@ Function *timingOracleProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
              B.CreateICmpUGE(divergentSamples, ConstantInt::get(i32, 2)),
              0x5E74B29D13C8A60BULL, "morok.timing.divergent.distribution");
     B.CreateRetVoid();
+    return fn;
+}
+
+Function *negativeTimingProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
+    if (Function *existing = M.getFunction("morok.negative.timing"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.negative.timing", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *diff = B.CreateAlloca(i64, nullptr, "morok.negative.timing.diff");
+    auto *acc = B.CreateAlloca(i64, nullptr, "morok.negative.timing.acc");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(i64, rng.next()), acc)->setVolatile(true);
+
+    Value *primaryStart =
+        emitTimingPrimaryClock(B, M, TT, "morok.negative.timing.primary.start");
+    Value *secondaryStart = emitTimingSecondaryClock(
+        B, M, TT, "morok.negative.timing.secondary.start");
+    emitShortTimingSpan(B, acc, rng.next());
+    Value *primaryEnd =
+        emitTimingPrimaryClock(B, M, TT, "morok.negative.timing.primary.end");
+    Value *secondaryEnd =
+        emitTimingSecondaryClock(B, M, TT, "morok.negative.timing.secondary.end");
+
+    Value *primaryDelta = B.CreateSub(primaryEnd, primaryStart,
+                                      "morok.negative.timing.primary.delta");
+    Value *secondaryDelta = B.CreateSub(
+        secondaryEnd, secondaryStart, "morok.negative.timing.secondary.delta");
+    const bool hasCycleClock = isX86Target(TT);
+    const std::uint64_t primaryThreshold =
+        hasCycleClock ? 25000000ULL : 15000000ULL;
+    constexpr std::uint64_t secondaryThreshold = 15000000ULL;
+    Value *primarySlow = B.CreateICmpUGT(
+        primaryDelta, ConstantInt::get(i64, primaryThreshold),
+        "morok.negative.timing.primary.slow");
+    Value *secondarySlow = B.CreateICmpUGT(
+        secondaryDelta, ConstantInt::get(i64, secondaryThreshold),
+        "morok.negative.timing.secondary.slow");
+    Value *slow = B.CreateAnd(primarySlow, secondarySlow,
+                              "morok.negative.timing.slow");
+    incrementDiff(B, diff, slow, "morok.negative.timing.slow");
+    emitRetDiff(B, diff);
     return fn;
 }
 
@@ -5593,9 +5675,13 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *diff = B.CreateCall(census, {}, "morok.antihook.census.diff");
         foldState(B, state, diff, 0x6B4E9D718C2A35F0ULL,
                   "morok.antihook.census");
-        foldFlag(B, state,
-                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+        Value *extraModules =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.negative.modules.extra");
+        foldFlag(B, state, extraModules,
                  0xA7815E3C49D206BFULL, "morok.antihook.census.changed");
+        foldFlag(B, state, extraModules, 0xB2E746D9108CA53FULL,
+                 "morok.negative.modules.extra");
     }
     if (Function *diverge = methodDivergenceProbe(M, tt)) {
         Value *diff =
@@ -5630,6 +5716,15 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldFlag(B, state,
                  B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
                  0xF4A7812C39D60E5BULL, "morok.antihook.dbi.changed");
+    }
+    if (Function *negativeTiming = negativeTimingProbe(M, rng, tt)) {
+        Value *diff =
+            B.CreateCall(negativeTiming, {}, "morok.negative.timing.diff");
+        foldState(B, state, diff, 0x4D91C2A8F76E350BULL,
+                  "morok.negative.timing");
+        foldFlag(B, state,
+                 B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0)),
+                 0x8A6357D1C49E20BFULL, "morok.negative.timing.changed");
     }
     insertStackOriginChecks(M, stackOriginCheck(M), state, prologueTargets, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);

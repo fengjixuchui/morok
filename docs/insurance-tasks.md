@@ -59,7 +59,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Code-as-data: compute a constant the program needs (S-box / dispatch table) by hashing a function's bytes, so patching that function yields a wrong constant `[xplat · extends selfcheck/dfi]`
 - [x] Anti-VM/sandbox heuristic battery: CPUID hypervisor leaf, Red Pill `sidt`/`sgdt`/`sldt`, VMware backdoor port, sleep-skip, CPU-count/RAM/uptime (decoy-grade, multi-signal) `[xplat · new]`
 - [x] Anti-DBI battery: code-cache return-address origin check, large-RWX-region scan, SMC tripwire, Frida thread/port/maps signatures (`gum-js-loop`, `27042`, `frida`/`gadget`) `[xplat · extends antihook]`
-- [ ] Negative-space verification: assert the *absence* of tamper — no `0xCC` in `.text`, no extra modules, timing not slow, DR all zero `[xplat · new]`
+- [x] Negative-space verification: assert the *absence* of tamper — no `0xCC` in `.text`, no extra modules, timing not slow, DR all zero `[xplat · new]`
 - [ ] Multi-signal corroboration gate before any aggressive response, to avoid false-positive crashes on legitimate VMs/CI/new CPUs (anti-self-DoS) `[xplat · new]`
 - [ ] Misleading metadata: plant bogus symbol names, fake function boundaries, and malformed-but-tolerated DWARF to mislead the auto-analyzer `[xplat · extends SymbolCloak]`
 - [ ] Auto-analysis sabotage: computed `jmp` / oversized switch with runtime-only targets (no recoverable jump table), bogus `endbr64`, fake epilogues/prologues `[xplat · extends microstress/dispatchless]`

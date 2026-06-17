@@ -9026,6 +9026,8 @@ entry:
     REQUIRE(Dbi != nullptr);
     Function *Smc = M->getFunction("morok.antihook.dbi.smc");
     REQUIRE(Smc != nullptr);
+    Function *NegativeTiming = M->getFunction("morok.negative.timing");
+    REQUIRE(NegativeTiming != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
@@ -9052,6 +9054,7 @@ entry:
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
           1u);
+    CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rel.offset") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rx") >= 1u);
@@ -9094,6 +9097,10 @@ entry:
                                  "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
+    CHECK(countNamedInstructions(*NegativeTiming,
+                                 "morok.negative.timing.slow") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Maps, "morok.antihook.maps.rwx") >= 1u);
@@ -9147,6 +9154,8 @@ entry:
     REQUIRE(Sandbox != nullptr);
     Function *Smc = M->getFunction("morok.antihook.dbi.smc");
     REQUIRE(Smc != nullptr);
+    Function *NegativeTiming = M->getFunction("morok.negative.timing");
+    REQUIRE(NegativeTiming != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
@@ -9166,6 +9175,7 @@ entry:
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
           1u);
+    CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3") >= 1u);
     CHECK(countNamedInstructions(*Fixups,
                                  "morok.antihook.fixup.section.got") >= 1u);
     CHECK(countNamedInstructions(*Fixups,
@@ -9193,6 +9203,10 @@ entry:
                                  "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
+    CHECK(countNamedInstructions(*NegativeTiming,
+                                 "morok.negative.timing.slow") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx") >= 1u);
@@ -9242,10 +9256,14 @@ entry:
     REQUIRE(Sandbox != nullptr);
     Function *Smc = M->getFunction("morok.antihook.dbi.smc");
     REQUIRE(Smc != nullptr);
+    Function *NegativeTiming = M->getFunction("morok.negative.timing");
+    REQUIRE(NegativeTiming != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getFunction("VirtualQuery") != nullptr);
     CHECK(M->getFunction("VirtualProtect") != nullptr);
+    CHECK(M->getFunction("QueryPerformanceCounter") != nullptr);
+    CHECK(M->getFunction("clock_gettime") == nullptr);
     CHECK(M->getFunction("dlsym") == nullptr);
     CHECK(M->getFunction("exit") == nullptr);
     CHECK(hasInlineAsmCall(*Sandbox));
@@ -9260,6 +9278,10 @@ entry:
                                  "morok.antihook.dbi.smc.virtualprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
+    CHECK(countNamedInstructions(*NegativeTiming,
+                                 "morok.negative.timing.slow") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.virtualprotect") >=
           1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.query") >= 1u);
@@ -9347,6 +9369,9 @@ entry:
     CHECK(
         countNamedInstructions(*M->getFunction("morok.antidbg.linux.dr.scrub"),
                                "morok.antidbg.dr.poke") == 8u);
+    CHECK(
+        countNamedInstructions(*M->getFunction("morok.antidbg.linux.dr.scrub"),
+                               "morok.negative.dr.notzero") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
                                  "morok.antidbg.dr.fork") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
