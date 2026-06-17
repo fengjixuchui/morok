@@ -6,4 +6,7 @@
 // for registration, avoiding duplicate-symbol clashes.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+// doctest's timeout path references DBL_EPSILON; some libc++ revisions (e.g. the
+// LLVM 22 release toolchain) don't pull <cfloat> in transitively, so include it.
+#include <cfloat>
 #include "doctest.h"

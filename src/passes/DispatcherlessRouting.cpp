@@ -70,7 +70,7 @@ bool validSuccessor(const BasicBlock *Succ, const BasicBlock *Entry) {
 std::vector<BasicBlock *> terminatorSuccessors(Instruction &Term) {
     std::vector<BasicBlock *> Succs;
     if (auto *Br = dyn_cast<BranchInst>(&Term)) {
-        for (BasicBlock *Succ : Br->successors())
+        for (BasicBlock *Succ : llvm::successors(Br))
             addUnique(Succs, Succ);
     } else if (auto *Sw = dyn_cast<SwitchInst>(&Term)) {
         addUnique(Succs, Sw->getDefaultDest());

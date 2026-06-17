@@ -47,7 +47,7 @@ bool collectEligibleSuccessors(Instruction *term,
     if (auto *br = dyn_cast<BranchInst>(term)) {
         if (!br->isConditional())
             return false;
-        for (BasicBlock *succ : br->successors())
+        for (BasicBlock *succ : llvm::successors(br))
             if (!addUniqueSuccessor(successors, succ))
                 return false;
         return successors.size() >= 2;

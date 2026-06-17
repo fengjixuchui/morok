@@ -307,7 +307,7 @@ Value *selectedEdgeTag(IRBuilder<NoFolder> &B, Instruction &Term,
 
 bool hasSelectedSuccessor(Instruction &Term,
                           const DenseMap<BasicBlock *, GuardedBlock> &Guards) {
-    for (BasicBlock *Succ : Term.successors())
+    for (BasicBlock *Succ : llvm::successors(&Term))
         if (Guards.contains(Succ))
             return true;
     return false;
