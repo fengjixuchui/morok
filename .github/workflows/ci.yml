@@ -59,7 +59,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build clang lld
+          sudo apt-get install -y --no-install-recommends ninja-build clang lld g++
 
       - name: Install CMake + Ninja
         if: runner.os != 'Linux'
@@ -110,13 +110,26 @@ jobs:
           CMAKE_CXX_COMPILER_LAUNCHER: sccache
         run: |
           set -euo pipefail
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER="${{ steps.llvm.outputs.clang }}" \
-            -DCMAKE_CXX_COMPILER="${{ steps.llvm.outputs.clangxx }}" \
-            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}" \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+          args=(
+            -S . -B build -G Ninja
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+            -DCMAKE_C_COMPILER="${{ steps.llvm.outputs.clang }}"
+            -DCMAKE_CXX_COMPILER="${{ steps.llvm.outputs.clangxx }}"
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          )
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # The freshly-built trunk clang does not auto-detect ubuntu's gcc
+            # install, so point it at libstdc++ explicitly (else <initializer_list>
+            # and friends are "not found").
+            gccdir="$(dirname "$(gcc -print-libgcc-file-name)")"
+            args+=(
+              -DCMAKE_C_FLAGS="--gcc-install-dir=$gccdir"
+              -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gccdir"
+            )
+          fi
+          cmake "${args[@]}"
 
       - name: Build Morok
         shell: bash

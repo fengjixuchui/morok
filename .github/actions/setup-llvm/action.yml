@@ -14,7 +14,7 @@ inputs:
   cache-version:
     description: "Bump to invalidate every LLVM install cache (recipe changes)."
     required: false
-    default: "v2"
+    default: "v3"
 
 outputs:
   install-prefix:
@@ -102,7 +102,12 @@ runs:
           -DLLVM_ENABLE_LIBEDIT=OFF
           -DLLVM_ENABLE_ZLIB=OFF
           -DLLVM_ENABLE_ZSTD=OFF
-          -DLLVM_EXPORT_SYMBOLS_FOR_PLUGINS=ON
+          # Do NOT use LLVM_EXPORT_SYMBOLS_FOR_PLUGINS: it restricts the tool's
+          # exported symbols to a curated plugin-API list that omits symbols the
+          # Morok passes use (e.g. llvm::CallbackVH::anchor), so the plugin fails
+          # to dlopen. We instead rely on full symbol export (Mach-O default on
+          # macOS; --export-dynamic on Linux below).
+          -DLLVM_EXPORT_SYMBOLS_FOR_PLUGINS=OFF
           -DLLVM_OPTIMIZED_TABLEGEN=ON
           -DLLVM_PARALLEL_LINK_JOBS=2
           -DCMAKE_C_COMPILER_LAUNCHER=sccache
@@ -110,12 +115,15 @@ runs:
         )
         if [ "$RUNNER_OS" = "Windows" ]; then
           # MSVC env set up by the caller; Release has no debug info, keeping
-          # sccache able to cache (it cannot cache /Zi PDB writes).
+          # sccache able to cache (it cannot cache /Zi PDB writes). Build libclang
+          # static so its DLL import library does not blow the 65535-object limit
+          # (LNK1189).
           ARGS+=(
             -DCMAKE_C_COMPILER=cl
             -DCMAKE_CXX_COMPILER=cl
             -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
             -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=
+            -DLIBCLANG_BUILD_STATIC=ON
           )
         else
           # Build LLVM with the host clang (matches the host C++ stdlib, which the
@@ -125,6 +133,11 @@ runs:
           fi
           if command -v ld.lld >/dev/null 2>&1; then
             ARGS+=( -DLLVM_USE_LINKER=lld )
+          fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # ELF hides symbols by default; export all of clang/opt's symbols so
+            # the dlopen-ed plugin can resolve the LLVM symbols it references.
+            ARGS+=( -DCMAKE_EXE_LINKER_FLAGS=-Wl,--export-dynamic )
           fi
         fi
 
