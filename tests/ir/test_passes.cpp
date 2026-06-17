@@ -559,17 +559,20 @@ TEST_CASE("MorokPass demotes generated symbols to private linkage") {
 
     // Generated helpers exist (e.g. morok.strdec) but must carry private
     // linkage, so their descriptive names never reach the binary's symbol table.
-    std::size_t morokFns = 0;
+    std::size_t morokSyms = 0;
     for (Function &F : *M) {
         if (!F.getName().starts_with("morok."))
             continue;
-        ++morokFns;
+        ++morokSyms;
         CHECK(F.hasPrivateLinkage());
     }
-    CHECK(morokFns >= 1u);
-    for (GlobalVariable &GV : M->globals())
-        if (GV.getName().starts_with("morok."))
-            CHECK(GV.hasPrivateLinkage());
+    for (GlobalVariable &GV : M->globals()) {
+        if (!GV.getName().starts_with("morok."))
+            continue;
+        ++morokSyms;
+        CHECK(GV.hasPrivateLinkage());
+    }
+    CHECK(morokSyms >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -8188,18 +8191,26 @@ entry:
 TEST_CASE("stringEncryptModule encrypts in place with per-string decryptors") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("strings", ctx);
-    GlobalVariable *Small = makePrivateString(*M, "small.str", "small");
+    makePrivateString(*M, "small.str", "small");
     const std::string LargeText(2048, 'x');
-    GlobalVariable *Large = makePrivateString(*M, "large.str", LargeText);
+    makePrivateString(*M, "large.str", LargeText);
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(305);
     morok::ir::IRRandom rng(engine);
     CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
 
+    // Length-hiding may replace the globals with padded ones; re-fetch by name.
+    GlobalVariable *Small = M->getGlobalVariable("small.str", true);
+    GlobalVariable *Large = M->getGlobalVariable("large.str", true);
+    REQUIRE(Small);
+    REQUIRE(Large);
+
     // EVERY string is encrypted — readable strings are toxic — the small one
     // with an unrolled decryptor, the long one with a compact loop decryptor.
     CHECK_FALSE(Small->isConstant());
     CHECK_FALSE(Large->isConstant());
+    // The small string's stored size is padded past its true length (6).
+    CHECK(cast<ArrayType>(Small->getValueType())->getNumElements() > 6u);
 
     // The plaintext is gone, and the encryption is driven by the runtime-opaque
     // module seed plus dedicated decryptors (no shared gf8mul / key globals).
@@ -8226,13 +8237,17 @@ TEST_CASE("stringEncryptModule gives each string its own cipher") {
     auto M = std::make_unique<Module>("multi-strings", ctx);
     // Two identical plaintexts must encrypt to DIFFERENT ciphertext (per-string
     // keys) and get DISTINCT decryptors (not one shared routine).
-    GlobalVariable *A = makePrivateString(*M, "a.str", "duplicate-content");
-    GlobalVariable *B = makePrivateString(*M, "b.str", "duplicate-content");
+    makePrivateString(*M, "a.str", "duplicate-content");
+    makePrivateString(*M, "b.str", "duplicate-content");
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(77);
     morok::ir::IRRandom rng(engine);
     CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
 
+    GlobalVariable *A = M->getGlobalVariable("a.str", true);
+    GlobalVariable *B = M->getGlobalVariable("b.str", true);
+    REQUIRE(A);
+    REQUIRE(B);
     auto *CA = dyn_cast<ConstantDataArray>(A->getInitializer());
     auto *CB = dyn_cast<ConstantDataArray>(B->getInitializer());
     REQUIRE(CA);

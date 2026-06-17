@@ -4,13 +4,14 @@
 //
 // morok/passes/StringEncryption.cpp
 //
-// Every eligible private byte-array string is encrypted with its OWN cipher:
+// Every eligible private byte-array string is encrypted with its OWN cipher —
 // a per-string keystream generator (one of several), XOR- or ADD-combined, with
-// per-string key material.  Each string also gets its OWN decryptor — a separate
-// global constructor that recovers exactly that string in place, with the
-// keystream inlined (no shared multiply/decrypt helper).  So there is no single
-// place that decrypts every string, no two strings share an encryption, and a
-// decompiler sees N unrelated startup routines rather than one tell-all loop.
+// per-string key material keyed on a runtime-opaque module seed.  Each string is
+// recovered in place by its OWN global constructor (per-string and self-
+// contained — no shared decrypt/multiply helper, and no single place that
+// decrypts every string).  Read-only C strings are additionally length-padded to
+// a random block multiple, so the stored array size no longer reveals the
+// string's length.
 
 #include "morok/passes/StringEncryption.hpp"
 
@@ -66,6 +67,30 @@ struct Cipher {
     std::uint64_t mul = 1;  // per-string odd multiplier
 };
 
+// Emit, unrolled, the decryption of `n` bytes read from `src[i]` and written to
+// `dst[i]` (both base pointers to `arrTy` == [n x i8]) at B's insertion point.
+void emitDecryptUnrolled(IRBuilder<> &B, const Cipher &c, GlobalVariable *seed,
+                         Value *src, Value *dst, ArrayType *arrTy,
+                         std::uint64_t n) {
+    auto *i8 = Type::getInt8Ty(B.getContext());
+    auto *i64 = Type::getInt64Ty(B.getContext());
+    Value *rtKey = B.CreateXor(B.CreateLoad(i64, seed, /*isVolatile=*/true),
+                               ConstantInt::get(i64, c.key));
+    for (std::uint64_t i = 0; i < n; ++i) {
+        Value *ks = ir::emitKeystream(B, c.variant, rtKey,
+                                      static_cast<std::uint32_t>(i), c.mul);
+        Value *ksByte = B.CreateTrunc(ks, i8);
+        Value *sp = B.CreateInBoundsGEP(
+            arrTy, src, {ConstantInt::get(i64, 0), ConstantInt::get(i64, i)});
+        Value *dp = B.CreateInBoundsGEP(
+            arrTy, dst, {ConstantInt::get(i64, 0), ConstantInt::get(i64, i)});
+        Value *cipher = B.CreateLoad(i8, sp);
+        Value *plain = c.add ? B.CreateSub(cipher, ksByte)
+                             : B.CreateXor(cipher, ksByte);
+        B.CreateStore(plain, dp);
+    }
+}
+
 } // namespace
 
 bool stringEncryptModule(Module &M, const StrEncParams &params,
@@ -79,7 +104,7 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
     auto *voidTy = Type::getVoidTy(ctx);
 
     std::vector<GlobalVariable *> targets;
-    targets.reserve(kMaxEncryptedStrings);
+    targets.reserve(64);
     std::uint64_t selectedBytes = 0;
     for (GlobalVariable &gv : M.globals()) {
         if (targets.size() >= kMaxEncryptedStrings ||
@@ -119,45 +144,69 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
         c.mul = rng.next() | 1ull;
         const std::uint64_t k0 = seedVal ^ c.key;
 
-        std::vector<std::uint8_t> ct(n);
-        for (std::uint64_t i = 0; i < n; ++i) {
+        // Hide the length: a C string is padded to a random multiple of a block
+        // size with random trailing bytes.  The runtime consumer still stops at
+        // the original NUL, but the stored array size no longer reveals how long
+        // the string is.  Raw (non-C-string) byte arrays keep their exact size.
+        std::vector<std::uint8_t> plain(n);
+        for (std::uint64_t i = 0; i < n; ++i)
+            plain[i] = static_cast<std::uint8_t>(raw[i]);
+        // Only length-pad read-only C strings; a mutable global may be indexed
+        // up to its original size by the program, so its size must not change.
+        if (gv->isConstant() && cda->isCString()) {
+            constexpr std::uint64_t kBlock = 16;
+            const std::uint64_t blocks =
+                (n + kBlock - 1) / kBlock + rng.range(3);
+            const std::size_t padded = static_cast<std::size_t>(blocks * kBlock);
+            const std::size_t old = plain.size();
+            plain.resize(padded);
+            for (std::size_t i = old; i < padded; ++i)
+                plain[i] = static_cast<std::uint8_t>(rng.next());
+        }
+        const std::uint64_t storedLen = plain.size();
+
+        std::vector<std::uint8_t> ct(storedLen);
+        for (std::uint64_t i = 0; i < storedLen; ++i) {
             const auto ks = static_cast<std::uint8_t>(
                 ir::keystreamValue(c.variant, k0,
                                    static_cast<std::uint32_t>(i), c.mul) &
                 0xFFu);
-            const auto p = static_cast<std::uint8_t>(raw[i]);
-            ct[i] = c.add ? static_cast<std::uint8_t>(p + ks)
-                          : static_cast<std::uint8_t>(p ^ ks);
+            ct[i] = c.add ? static_cast<std::uint8_t>(plain[i] + ks)
+                          : static_cast<std::uint8_t>(plain[i] ^ ks);
         }
-        gv->setInitializer(
-            ConstantDataArray::get(ctx, ArrayRef<std::uint8_t>(ct)));
-        gv->setConstant(false); // mutated in place by this string's decryptor
+        Constant *cipherInit =
+            ConstantDataArray::get(ctx, ArrayRef<std::uint8_t>(ct));
 
-        // A decryptor unique to this string: recover its bytes in place with the
-        // keystream inlined, then return.  Each gets its own constructor.  Short
-        // strings are fully unrolled (maximally tangled); long strings use a
-        // compact loop so module code size stays bounded.
+        // A global's type is fixed at creation, so a size change means a new,
+        // larger global with uses redirected to it.
+        GlobalVariable *target = gv;
+        if (storedLen == n) {
+            gv->setInitializer(cipherInit);
+        } else {
+            const std::string nm = gv->getName().str();
+            const auto addr = gv->getUnnamedAddr();
+            const auto linkage = gv->getLinkage();
+            gv->setName(""); // free the name for the replacement
+            target = new GlobalVariable(M, cipherInit->getType(),
+                                        /*isConstant=*/true, linkage, cipherInit,
+                                        nm);
+            target->setUnnamedAddr(addr);
+            target->setAlignment(Align(1));
+            gv->replaceAllUsesWith(target);
+            gv->eraseFromParent();
+        }
+        auto *arrTy = cast<ArrayType>(target->getValueType());
+
+        // Decrypt in place via this string's own constructor.  Short
+        // strings unroll (maximally tangled); long ones loop so module code size
+        // stays bounded.
+        target->setConstant(false); // mutated in place by this string's decryptor
         auto *decFn = Function::Create(FunctionType::get(voidTy, false),
                                        GlobalValue::InternalLinkage,
                                        "morok.strdec", &M);
-        auto combine = [&](IRBuilder<> &B, Value *cipher, Value *ksByte) {
-            return c.add ? B.CreateSub(cipher, ksByte)
-                         : B.CreateXor(cipher, ksByte);
-        };
-        if (n <= kUnrollThreshold) {
+        if (storedLen <= kUnrollThreshold) {
             IRBuilder<> B(BasicBlock::Create(ctx, "entry", decFn));
-            Value *rtKey = B.CreateXor(
-                B.CreateLoad(i64, seed, /*isVolatile=*/true),
-                ConstantInt::get(i64, c.key));
-            for (std::uint64_t i = 0; i < n; ++i) {
-                Value *ks = ir::emitKeystream(
-                    B, c.variant, rtKey, static_cast<std::uint32_t>(i), c.mul);
-                Value *ptr = B.CreateConstInBoundsGEP2_64(gv->getValueType(), gv,
-                                                          0, i);
-                B.CreateStore(combine(B, B.CreateLoad(i8, ptr),
-                                      B.CreateTrunc(ks, i8)),
-                              ptr);
-            }
+            emitDecryptUnrolled(B, c, seed, target, target, arrTy, storedLen);
             B.CreateRetVoid();
         } else {
             auto *entry = BasicBlock::Create(ctx, "entry", decFn);
@@ -173,24 +222,24 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
             PHINode *iv = B.CreatePHI(i64, 2);
             iv->addIncoming(ConstantInt::get(i64, 0), entry);
             Value *ks = ir::emitKeystreamDynamic(B, c.variant, rtKey, iv, c.mul);
-            Value *ptr = B.CreateInBoundsGEP(
-                gv->getValueType(), gv, {ConstantInt::get(i64, 0), iv});
-            B.CreateStore(combine(B, B.CreateLoad(i8, ptr),
-                                  B.CreateTrunc(ks, i8)),
-                          ptr);
+            Value *ptr = B.CreateInBoundsGEP(arrTy, target,
+                                             {ConstantInt::get(i64, 0), iv});
+            Value *dec =
+                c.add ? B.CreateSub(B.CreateLoad(i8, ptr), B.CreateTrunc(ks, i8))
+                      : B.CreateXor(B.CreateLoad(i8, ptr), B.CreateTrunc(ks, i8));
+            B.CreateStore(dec, ptr);
             Value *next = B.CreateAdd(iv, ConstantInt::get(i64, 1));
             iv->addIncoming(next, loop);
-            B.CreateCondBr(B.CreateICmpULT(next, ConstantInt::get(i64, n)), loop,
-                           exit);
+            B.CreateCondBr(
+                B.CreateICmpULT(next, ConstantInt::get(i64, storedLen)), loop,
+                exit);
 
             B.SetInsertPoint(exit);
             B.CreateRetVoid();
         }
-
         // Vary the constructor priority so the decryptors do not appear as one
         // contiguous block running back-to-back.
-        appendToGlobalCtors(M, decFn,
-                            static_cast<int>(rng.range(40000)) + 1);
+        appendToGlobalCtors(M, decFn, static_cast<int>(rng.range(40000)) + 1);
         changed = true;
     }
     return changed;

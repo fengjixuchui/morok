@@ -42,19 +42,28 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `((a^r) >>s k) ^ (r >>s k)`.  Variable / out-of-range shift amounts stay
   untouched.
 
-## String encryption — `core/Galois8`
-- i8 arrays: Vernam-GF8. Per byte: random pad `k1`, random non-zero `k2`; store
-  `c = (p^k1)·k2`, `k1`, and `k2inv = inv(k2)`. Runtime: `p = (c·k2inv)^k1`.
-- Three GVs: `EncryptedString` (compact ciphertext), key GV (`k1`, full layout),
-  `DecryptSpace` (`k2inv`/plaintext, full layout). One-time atomic-flag–gated
-  decrypt block; element order Fisher-Yates shuffled.
-- Wider types (i16/i32/i64): plain XOR cipher (`enc = K^V`), not GF8.
-- `strcry_prob` default 100; per-element coin `get_range(100) >= prob` ⇒ left clear.
-  Content regex `skip_content`/`force_content` over raw bytes.
-- Direct memory caps: the pass encrypts at most 64 string globals, skips any
-  single string above 1024 bytes, and emits at most 4096 bytes of decryptor
-  payload per module.  Larger literals remain clear rather than expanding into
-  one decryptor instruction sequence per byte.
+## String encryption — `ir/SymbolCloak` keystream
+- *Every* eligible private i8-array global is encrypted with its OWN cipher: a
+  per-string keystream generator (murmur3 / splitmix64 / xorshift\*, chosen per
+  string), XOR- or ADD-combined, with per-string key material `k0 = seedVal ^
+  siteKey` and an odd multiplier.  No two strings share an encryption.
+- Recovery is distributed: each string has its OWN global constructor that
+  recovers just that string in place, with the keystream inlined (no shared
+  multiply/decrypt helper) — short strings unrolled, long strings looped — at a
+  randomized constructor priority.  There is no single place that decrypts every
+  string.
+- Keyed on the runtime-opaque module seed `morok.cloak.seed` (a private *mutable*
+  i64 read with a volatile load), so the optimizer cannot fold ciphertext back to
+  text.  *Mutable* string globals (which the program may itself read/write or
+  decrypt in place) use exactly this in-place model so the program observes the
+  recovered plaintext.
+- Length hiding: read-only C strings are padded to a random multiple of a block
+  size (16) with random trailing bytes before encryption.  The runtime consumer
+  still stops at the original NUL, but the stored array size no longer reveals
+  the string's length.  Raw (non-C-string) byte arrays keep their exact size.
+- `strcry_prob` default 100; per-string coin leaves a string clear when it loses.
+  Caps are sized only to bound pathological inputs (≤ 8192 strings, ≤ 1 MiB per
+  string, ≤ 8 MiB per module), not to leave strings in the clear.
 
 ## Constant encryption — `core/XorShare`, `core/Feistel`
 - Pipeline: `origC ─[Feistel if feistel && bits>=16]→ workC ─[k-share XOR or single XOR]→ shares`.
