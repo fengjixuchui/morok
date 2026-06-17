@@ -1229,6 +1229,17 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   inline syscalls; macOS x86_64 uses the existing direct Darwin syscall path,
   while macOS arm64 uses libc `mmap`/`mprotect`/`sigaction` pending a supported
   direct syscall ABI.
+  POSIX anti-dump runs after the loader-dependent startup checks.  Linux derives
+  the loaded ELF header address from `AT_PHDR`/`PT_PHDR`, temporarily opens the
+  header page writable with the same direct `mprotect` path, poisons the ELF
+  magic and section-table fields (`e_shoff`, `e_shentsize`, `e_shnum`,
+  `e_shstrndx`), restores the page to RX/R according to its original load
+  flags, and leaves a fake ELF header on a private `PROT_NONE` page as a
+  scan tripwire.  macOS keeps the Mach-O load-command topology intact for later
+  dyld text-range checks, but poisons safe header flags and section-name fields
+  after startup fixup/text checks have consumed them, then plants an analogous
+  no-access Mach-O decoy page.  Any failed protect/scrub/guard step is folded
+  into delayed anti-hook state instead of changing normal program output.
   Selected non-`main` user functions also get an entry-time stack-origin check:
   the pass reads the function's immediate return address with
   `llvm.returnaddress(0)` and verifies it against the platform executable-origin

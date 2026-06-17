@@ -191,6 +191,12 @@ bool generatedFunction(const Function &F) {
 
 bool generatedProtectionFunction(const Function &F) {
     StringRef Name = F.getName();
+    // Keep fault/page-protection choreography native; VM lifting can disturb
+    // the exact signal and mprotect edge these probes rely on.
+    if (Name == "morok.antihook" ||
+        Name.starts_with("morok.antihook.schro") ||
+        Name.starts_with("morok.antihook.antidump"))
+        return false;
     return Name.starts_with("morok.antidbg") ||
            Name.starts_with("morok.antihook") ||
            Name.starts_with("morok.timing") ||

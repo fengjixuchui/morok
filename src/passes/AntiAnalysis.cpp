@@ -198,6 +198,18 @@ Value *loadAt(IRBuilderBase &B, Module &M, Type *Ty, Value *Base,
                   Name);
 }
 
+StoreInst *storeAt(IRBuilderBase &B, Module &M, Value *Base,
+                   unsigned long long Offset, Value *V,
+                   const Twine &Name = "") {
+    auto *SI =
+        B.CreateStore(V, gepI8(B, M, Base,
+                               constIp(M, static_cast<std::uint64_t>(Offset)),
+                               Name + ".ptr"));
+    SI->setVolatile(true);
+    SI->setAlignment(Align(1));
+    return SI;
+}
+
 void incrementDiff(IRBuilderBase &B, AllocaInst *Diff, Value *Flag,
                    const Twine &Name) {
     auto *i64 = B.getInt64Ty();
@@ -4696,6 +4708,367 @@ Function *wxEnforceProbe(Module &M, const Triple &TT) {
     return windowsWxEnforceProbe(M);
 }
 
+Value *pageBase(IRBuilder<> &B, Module &M, Value *Addr, Value *PageSize,
+                const Twine &Name) {
+    auto *ip = intPtrTy(M);
+    Value *Mask = B.CreateNot(B.CreateSub(PageSize, ConstantInt::get(ip, 1)),
+                              Name + ".mask");
+    return B.CreateAnd(Addr, Mask, Name);
+}
+
+void emitAntiDumpGuardPage(IRBuilder<> &B, Module &M, const Triple &TT,
+                           Value *PageSize, AllocaInst *Diff,
+                           std::uint32_t Magic, const Twine &Stem) {
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    const std::uint32_t mapAnon = TT.isOSDarwin() ? 0x1000u : 0x20u;
+    Value *Mapped = emitPosixAnonMmapAddr(
+        B, M, TT, PageSize, ConstantInt::get(ip, 3),
+        ConstantInt::get(ip, 2u | mapAnon), Stem + ".mmap");
+    Mapped->setName(Stem + ".mmap");
+    Value *MappedOk = B.CreateAnd(
+        B.CreateICmpUGT(Mapped, ConstantInt::get(ip, 4096)),
+        B.CreateICmpNE(Mapped, ConstantInt::get(ip, ~0ULL)),
+        Stem + ".mapped");
+    BasicBlock *Current = B.GetInsertBlock();
+    Function *Fn = Current->getParent();
+    BasicBlock *WriteBB = BasicBlock::Create(M.getContext(), "guard.write", Fn);
+    BasicBlock *DoneBB = BasicBlock::Create(M.getContext(), "guard.done", Fn);
+    B.CreateCondBr(MappedOk, WriteBB, DoneBB);
+
+    IRBuilder<> WB(WriteBB);
+    Value *PagePtr = WB.CreateIntToPtr(Mapped, ptr, Stem + ".ptr");
+    storeAt(WB, M, PagePtr, 0ULL, ConstantInt::get(i32, Magic),
+            Stem + ".magic");
+    Value *NoneRc = emitPosixMprotect(WB, M, TT, Mapped, PageSize,
+                                      ConstantInt::get(ip, 0));
+    NoneRc->setName(Stem + ".mprotect.none");
+    incrementDiff(WB, Diff,
+                  WB.CreateICmpSLT(NoneRc, ConstantInt::getSigned(i32, 0)),
+                  Stem + ".none.fail");
+    WB.CreateBr(DoneBB);
+
+    B.SetInsertPoint(DoneBB);
+}
+
+Function *linuxAntiDumpProbe(Module &M, const Triple &TT) {
+    if (!TT.isOSLinux() || intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.antidump.elf"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i16 = Type::getInt16Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.antidump.elf", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *phLoopBB = BasicBlock::Create(ctx, "ph.loop", fn);
+    auto *phBodyBB = BasicBlock::Create(ctx, "ph.body", fn);
+    auto *phNextBB = BasicBlock::Create(ctx, "ph.next", fn);
+    auto *protectBB = BasicBlock::Create(ctx, "protect", fn);
+    auto *scrubBB = BasicBlock::Create(ctx, "scrub", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *diff =
+        B.CreateAlloca(i64, nullptr, "morok.antidump.elf.diff");
+    AllocaInst *baseSlot =
+        B.CreateAlloca(ip, nullptr, "morok.antidump.elf.base");
+    AllocaInst *hdrVaddrSlot =
+        B.CreateAlloca(ip, nullptr, "morok.antidump.elf.hdr.vaddr");
+    AllocaInst *restoreProtSlot =
+        B.CreateAlloca(ip, nullptr, "morok.antidump.elf.restore.prot");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(ip, 0), baseSlot);
+    B.CreateStore(ConstantInt::get(ip, 0), hdrVaddrSlot);
+    B.CreateStore(ConstantInt::get(ip, 1), restoreProtSlot);
+    FunctionCallee getauxval =
+        M.getOrInsertFunction("getauxval", FunctionType::get(ip, {ip}, false));
+    Value *atPhdr =
+        B.CreateCall(getauxval, {ConstantInt::get(ip, 3)}, "morok.antidump.atphdr");
+    Value *phEnt =
+        B.CreateCall(getauxval, {ConstantInt::get(ip, 4)}, "morok.antidump.phent");
+    Value *phNum =
+        B.CreateCall(getauxval, {ConstantInt::get(ip, 5)}, "morok.antidump.phnum");
+    Value *pageRaw =
+        B.CreateCall(getauxval, {ConstantInt::get(ip, 6)}, "morok.antidump.pagesz");
+    Value *pageSize = B.CreateSelect(
+        B.CreateICmpUGT(pageRaw, ConstantInt::get(ip, 0)), pageRaw,
+        ConstantInt::get(ip, 4096), "morok.antidump.pagesz.v");
+    Value *valid =
+        B.CreateAnd(B.CreateICmpNE(atPhdr, ConstantInt::get(ip, 0)),
+                    B.CreateAnd(B.CreateICmpUGE(phEnt, ConstantInt::get(ip, 56)),
+                                B.CreateICmpUGT(phNum, ConstantInt::get(ip, 0))));
+    B.CreateCondBr(valid, phLoopBB, retBB);
+
+    IRBuilder<> PLB(phLoopBB);
+    PHINode *phIdx = PLB.CreatePHI(ip, 2, "morok.antidump.elf.ph.idx");
+    phIdx->addIncoming(ConstantInt::get(ip, 0), entry);
+    PLB.CreateCondBr(PLB.CreateAnd(PLB.CreateICmpULT(phIdx, phNum),
+                                   PLB.CreateICmpULT(phIdx, ConstantInt::get(ip, 128))),
+                     phBodyBB, protectBB);
+
+    IRBuilder<> PBB(phBodyBB);
+    Value *phPtr = PBB.CreateIntToPtr(
+        PBB.CreateAdd(atPhdr, PBB.CreateMul(phIdx, phEnt)), ptr,
+        "morok.antidump.elf.ph");
+    Value *pType = loadAt(PBB, M, i32, phPtr, 0ULL,
+                          "morok.antidump.elf.ph.type");
+    Value *pFlags = loadAt(PBB, M, i32, phPtr, 4,
+                           "morok.antidump.elf.ph.flags");
+    Value *pOffset = loadAt(PBB, M, ip, phPtr, 8,
+                            "morok.antidump.elf.ph.offset");
+    Value *pVaddr = loadAt(PBB, M, ip, phPtr, 16,
+                           "morok.antidump.elf.ph.vaddr");
+    Value *oldBase = PBB.CreateLoad(ip, baseSlot,
+                                    "morok.antidump.elf.base.old");
+    Value *newBase = PBB.CreateSelect(
+        PBB.CreateICmpEQ(pType, ConstantInt::get(i32, 6)),
+        PBB.CreateSub(atPhdr, pVaddr), oldBase,
+        "morok.antidump.elf.base.new");
+    PBB.CreateStore(newBase, baseSlot);
+    Value *isHeaderLoad = PBB.CreateAnd(
+        PBB.CreateICmpEQ(pType, ConstantInt::get(i32, 1)),
+        PBB.CreateICmpEQ(pOffset, ConstantInt::get(ip, 0)),
+        "morok.antidump.elf.header.load");
+    Value *oldHdr = PBB.CreateLoad(ip, hdrVaddrSlot,
+                                   "morok.antidump.elf.hdr.old");
+    PBB.CreateStore(PBB.CreateSelect(isHeaderLoad, pVaddr, oldHdr),
+                    hdrVaddrSlot);
+    Value *oldProt = PBB.CreateLoad(ip, restoreProtSlot,
+                                    "morok.antidump.elf.prot.old");
+    Value *hasExec =
+        PBB.CreateICmpNE(PBB.CreateAnd(pFlags, ConstantInt::get(i32, 1)),
+                         ConstantInt::get(i32, 0),
+                         "morok.antidump.elf.header.exec");
+    Value *headerRestoreProt =
+        PBB.CreateSelect(hasExec, ConstantInt::get(ip, 5),
+                         ConstantInt::get(ip, 1),
+                         "morok.antidump.elf.prot.new");
+    PBB.CreateStore(PBB.CreateSelect(isHeaderLoad, headerRestoreProt, oldProt),
+                    restoreProtSlot);
+    PBB.CreateBr(phNextBB);
+
+    IRBuilder<> PNB(phNextBB);
+    Value *nextPh =
+        PNB.CreateAdd(phIdx, ConstantInt::get(ip, 1),
+                      "morok.antidump.elf.ph.next");
+    PNB.CreateBr(phLoopBB);
+    phIdx->addIncoming(nextPh, phNextBB);
+
+    IRBuilder<> PB(protectBB);
+    Value *base = PB.CreateLoad(ip, baseSlot, "morok.antidump.elf.base.v");
+    Value *hdrVaddr =
+        PB.CreateLoad(ip, hdrVaddrSlot, "morok.antidump.elf.hdr.vaddr.v");
+    Value *hdrAddr = PB.CreateAdd(base, hdrVaddr, "morok.antidump.elf.hdr");
+    Value *hdrOk = PB.CreateICmpNE(hdrAddr, ConstantInt::get(ip, 0),
+                                   "morok.antidump.elf.hdr.ok");
+    PB.CreateCondBr(hdrOk, scrubBB, retBB);
+
+    IRBuilder<> SB(scrubBB);
+    Value *hdrPtr = SB.CreateIntToPtr(hdrAddr, ptr, "morok.antidump.elf.ptr");
+    Value *page = pageBase(SB, M, hdrAddr, pageSize, "morok.antidump.elf.page");
+    Value *rwRc = emitLinuxMprotect(SB, M, TT, page, pageSize,
+                                    ConstantInt::get(ip, 3));
+    rwRc->setName("morok.antidump.elf.mprotect.rw");
+    Value *rwFail =
+        SB.CreateICmpSLT(rwRc, ConstantInt::getSigned(i32, 0),
+                         "morok.antidump.elf.rw.fail");
+    incrementDiff(SB, diff, rwFail, "morok.antidump.elf.rw.fail");
+    BasicBlock *writeBB = BasicBlock::Create(ctx, "write", fn);
+    BasicBlock *afterWriteBB = BasicBlock::Create(ctx, "after.write", fn);
+    SB.CreateCondBr(rwFail, afterWriteBB, writeBB);
+
+    IRBuilder<> WB(writeBB);
+    storeAt(WB, M, hdrPtr, 0ULL, ConstantInt::get(i32, 0x4B4F524D),
+            "morok.antidump.elf.magic");
+    storeAt(WB, M, hdrPtr, 40, ConstantInt::get(i64, 0),
+            "morok.antidump.elf.shoff");
+    storeAt(WB, M, hdrPtr, 58, ConstantInt::get(i16, 0),
+            "morok.antidump.elf.shentsize");
+    storeAt(WB, M, hdrPtr, 60, ConstantInt::get(i16, 0),
+            "morok.antidump.elf.shnum");
+    storeAt(WB, M, hdrPtr, 62, ConstantInt::get(i16, 0),
+            "morok.antidump.elf.shstrndx");
+    Value *restoreProt =
+        WB.CreateLoad(ip, restoreProtSlot, "morok.antidump.elf.prot.v");
+    Value *roRc = emitLinuxMprotect(WB, M, TT, page, pageSize, restoreProt);
+    roRc->setName("morok.antidump.elf.mprotect.restore");
+    incrementDiff(WB, diff,
+                  WB.CreateICmpSLT(roRc, ConstantInt::getSigned(i32, 0)),
+                  "morok.antidump.elf.restore.fail");
+    WB.CreateBr(afterWriteBB);
+
+    IRBuilder<> AWB(afterWriteBB);
+    emitAntiDumpGuardPage(AWB, M, TT, pageSize, diff, 0x464C457F,
+                          "morok.antidump.guard.elf");
+    AWB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
+Function *darwinAntiDumpProbe(Module &M, const Triple &TT) {
+    if (!TT.isOSDarwin() || intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.antidump.macho"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.antidump.macho", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *cmdLoopBB = BasicBlock::Create(ctx, "cmd.loop", fn);
+    auto *cmdBodyBB = BasicBlock::Create(ctx, "cmd.body", fn);
+    auto *sectionLoopBB = BasicBlock::Create(ctx, "section.loop", fn);
+    auto *sectionBodyBB = BasicBlock::Create(ctx, "section.body", fn);
+    auto *sectionNextBB = BasicBlock::Create(ctx, "section.next", fn);
+    auto *cmdNextBB = BasicBlock::Create(ctx, "cmd.next", fn);
+    auto *restoreBB = BasicBlock::Create(ctx, "restore", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *diff =
+        B.CreateAlloca(i64, nullptr, "morok.antidump.macho.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    FunctionCallee imageHeader = M.getOrInsertFunction(
+        "_dyld_get_image_header", FunctionType::get(ptr, {i32}, false));
+    FunctionCallee getpagesize =
+        M.getOrInsertFunction("getpagesize", FunctionType::get(i32, false));
+    Value *hdr =
+        B.CreateCall(imageHeader, {ConstantInt::get(i32, 0)},
+                     "morok.antidump.macho.hdr");
+    Value *pageSize = B.CreateZExt(
+        B.CreateCall(getpagesize, {}, "morok.antidump.macho.pagesz"), ip);
+    pageSize = B.CreateSelect(B.CreateICmpUGT(pageSize, ConstantInt::get(ip, 0)),
+                              pageSize, ConstantInt::get(ip, 4096),
+                              "morok.antidump.macho.pagesz.v");
+    Value *hdrAddr = B.CreatePtrToInt(hdr, ip, "morok.antidump.macho.hdr.addr");
+    Value *magic = loadAt(B, M, i32, hdr, 0ULL, "morok.antidump.macho.magic.v");
+    Value *ncmds = loadAt(B, M, i32, hdr, 16, "morok.antidump.macho.ncmds");
+    Value *page = pageBase(B, M, hdrAddr, pageSize, "morok.antidump.macho.page");
+    Value *rwRc =
+        emitDarwinMprotect(B, M, TT, page, pageSize, ConstantInt::get(ip, 3));
+    rwRc->setName("morok.antidump.macho.mprotect.rw");
+    Value *valid =
+        B.CreateAnd(B.CreateICmpNE(hdr, ConstantPointerNull::get(ptr)),
+                    B.CreateICmpEQ(magic, ConstantInt::get(i32, 0xFEEDFACF)));
+    Value *rwOk = B.CreateICmpSGE(rwRc, ConstantInt::getSigned(i32, 0),
+                                  "morok.antidump.macho.rw.ok");
+    incrementDiff(B, diff, B.CreateNot(rwOk),
+                  "morok.antidump.macho.rw.fail");
+    B.CreateCondBr(B.CreateAnd(valid, rwOk), cmdLoopBB, retBB);
+
+    IRBuilder<> CLB(cmdLoopBB);
+    PHINode *cmdIdx = CLB.CreatePHI(i32, 2, "morok.antidump.macho.cmd.idx");
+    PHINode *cmdOff = CLB.CreatePHI(ip, 2, "morok.antidump.macho.cmd.off");
+    cmdIdx->addIncoming(ConstantInt::get(i32, 0), entry);
+    cmdOff->addIncoming(ConstantInt::get(ip, 32), entry);
+    CLB.CreateCondBr(CLB.CreateAnd(CLB.CreateICmpULT(cmdIdx, ncmds),
+                                   CLB.CreateICmpULT(cmdIdx, ConstantInt::get(i32, 128))),
+                     cmdBodyBB, restoreBB);
+
+    IRBuilder<> CBB(cmdBodyBB);
+    Value *cmdPtr = gepI8(CBB, M, hdr, cmdOff, "morok.antidump.macho.cmd.ptr");
+    Value *cmd = loadAt(CBB, M, i32, cmdPtr, 0ULL,
+                        "morok.antidump.macho.cmd");
+    Value *cmdSize32 = loadAt(CBB, M, i32, cmdPtr, 4,
+                              "morok.antidump.macho.cmd.size");
+    Value *cmdSize =
+        CBB.CreateZExt(cmdSize32, ip, "morok.antidump.macho.cmd.size.w");
+    Value *nsects = loadAt(CBB, M, i32, cmdPtr, 64,
+                           "morok.antidump.macho.nsects");
+    Value *isSegment = CBB.CreateICmpEQ(cmd, ConstantInt::get(i32, 0x19),
+                                        "morok.antidump.macho.segment");
+    CBB.CreateCondBr(CBB.CreateAnd(isSegment,
+                                   CBB.CreateICmpUGT(nsects, ConstantInt::get(i32, 0))),
+                     sectionLoopBB, cmdNextBB);
+
+    IRBuilder<> SLB(sectionLoopBB);
+    PHINode *secIdx = SLB.CreatePHI(i32, 2, "morok.antidump.macho.sec.idx");
+    PHINode *secOff = SLB.CreatePHI(ip, 2, "morok.antidump.macho.sec.off");
+    secIdx->addIncoming(ConstantInt::get(i32, 0), cmdBodyBB);
+    secOff->addIncoming(ConstantInt::get(ip, 72), cmdBodyBB);
+    SLB.CreateCondBr(SLB.CreateAnd(SLB.CreateICmpULT(secIdx, nsects),
+                                   SLB.CreateICmpULT(secIdx, ConstantInt::get(i32, 96))),
+                     sectionBodyBB, cmdNextBB);
+
+    IRBuilder<> SBB(sectionBodyBB);
+    Value *secPtr =
+        gepI8(SBB, M, cmdPtr, secOff, "morok.antidump.macho.section.ptr");
+    for (std::uint64_t i = 0; i < 32; i += 8) {
+        storeAt(SBB, M, secPtr, i,
+                ConstantInt::get(i64, 0xA5A5A5A5A5A5A5A5ULL),
+                "morok.antidump.macho.section.name");
+    }
+    SBB.CreateBr(sectionNextBB);
+
+    IRBuilder<> SNB(sectionNextBB);
+    Value *nextSecIdx = SNB.CreateAdd(
+        secIdx, ConstantInt::get(i32, 1), "morok.antidump.macho.sec.next");
+    Value *nextSecOff = SNB.CreateAdd(
+        secOff, ConstantInt::get(ip, 80), "morok.antidump.macho.sec.off.next");
+    SNB.CreateBr(sectionLoopBB);
+    secIdx->addIncoming(nextSecIdx, sectionNextBB);
+    secOff->addIncoming(nextSecOff, sectionNextBB);
+
+    IRBuilder<> CNB(cmdNextBB);
+    Value *nextCmdIdx = CNB.CreateAdd(
+        cmdIdx, ConstantInt::get(i32, 1), "morok.antidump.macho.cmd.next");
+    Value *nextCmdOff = CNB.CreateAdd(
+        cmdOff, cmdSize, "morok.antidump.macho.cmd.off.next");
+    CNB.CreateBr(cmdLoopBB);
+    cmdIdx->addIncoming(nextCmdIdx, cmdNextBB);
+    cmdOff->addIncoming(nextCmdOff, cmdNextBB);
+
+    IRBuilder<> RSB(restoreBB);
+    Value *flagsPtr = gepI8(RSB, M, hdr, constIp(M, 24),
+                            "morok.antidump.macho.flags.ptr");
+    StoreInst *flagsStore =
+        RSB.CreateStore(ConstantInt::get(i32, 0x4D524F4B), flagsPtr);
+    flagsStore->setVolatile(true);
+    flagsStore->setAlignment(Align(1));
+    Value *rxRc =
+        emitDarwinMprotect(RSB, M, TT, page, pageSize, ConstantInt::get(ip, 5));
+    rxRc->setName("morok.antidump.macho.mprotect.rx");
+    incrementDiff(RSB, diff,
+                  RSB.CreateICmpSLT(rxRc, ConstantInt::getSigned(i32, 0)),
+                  "morok.antidump.macho.restore.fail");
+    emitAntiDumpGuardPage(RSB, M, TT, pageSize, diff, 0xFEEDFACF,
+                          "morok.antidump.guard.macho");
+    RSB.CreateBr(retBB);
+
+    IRBuilder<> RB(retBB);
+    emitRetDiff(RB, diff);
+    return fn;
+}
+
+Function *antiDumpProbe(Module &M, const Triple &TT) {
+    if (Function *linux = linuxAntiDumpProbe(M, TT))
+        return linux;
+    return darwinAntiDumpProbe(M, TT);
+}
+
 Function *linuxStackOriginCheck(Module &M) {
     const Triple TT(M.getTargetTriple());
     if (!TT.isOSLinux() || intPtrTy(M)->getBitWidth() != 64)
@@ -6782,6 +7155,18 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                   "morok.antihook.schro");
         foldFlag(B, state, changed, 0x5F0A81C3D624B7E9ULL,
                  "morok.antihook.schro.changed");
+    }
+    if (Function *antiDump = antiDumpProbe(M, tt)) {
+        Value *diff =
+            B.CreateCall(antiDump, {}, "morok.antihook.antidump.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.antidump.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.antidump");
+        foldState(B, state, diff, 0xD48C71E9A5B2036FULL,
+                  "morok.antihook.antidump");
+        foldFlag(B, state, changed, 0x6E51B9C07D3A428FULL,
+                 "morok.antihook.antidump.changed");
     }
     if (Function *dbi = linuxDbiSignatureProbe(M, rng, tt)) {
         Value *diff = B.CreateCall(dbi, {}, "morok.antihook.dbi.diff");

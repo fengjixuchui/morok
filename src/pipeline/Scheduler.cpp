@@ -206,7 +206,16 @@ bool hasSensitiveGeneratedPrefix(StringRef Name) {
 }
 
 bool isSensitiveGeneratedFunction(const Function &F) {
-    return !F.isDeclaration() && hasSensitiveGeneratedPrefix(F.getName());
+    if (F.isDeclaration())
+        return false;
+    StringRef Name = F.getName();
+    // Keep fault/page-protection choreography native; generic shell hardening
+    // can disturb the exact signal and mprotect edge these probes rely on.
+    if (Name == "morok.antihook" ||
+        Name.starts_with("morok.antihook.schro") ||
+        Name.starts_with("morok.antihook.antidump"))
+        return false;
+    return hasSensitiveGeneratedPrefix(Name);
 }
 
 bool isUserSensitiveFunction(const Function &F) {

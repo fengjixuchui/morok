@@ -9895,6 +9895,8 @@ entry:
     REQUIRE(Schro != nullptr);
     Function *SchroHandler = M->getFunction("morok.antihook.schro.handler");
     REQUIRE(SchroHandler != nullptr);
+    Function *AntiDump = M->getFunction("morok.antihook.antidump.elf");
+    REQUIRE(AntiDump != nullptr);
     Function *NegativeTiming = M->getFunction("morok.negative.timing");
     REQUIRE(NegativeTiming != nullptr);
     Function *Ctor = M->getFunction("morok.antihook");
@@ -9918,6 +9920,7 @@ entry:
     CHECK(hasInlineAsmCall(*Got));
     CHECK(hasInlineAsmCall(*Maps));
     CHECK(hasInlineAsmCall(*Wx));
+    CHECK(hasInlineAsmCall(*AntiDump));
     CHECK(M->getFunction("dlsym") != nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
     CHECK(M->getFunction("readlink") == nullptr);
@@ -9997,6 +10000,13 @@ entry:
                                  "morok.antihook.schro.rip.allowed") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.reader") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump,
+                                 "morok.antidump.elf.mprotect.rw") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump, "morok.antidump.elf.magic") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump, "morok.antidump.elf.shoff") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump,
+                                 "morok.antidump.guard.elf.mprotect.none") >=
+          1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antihook.dynamic.present") >=
@@ -10008,6 +10018,8 @@ entry:
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.aggressive") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
           1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.corroborate.antidump.changed") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
@@ -10066,6 +10078,8 @@ entry:
     REQUIRE(Schro != nullptr);
     Function *SchroHandler = M->getFunction("morok.antihook.schro.handler");
     REQUIRE(SchroHandler != nullptr);
+    Function *AntiDump = M->getFunction("morok.antihook.antidump.macho");
+    REQUIRE(AntiDump != nullptr);
     Function *NegativeTiming = M->getFunction("morok.negative.timing");
     REQUIRE(NegativeTiming != nullptr);
     Function *Work = M->getFunction("work");
@@ -10084,6 +10098,7 @@ entry:
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(M->getFunction("sigaction") != nullptr);
+    CHECK(hasInlineAsmCall(*AntiDump));
     CHECK(M->getFunction("getpid") != nullptr);
     CHECK(M->getFunction("getppid") != nullptr);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
@@ -10129,12 +10144,21 @@ entry:
                                  "morok.antihook.schro.mcontext") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.rip.allowed") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump,
+                                 "morok.antidump.macho.mprotect.rw") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump,
+                                 "morok.antidump.macho.section.name") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump,
+                                 "morok.antidump.guard.macho.mprotect.none") >=
+          1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.corroborate.schro.changed") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+                                 "morok.corroborate.antidump.changed") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx") >= 1u);
@@ -10247,6 +10271,8 @@ entry:
     REQUIRE(Schro != nullptr);
     Function *SchroHandler = M->getFunction("morok.antihook.schro.handler");
     REQUIRE(SchroHandler != nullptr);
+    Function *AntiDump = M->getFunction("morok.antihook.antidump.macho");
+    REQUIRE(AntiDump != nullptr);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antihook.prologue.arm64.hit") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
@@ -10260,6 +10286,10 @@ entry:
                                  "morok.antihook.schro.mcontext") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.rip.allowed") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump,
+                                 "morok.antidump.macho.section.name") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.corroborate.antidump.changed") >= 1u);
     CHECK(M->getFunction("morok.antihook.diverge.posix") == nullptr);
     CHECK(M->getFunction("dlsym") == nullptr);
     CHECK(M->getFunction("open") != nullptr);
