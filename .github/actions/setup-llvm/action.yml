@@ -107,7 +107,17 @@ runs:
         rm -rf "$PREFIX"
         mkdir -p "$PREFIX"
         # Every release archive nests everything under a single top directory.
-        tar -xf "$TARBALL" -C "$PREFIX" --strip-components=1
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          # git-bash's GNU tar treats the "D:" drive as a remote host and has no
+          # bundled xz; the Windows system bsdtar handles drive paths and .xz.
+          if [ -x /c/Windows/System32/tar.exe ]; then
+            /c/Windows/System32/tar.exe -xf "$TARBALL" -C "$PREFIX" --strip-components=1
+          else
+            tar --force-local -xf "$TARBALL" -C "$PREFIX" --strip-components=1
+          fi
+        else
+          tar -xf "$TARBALL" -C "$PREFIX" --strip-components=1
+        fi
         if [ ! -f "$PREFIX/lib/cmake/llvm/LLVMConfig.cmake" ]; then
           echo "::error::extracted toolchain is missing the CMake package"; ls -la "$PREFIX"; exit 1
         fi

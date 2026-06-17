@@ -77,13 +77,32 @@ jobs:
 
       - name: Configure Morok
         shell: bash
+        env:
+          LLVM_PREFIX: ${{ steps.llvm.outputs.install-prefix }}
         run: |
           set -euo pipefail
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_C_COMPILER="${{ steps.llvm.outputs.clang }}" \
-            -DCMAKE_CXX_COMPILER="${{ steps.llvm.outputs.clangxx }}" \
+          # The prebuilt LLVM static libs are built against the toolchain's own
+          # libc++; on Linux we must compile + link Morok with that same libc++
+          # (the runner's default libstdc++ headers are not even found by the
+          # relocated clang). The toolchain libc++ is self-contained there, so no
+          # system-libc++ ABI conflict arises (unlike macOS).
+          args=(
+            -S . -B build -G Ninja
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+            -DCMAKE_C_COMPILER="${{ steps.llvm.outputs.clang }}"
+            -DCMAKE_CXX_COMPILER="${{ steps.llvm.outputs.clangxx }}"
             -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+          )
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ld="-stdlib=libc++ -L${LLVM_PREFIX}/lib -Wl,-rpath,${LLVM_PREFIX}/lib"
+            args+=(
+              -DCMAKE_CXX_FLAGS=-stdlib=libc++
+              -DCMAKE_EXE_LINKER_FLAGS="$ld"
+              -DCMAKE_SHARED_LINKER_FLAGS="$ld"
+              -DCMAKE_MODULE_LINKER_FLAGS="$ld"
+            )
+          fi
+          cmake "${args[@]}"
 
       - name: Build Morok
         shell: bash
