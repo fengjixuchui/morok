@@ -557,6 +557,10 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   private `morok.vm.bytecode.*` byte array; bytecode fields are first randomized
   by operand/immediate encoding and then encrypted byte-by-byte with a stream
   key derived from the VM PC.
+- This is the stolen-code boundary: `rewriteAsWrapper` deletes the selected
+  function's original IR body, so the on-disk native code for that function is
+  only an ABI-preserving wrapper.  The removed instructions execute only as
+  encrypted VM bytecode interpreted by the helper.
 - The helper keeps a bounded `i64` virtual-register file, masks results back to
   the original integer width after each operation, and decodes one instruction
   at a time.  Constants, operands, and opcodes are decrypted from the current PC

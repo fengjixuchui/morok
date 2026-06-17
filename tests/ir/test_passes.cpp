@@ -5629,6 +5629,41 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("virtualizeModule removes stolen native code from lifted functions") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i64 @critical_round(i64 %a, i64 %b) {
+entry:
+  %x = add i64 %a, 7867786927596655156
+  %y = xor i64 %x, %b
+  %z = mul i64 %y, -7046029254386353131
+  ret i64 %z
+}
+)ir");
+    Function *F = M->getFunction("critical_round");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(15104);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/16, /*max_registers=*/32},
+        rng));
+
+    Function *Helper = M->getFunction("morok.vm.critical_round.exec");
+    REQUIRE(Helper);
+    CHECK(countCallsTo(*F, "morok.vm.critical_round.exec") == 1u);
+    CHECK(countBinops(*F) == 0u);
+    CHECK(countGlobals(*M, "morok.vm.bytecode.critical_round") == 1u);
+
+    bool helperIsThreaded = false;
+    for (Instruction &I : instructions(*Helper))
+        helperIsThreaded |= isa<IndirectBrInst>(&I);
+    CHECK(helperIsThreaded);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule uses seed-diverse VM handler layout") {
     struct Snapshot {
         std::vector<std::string> handlers;
