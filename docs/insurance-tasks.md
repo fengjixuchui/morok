@@ -98,7 +98,7 @@ Tags: `[platform · extends <pass> | new]`. All `XL` Windows items presume the
 - [x] Windows direct + indirect syscalls (Hell's/Halo's/Tartarus' Gate, SysWhispers) to defeat all usermode ntdll hooks `[windows · new]`
 - [x] Windows unhook: map pristine ntdll/kernel32 `.text` from `KnownDlls` / a suspended sacrificial process (Perun's Fart) / disk and overwrite the hooked in-memory `.text` `[windows · new]`
 - [x] Windows VEH-list audit: decode `LdrpVectorHandlerList`, reject/strip handlers not inside your own modules `[windows · new]`
-- [ ] Windows process-mitigation opt-ins via `SetProcessMitigationPolicy`: ACG (`ProcessDynamicCodePolicy`, no RWX) and CIG (`ProcessSignaturePolicy`, only signed images load) `[windows · new]`
+- [x] Windows process-mitigation opt-ins via `SetProcessMitigationPolicy`: ACG (`ProcessDynamicCodePolicy`, no RWX) and CIG (`ProcessSignaturePolicy`, only signed images load) `[windows · new]`
 
 ---
 

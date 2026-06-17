@@ -11005,6 +11005,47 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("windowsProcessMitigationsModule emits ACG and CIG opt-ins") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-pc-windows-msvc"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(7151);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::windowsProcessMitigationsModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.win.mitigate");
+    Function *Probe = M->getFunction("morok.win.mitigate.probe");
+    Function *Peb = M->getFunction("morok.win.peb");
+    Function *Resolve = M->getFunction("morok.win.pe.resolve");
+    Function *Ldr = M->getFunction("morok.win.ldr.module");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Probe != nullptr);
+    REQUIRE(Peb != nullptr);
+    REQUIRE(Resolve != nullptr);
+    REQUIRE(Ldr != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    CHECK(M->getFunction("SetProcessMitigationPolicy") == nullptr);
+    CHECK(hasInlineAsmCall(*Peb));
+    CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.kernelbase") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.kernel32") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.mitigate.setpolicy.kernelbase") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.mitigate.setpolicy.kernel32") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.dynamic.result") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.mitigate.signature.result") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.failure") >= 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("timingOracleModule emits x86 rdtscp and raw clock probes") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

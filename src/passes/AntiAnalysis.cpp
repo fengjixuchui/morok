@@ -11291,6 +11291,115 @@ Function *windowsVehAuditProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+Function *windowsProcessMitigationsProbe(Module &M, GlobalVariable *State,
+                                         ir::IRRandom &rng, const Triple &TT) {
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
+        intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.win.mitigate.probe"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.mitigate.probe", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    Function *pebReader = windowsPebReader(M);
+    Function *moduleByHash = windowsLdrModuleByHash(M);
+    Function *resolver = windowsPeExportResolver(M);
+    if (!pebReader || !moduleByHash || !resolver)
+        return nullptr;
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *resolveBB = BasicBlock::Create(ctx, "resolve", fn);
+    auto *applyBB = BasicBlock::Create(ctx, "apply", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    Value *peb = B.CreateCall(pebReader, {}, "morok.win.mitigate.peb");
+    foldState(B, State, peb, rng.next(), "morok.win.mitigate.peb.mix");
+    B.CreateCondBr(B.CreateICmpNE(peb, ConstantInt::get(ip, 0),
+                                  "morok.win.mitigate.peb.present"),
+                   resolveBB, retBB);
+
+    IRBuilder<> RB(resolveBB);
+    AllocaInst *dynamicPolicy =
+        RB.CreateAlloca(i32, nullptr, "morok.win.mitigate.dynamic.policy");
+    AllocaInst *signaturePolicy =
+        RB.CreateAlloca(i32, nullptr, "morok.win.mitigate.signature.policy");
+    RB.CreateStore(ConstantInt::get(i32, 0x1), dynamicPolicy)
+        ->setVolatile(true);
+    RB.CreateStore(ConstantInt::get(i32, 0x1), signaturePolicy)
+        ->setVolatile(true);
+    Value *kernelbase = RB.CreateCall(
+        moduleByHash,
+        {peb, ConstantInt::get(i64, fnv1aLowerAsciiName("kernelbase.dll"))},
+        "morok.win.mitigate.kernelbase");
+    Value *kernel32 = RB.CreateCall(
+        moduleByHash,
+        {peb, ConstantInt::get(i64, fnv1aLowerAsciiName("kernel32.dll"))},
+        "morok.win.mitigate.kernel32");
+    Value *kernelbasePolicy = RB.CreateCall(
+        resolver,
+        {kernelbase,
+         ConstantInt::get(i64, fnv1aName("SetProcessMitigationPolicy"))},
+        "morok.win.mitigate.setpolicy.kernelbase");
+    Value *kernel32Policy = RB.CreateCall(
+        resolver,
+        {kernel32,
+         ConstantInt::get(i64, fnv1aName("SetProcessMitigationPolicy"))},
+        "morok.win.mitigate.setpolicy.kernel32");
+    Value *setPolicy = RB.CreateSelect(
+        RB.CreateICmpNE(kernelbasePolicy, ConstantInt::get(ip, 0),
+                        "morok.win.mitigate.kernelbase.policy.ready"),
+        kernelbasePolicy, kernel32Policy, "morok.win.mitigate.setpolicy");
+    foldState(RB, State, kernelbase, rng.next(),
+              "morok.win.mitigate.kernelbase.mix");
+    foldState(RB, State, kernel32, rng.next(),
+              "morok.win.mitigate.kernel32.mix");
+    foldState(RB, State, setPolicy, rng.next(),
+              "morok.win.mitigate.setpolicy.mix");
+    RB.CreateCondBr(RB.CreateICmpNE(setPolicy, ConstantInt::get(ip, 0),
+                                    "morok.win.mitigate.setpolicy.ready"),
+                    applyBB, retBB);
+
+    IRBuilder<> AB(applyBB);
+    auto *setPolicyTy = FunctionType::get(i32, {i32, ptr, ip}, false);
+    Value *setPolicyPtr =
+        AB.CreateIntToPtr(setPolicy, ptr, "morok.win.mitigate.setpolicy.ptr");
+    Value *dynamicResult = AB.CreateCall(
+        setPolicyTy, setPolicyPtr,
+        {ConstantInt::get(i32, 2), dynamicPolicy, ConstantInt::get(ip, 4)},
+        "morok.win.mitigate.dynamic.result");
+    Value *signatureResult = AB.CreateCall(
+        setPolicyTy, setPolicyPtr,
+        {ConstantInt::get(i32, 8), signaturePolicy, ConstantInt::get(ip, 4)},
+        "morok.win.mitigate.signature.result");
+    foldState(AB, State, dynamicResult, rng.next(),
+              "morok.win.mitigate.dynamic.result.mix");
+    foldState(AB, State, signatureResult, rng.next(),
+              "morok.win.mitigate.signature.result.mix");
+    Value *failed = AB.CreateOr(
+        AB.CreateICmpEQ(dynamicResult, ConstantInt::get(i32, 0),
+                        "morok.win.mitigate.dynamic.failed"),
+        AB.CreateICmpEQ(signatureResult, ConstantInt::get(i32, 0),
+                        "morok.win.mitigate.signature.failed"),
+        "morok.win.mitigate.failed");
+    foldFlag(AB, State, failed, 0xC167A4E398520D2BULL,
+             "morok.win.mitigate.failure");
+    AB.CreateBr(retBB);
+
+    IRBuilder<> RetB(retBB);
+    RetB.CreateRetVoid();
+    return fn;
+}
+
 } // namespace
 
 bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace) {
@@ -11852,6 +11961,21 @@ bool windowsVehAuditModule(Module &M, ir::IRRandom &rng) {
     return true;
 }
 
+bool windowsProcessMitigationsModule(Module &M, ir::IRRandom &rng) {
+    const Triple tt(M.getTargetTriple());
+    GlobalVariable *state = windowsPeState(M, rng);
+    Function *probe = windowsProcessMitigationsProbe(M, state, rng, tt);
+    if (!probe)
+        return false;
+
+    Function *ctor = makeCtorShell(M, "morok.win.mitigate");
+    IRBuilder<> B(&ctor->getEntryBlock());
+    B.CreateCall(probe);
+    B.CreateRetVoid();
+    appendToGlobalCtors(M, ctor, 0);
+    return true;
+}
+
 PreservedAnalyses AntiDebuggingPass::run(Module &M, ModuleAnalysisManager &) {
     ir::IRRandom rng(engine_);
     return antiDebuggingModule(M, rng) ? PreservedAnalyses::none()
@@ -11928,6 +12052,13 @@ PreservedAnalyses WindowsVehAuditPass::run(Module &M,
     ir::IRRandom rng(engine_);
     return windowsVehAuditModule(M, rng) ? PreservedAnalyses::none()
                                          : PreservedAnalyses::all();
+}
+
+PreservedAnalyses WindowsProcessMitigationsPass::run(
+    Module &M, ModuleAnalysisManager &) {
+    ir::IRRandom rng(engine_);
+    return windowsProcessMitigationsModule(M, rng) ? PreservedAnalyses::none()
+                                                   : PreservedAnalyses::all();
 }
 
 PreservedAnalyses TimingOraclePass::run(Module &M, ModuleAnalysisManager &) {

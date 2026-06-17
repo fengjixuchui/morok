@@ -376,6 +376,7 @@ struct PassConfig {
     ToggleConfig windows_syscalls;
     ToggleConfig windows_unhook;
     ToggleConfig windows_veh_audit;
+    ToggleConfig windows_process_mitigations;
     ToggleConfig timing_oracles;
     ToggleConfig trap_oracles;
     ToggleConfig page_fault_oracles;

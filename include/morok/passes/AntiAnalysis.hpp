@@ -18,6 +18,7 @@
 //   • WindowsSyscalls — uses Hell's/Halo's/Tartarus-style syscall dispatch.
 //   • WindowsUnhook — remaps KnownDlls and restores hooked `.text` sections.
 //   • WindowsVehAudit — decodes and strips foreign vectored exception handlers.
+//   • WindowsProcessMitigations — opts into ACG/CIG process policies.
 //   • TimingOracle   — samples independent clocks around short spans.
 //   • TrapOracle     — checks whether SIGTRAP/int3-style traps reach the app.
 //   • PageFaultTlbOracle — samples protected-page fault delivery and latency.
@@ -122,6 +123,14 @@ bool windowsUnhookModule(llvm::Module &M, morok::ir::IRRandom &rng);
 /// whose decoded handler does not land inside the loader-known module set.
 /// Returns true if code was added.
 bool windowsVehAuditModule(llvm::Module &M, morok::ir::IRRandom &rng);
+
+/// Inject Windows x86_64 process-mitigation opt-ins.  The emitted startup probe
+/// resolves SetProcessMitigationPolicy by hashed kernelbase/kernel32 export
+/// lookup and enables ProcessDynamicCodePolicy (ACG: prohibit dynamic code) and
+/// ProcessSignaturePolicy (CIG: Microsoft-signed images only).  Returns true if
+/// code was added.
+bool windowsProcessMitigationsModule(llvm::Module &M,
+                                     morok::ir::IRRandom &rng);
 
 /// Inject a runtime timing oracle.  The emitted helper samples independent
 /// clocks around short deterministic spans and folds distribution-level
@@ -288,6 +297,19 @@ class WindowsVehAuditPass
     : public llvm::PassInfoMixin<WindowsVehAuditPass> {
 public:
     explicit WindowsVehAuditPass(std::uint64_t seed = 0x5EA11D17u)
+        : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
+
+    llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
+    static bool isRequired() { return true; }
+
+private:
+    core::Xoshiro256pp engine_;
+};
+
+class WindowsProcessMitigationsPass
+    : public llvm::PassInfoMixin<WindowsProcessMitigationsPass> {
+public:
+    explicit WindowsProcessMitigationsPass(std::uint64_t seed = 0xAC6C161Du)
         : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
 
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);

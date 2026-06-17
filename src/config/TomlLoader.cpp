@@ -468,6 +468,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseToggle(*t, pc.windows_unhook);
     if (auto *t = p["windows_veh_audit"].as_table())
         parseToggle(*t, pc.windows_veh_audit);
+    if (auto *t = p["windows_process_mitigations"].as_table())
+        parseToggle(*t, pc.windows_process_mitigations);
     if (auto *t = p["timing_oracles"].as_table())
         parseToggle(*t, pc.timing_oracles);
     if (auto *t = p["trap_oracles"].as_table())
