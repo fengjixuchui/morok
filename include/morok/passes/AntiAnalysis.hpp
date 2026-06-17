@@ -28,7 +28,11 @@ class Module;
 
 namespace morok::passes {
 
-/// Inject a startup debugger-denial check.  Returns true if code was added.
+/// Inject startup debugger-denial and source-state checks.  Runtime strings are
+/// cloaked with per-site material from `rng`.  Returns true if code was added.
+bool antiDebuggingModule(llvm::Module &M, morok::ir::IRRandom &rng);
+
+/// Compatibility overload for standalone tests / direct use.
 bool antiDebuggingModule(llvm::Module &M);
 
 /// Inject a startup inline-hook prologue check.  The probed symbol name is
@@ -42,8 +46,14 @@ bool antiClassDumpModule(llvm::Module &M);
 
 class AntiDebuggingPass : public llvm::PassInfoMixin<AntiDebuggingPass> {
 public:
+    explicit AntiDebuggingPass(std::uint64_t seed = 0xA17D3B9u)
+        : engine_(core::Xoshiro256pp::fromSeed(seed)) {}
+
     llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &);
     static bool isRequired() { return true; }
+
+private:
+    core::Xoshiro256pp engine_;
 };
 
 class AntiHookingPass : public llvm::PassInfoMixin<AntiHookingPass> {

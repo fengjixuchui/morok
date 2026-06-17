@@ -12,12 +12,16 @@
 #include "morok/ir/SymbolCloak.hpp"
 
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+
+#include <array>
+#include <cstdint>
 
 using namespace llvm;
 
@@ -33,29 +37,569 @@ Function *makeCtorShell(Module &M, const char *name) {
     return fn;
 }
 
-} // namespace
+IntegerType *intPtrTy(Module &M) {
+    unsigned bits = M.getDataLayout().getPointerSizeInBits(0);
+    if (bits == 0)
+        bits = 64;
+    return IntegerType::get(M.getContext(), bits);
+}
 
-bool antiDebuggingModule(Module &M) {
+GlobalVariable *antiDebugState(Module &M, ir::IRRandom &rng) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antidbg.state", /*AllowInternal=*/true))
+        return existing;
+    auto *i64 = Type::getInt64Ty(M.getContext());
+    auto *gv = new GlobalVariable(
+        M, i64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i64, rng.next()), "morok.antidbg.state");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+Value *toI64(IRBuilderBase &B, Value *V) {
+    auto *i64 = B.getInt64Ty();
+    if (V->getType()->isIntegerTy(64))
+        return V;
+    if (V->getType()->isIntegerTy())
+        return B.CreateZExtOrTrunc(V, i64);
+    return B.CreatePtrToInt(V, i64);
+}
+
+void foldState(IRBuilderBase &B, GlobalVariable *State, Value *V,
+               std::uint64_t Salt, const Twine &Name) {
+    auto *i64 = B.getInt64Ty();
+    auto *old = B.CreateLoad(i64, State, Name + ".old");
+    old->setVolatile(true);
+
+    Value *wide = toI64(B, V);
+    Value *mixed = B.CreateXor(B.CreateShl(old, ConstantInt::get(i64, 13)),
+                               B.CreateLShr(old, ConstantInt::get(i64, 7)));
+    mixed =
+        B.CreateAdd(mixed, ConstantInt::get(i64, Salt ^ 0x9E3779B97F4A7C15ULL));
+    mixed = B.CreateXor(mixed,
+                        B.CreateMul(wide, ConstantInt::get(i64, Salt | 1ull)));
+
+    auto *st = B.CreateStore(mixed, State);
+    st->setVolatile(true);
+}
+
+void foldFlag(IRBuilderBase &B, GlobalVariable *State, Value *Flag,
+              std::uint64_t Salt, const Twine &Name) {
+    foldState(B, State, B.CreateZExtOrTrunc(Flag, B.getInt64Ty()), Salt, Name);
+}
+
+Value *arrayBytePtr(IRBuilderBase &B, ArrayType *ArrTy, Value *Base,
+                    Value *Index) {
+    auto *idxTy = cast<IntegerType>(Index->getType());
+    return B.CreateInBoundsGEP(ArrTy, Base,
+                               {ConstantInt::get(idxTy, 0), Index});
+}
+
+FunctionCallee ptraceDecl(Module &M) {
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *ptr = PointerType::getUnqual(ctx);
+    return M.getOrInsertFunction(
+        "ptrace", FunctionType::get(i32, {i32, i32, ptr, i32}, false));
+}
+
+Value *emitPtrace(IRBuilderBase &B, Module &M, int request) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    return B.CreateCall(ptraceDecl(M), {ConstantInt::getSigned(i32, request),
+                                        ConstantInt::get(i32, 0),
+                                        ConstantPointerNull::get(ptr),
+                                        ConstantInt::get(i32, 0)});
+}
+
+FunctionCallee openDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    return M.getOrInsertFunction("open",
+                                 FunctionType::get(i32, {ptr, i32}, true));
+}
+
+FunctionCallee readDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *ip = intPtrTy(M);
+    return M.getOrInsertFunction("read",
+                                 FunctionType::get(ip, {i32, ptr, ip}, false));
+}
+
+FunctionCallee closeDecl(Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    return M.getOrInsertFunction("close", FunctionType::get(i32, {i32}, false));
+}
+
+struct ReadFileIR {
+    AllocaInst *buf = nullptr;
+    Value *n = nullptr;
+    ArrayType *bufTy = nullptr;
+    BasicBlock *afterRead = nullptr;
+    BasicBlock *ret0 = nullptr;
+};
+
+ReadFileIR emitReadSmallFile(IRBuilder<> &B, Module &M, Function *Fn,
+                             StringRef Path, std::uint64_t BufBytes,
+                             ir::IRRandom &rng) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+
+    ReadFileIR out;
+    out.bufTy = ArrayType::get(i8, BufBytes);
+    out.buf = B.CreateAlloca(out.bufTy, nullptr, "morok.antidbg.buf");
+
+    Value *path = ir::emitCloakedSymbol(B, M, Path, rng);
+    Value *fd = B.CreateCall(openDecl(M), {path, ConstantInt::get(i32, 0)});
+
+    auto *readBB = BasicBlock::Create(ctx, "read", Fn);
+    out.ret0 = BasicBlock::Create(ctx, "ret0", Fn);
+    Value *badFd = B.CreateICmpSLT(fd, ConstantInt::getSigned(i32, 0));
+    B.CreateCondBr(badFd, out.ret0, readBB);
+
+    IRBuilder<> RB(readBB);
+    Value *bufPtr = RB.CreateInBoundsGEP(
+        out.bufTy, out.buf, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
+    out.n = RB.CreateCall(readDecl(M),
+                          {fd, bufPtr, ConstantInt::get(ip, BufBytes - 1)});
+    RB.CreateCall(closeDecl(M), {fd});
+    out.afterRead = readBB;
+    return out;
+}
+
+void finishI32Ret(BasicBlock *BB, std::uint32_t Value) {
+    IRBuilder<> B(BB);
+    B.CreateRet(ConstantInt::get(Type::getInt32Ty(BB->getContext()), Value));
+}
+
+Function *linuxStatusTracerCheck(Module &M, ir::IRRandom &rng) {
+    if (Function *existing = M.getFunction("morok.antidbg.linux.status"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i1 = Type::getInt1Ty(ctx);
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+
+    auto *fn = Function::Create(FunctionType::get(i32, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.linux.status", &M);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    ReadFileIR rf = emitReadSmallFile(B, M, fn, "/proc/self/status", 1024, rng);
+
+    constexpr std::array<unsigned char, 10> prefix = {'T', 'r', 'a', 'c', 'e',
+                                                      'r', 'P', 'i', 'd', ':'};
+
+    auto *loopBB = BasicBlock::Create(ctx, "scan", fn);
+    auto *matchBB = BasicBlock::Create(ctx, "match", fn);
+    auto *nextBB = BasicBlock::Create(ctx, "next", fn);
+    auto *digitBB = BasicBlock::Create(ctx, "digit", fn);
+    auto *digitCharBB = BasicBlock::Create(ctx, "digit.char", fn);
+    auto *digitMaybeNlBB = BasicBlock::Create(ctx, "digit.nl", fn);
+    auto *digitNextBB = BasicBlock::Create(ctx, "digit.next", fn);
+    auto *ret1 = BasicBlock::Create(ctx, "ret1", fn);
+
+    IRBuilder<> RB(rf.afterRead);
+    Value *enough = RB.CreateICmpSGT(rf.n, ConstantInt::get(ip, prefix.size()));
+    RB.CreateCondBr(enough, loopBB, rf.ret0);
+
+    IRBuilder<> LB(loopBB);
+    auto *idx = LB.CreatePHI(ip, 2, "morok.antidbg.idx");
+    idx->addIncoming(ConstantInt::get(ip, 0), rf.afterRead);
+    Value *last = LB.CreateSub(rf.n, ConstantInt::get(ip, prefix.size()));
+    Value *inRange = LB.CreateICmpULE(idx, last);
+    LB.CreateCondBr(inRange, matchBB, rf.ret0);
+
+    IRBuilder<> MB(matchBB);
+    Value *match = ConstantInt::get(i1, true);
+    for (std::uint32_t j = 0; j < prefix.size(); ++j) {
+        Value *off = MB.CreateAdd(idx, ConstantInt::get(ip, j));
+        Value *ptr = arrayBytePtr(MB, rf.bufTy, rf.buf, off);
+        Value *ch = MB.CreateLoad(i8, ptr);
+        Value *eq = MB.CreateICmpEQ(ch, ConstantInt::get(i8, prefix[j]));
+        match = MB.CreateAnd(match, eq);
+    }
+    Value *digitStart = MB.CreateAdd(idx, ConstantInt::get(ip, prefix.size()));
+    MB.CreateCondBr(match, digitBB, nextBB);
+
+    IRBuilder<> NB(nextBB);
+    Value *idxNext = NB.CreateAdd(idx, ConstantInt::get(ip, 1));
+    NB.CreateBr(loopBB);
+    idx->addIncoming(idxNext, nextBB);
+
+    IRBuilder<> DB(digitBB);
+    auto *digitIdx = DB.CreatePHI(ip, 2, "morok.antidbg.digit");
+    digitIdx->addIncoming(digitStart, matchBB);
+    Value *digitInRange = DB.CreateICmpULT(digitIdx, rf.n);
+    DB.CreateCondBr(digitInRange, digitCharBB, rf.ret0);
+
+    IRBuilder<> DCB(digitCharBB);
+    Value *dptr = arrayBytePtr(DCB, rf.bufTy, rf.buf, digitIdx);
+    Value *ch = DCB.CreateLoad(i8, dptr);
+    Value *geOne =
+        DCB.CreateICmpUGE(ch, ConstantInt::get(i8, static_cast<unsigned>('1')));
+    Value *leNine =
+        DCB.CreateICmpULE(ch, ConstantInt::get(i8, static_cast<unsigned>('9')));
+    DCB.CreateCondBr(DCB.CreateAnd(geOne, leNine), ret1, digitMaybeNlBB);
+
+    IRBuilder<> DNB(digitMaybeNlBB);
+    DNB.CreateCondBr(DNB.CreateICmpEQ(ch, ConstantInt::get(i8, '\n')), rf.ret0,
+                     digitNextBB);
+
+    IRBuilder<> DXB(digitNextBB);
+    Value *digitNext = DXB.CreateAdd(digitIdx, ConstantInt::get(ip, 1));
+    DXB.CreateBr(digitBB);
+    digitIdx->addIncoming(digitNext, digitNextBB);
+
+    finishI32Ret(rf.ret0, 0);
+    finishI32Ret(ret1, 1);
+    return fn;
+}
+
+Function *linuxStatField4Check(Module &M, ir::IRRandom &rng) {
+    if (Function *existing = M.getFunction("morok.antidbg.linux.stat4"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+
+    auto *fn = Function::Create(FunctionType::get(i32, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.linux.stat4", &M);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    ReadFileIR rf = emitReadSmallFile(B, M, fn, "/proc/self/stat", 1024, rng);
+
+    auto *findBB = BasicBlock::Create(ctx, "find.close", fn);
+    auto *findCharBB = BasicBlock::Create(ctx, "find.char", fn);
+    auto *findNextBB = BasicBlock::Create(ctx, "find.next", fn);
+    auto *digitBB = BasicBlock::Create(ctx, "digit", fn);
+    auto *digitCharBB = BasicBlock::Create(ctx, "digit.char", fn);
+    auto *digitStopBB = BasicBlock::Create(ctx, "digit.stop", fn);
+    auto *digitNextBB = BasicBlock::Create(ctx, "digit.next", fn);
+    auto *ret1 = BasicBlock::Create(ctx, "ret1", fn);
+
+    IRBuilder<> RB(rf.afterRead);
+    Value *hasAny = RB.CreateICmpSGT(rf.n, ConstantInt::get(ip, 4));
+    Value *lastIdx = RB.CreateSub(rf.n, ConstantInt::get(ip, 1));
+    RB.CreateCondBr(hasAny, findBB, rf.ret0);
+
+    IRBuilder<> FB(findBB);
+    auto *idx = FB.CreatePHI(ip, 2, "morok.antidbg.stat.idx");
+    idx->addIncoming(lastIdx, rf.afterRead);
+    Value *valid = FB.CreateICmpSGE(idx, ConstantInt::get(ip, 0));
+    FB.CreateCondBr(valid, findCharBB, rf.ret0);
+
+    IRBuilder<> FCB(findCharBB);
+    Value *ptr = arrayBytePtr(FCB, rf.bufTy, rf.buf, idx);
+    Value *ch = FCB.CreateLoad(i8, ptr);
+    Value *ppidStart = FCB.CreateAdd(idx, ConstantInt::get(ip, 4));
+    FCB.CreateCondBr(FCB.CreateICmpEQ(ch, ConstantInt::get(i8, ')')), digitBB,
+                     findNextBB);
+
+    IRBuilder<> FNB(findNextBB);
+    Value *idxPrev = FNB.CreateSub(idx, ConstantInt::get(ip, 1));
+    FNB.CreateBr(findBB);
+    idx->addIncoming(idxPrev, findNextBB);
+
+    IRBuilder<> DB(digitBB);
+    auto *digitIdx = DB.CreatePHI(ip, 2, "morok.antidbg.stat4");
+    digitIdx->addIncoming(ppidStart, findCharBB);
+    Value *digitInRange = DB.CreateICmpULT(digitIdx, rf.n);
+    DB.CreateCondBr(digitInRange, digitCharBB, rf.ret0);
+
+    IRBuilder<> DCB(digitCharBB);
+    Value *dptr = arrayBytePtr(DCB, rf.bufTy, rf.buf, digitIdx);
+    Value *dch = DCB.CreateLoad(i8, dptr);
+    Value *geOne = DCB.CreateICmpUGE(
+        dch, ConstantInt::get(i8, static_cast<unsigned>('1')));
+    Value *leNine = DCB.CreateICmpULE(
+        dch, ConstantInt::get(i8, static_cast<unsigned>('9')));
+    DCB.CreateCondBr(DCB.CreateAnd(geOne, leNine), ret1, digitStopBB);
+
+    IRBuilder<> DSB(digitStopBB);
+    Value *isSpace = DSB.CreateICmpEQ(dch, ConstantInt::get(i8, ' '));
+    Value *isNl = DSB.CreateICmpEQ(dch, ConstantInt::get(i8, '\n'));
+    DSB.CreateCondBr(DSB.CreateOr(isSpace, isNl), rf.ret0, digitNextBB);
+
+    IRBuilder<> DXB(digitNextBB);
+    Value *digitNext = DXB.CreateAdd(digitIdx, ConstantInt::get(ip, 1));
+    DXB.CreateBr(digitBB);
+    digitIdx->addIncoming(digitNext, digitNextBB);
+
+    finishI32Ret(rf.ret0, 0);
+    finishI32Ret(ret1, 1);
+    return fn;
+}
+
+Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
+                           GlobalVariable *State) {
+    if (Function *existing = M.getFunction("morok.antidbg.linux.watch"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(FunctionType::get(ptr, {ptr}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.linux.watch", &M);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *loopBB = BasicBlock::Create(ctx, "loop", fn);
+    auto *bodyBB = BasicBlock::Create(ctx, "body", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> EB(entry);
+    EB.CreateBr(loopBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *iter = LB.CreatePHI(i32, 2, "morok.antidbg.iter");
+    iter->addIncoming(ConstantInt::get(i32, 0), entry);
+    LB.CreateCondBr(LB.CreateICmpULT(iter, ConstantInt::get(i32, 8)), bodyBB,
+                    retBB);
+
+    IRBuilder<> BB(bodyBB);
+    FunctionCallee sleepFn =
+        M.getOrInsertFunction("sleep", FunctionType::get(i32, {i32}, false));
+    BB.CreateCall(sleepFn, {ConstantInt::get(i32, 1)});
+    emitPtrace(BB, M, 0);
+    Value *status = BB.CreateCall(StatusFn);
+    Value *stat4 = BB.CreateCall(StatFn);
+    foldFlag(BB, State, BB.CreateICmpNE(status, ConstantInt::get(i32, 0)),
+             0x64C2D0B6D8F44A2DULL, "morok.antidbg.watch.status");
+    foldState(BB, State, stat4, 0x8CB92BA72F3D8DD7ULL,
+              "morok.antidbg.watch.stat4");
+    Value *next = BB.CreateAdd(iter, ConstantInt::get(i32, 1));
+    BB.CreateBr(loopBB);
+    iter->addIncoming(next, bodyBB);
+
+    IRBuilder<> RB(retBB);
+    RB.CreateRet(ConstantPointerNull::get(ptr));
+    return fn;
+}
+
+void emitLinuxHardening(IRBuilder<> &B, Module &M) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    FunctionCallee prctl = M.getOrInsertFunction(
+        "prctl", FunctionType::get(i32, {i32, ip, ip, ip, ip}, false));
+    auto arg = [&](std::int64_t v) { return ConstantInt::getSigned(ip, v); };
+
+    B.CreateCall(prctl, {ConstantInt::get(i32, 4), arg(0), arg(0), arg(0),
+                         arg(0)}); // PR_SET_DUMPABLE
+    B.CreateCall(prctl, {ConstantInt::get(i32, 0x59616D61), arg(0), arg(0),
+                         arg(0), arg(0)}); // PR_SET_PTRACER
+    B.CreateCall(prctl, {ConstantInt::get(i32, 38), arg(1), arg(0), arg(0),
+                         arg(0)}); // PR_SET_NO_NEW_PRIVS
+}
+
+void emitLinuxWatcherStart(IRBuilder<> &B, Module &M, Function *WatchFn) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    Function *ctor = B.GetInsertBlock()->getParent();
+
+    FunctionCallee pthreadCreate = M.getOrInsertFunction(
+        "pthread_create", FunctionType::get(i32, {ptr, ptr, ptr, ptr}, false));
+    FunctionCallee pthreadDetach = M.getOrInsertFunction(
+        "pthread_detach", FunctionType::get(i32, {ip}, false));
+
+    AllocaInst *thread = B.CreateAlloca(ip, nullptr, "morok.antidbg.thread");
+    Value *rc =
+        B.CreateCall(pthreadCreate, {thread, ConstantPointerNull::get(ptr),
+                                     WatchFn, ConstantPointerNull::get(ptr)});
+    Value *ok = B.CreateICmpEQ(rc, ConstantInt::get(i32, 0));
+
+    auto *detachBB = BasicBlock::Create(ctx, "detach", ctor);
+    auto *contBB = BasicBlock::Create(ctx, "cont", ctor);
+    B.CreateCondBr(ok, detachBB, contBB);
+
+    IRBuilder<> DB(detachBB);
+    Value *tid = DB.CreateLoad(ip, thread);
+    DB.CreateCall(pthreadDetach, {tid});
+    DB.CreateBr(contBB);
+
+    B.SetInsertPoint(contBB);
+}
+
+void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
+                        ir::IRRandom &rng) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    IRBuilder<> B(&Ctor->getEntryBlock());
+
+    emitLinuxHardening(B, M);
+    Value *traceRc = emitPtrace(B, M, 0);
+    foldFlag(B, State, B.CreateICmpSLT(traceRc, ConstantInt::getSigned(i32, 0)),
+             0x3D2D7F2BAE63D5C9ULL, "morok.antidbg.ptrace.init");
+
+    Function *statusFn = linuxStatusTracerCheck(M, rng);
+    Function *statFn = linuxStatField4Check(M, rng);
+    Value *status = B.CreateCall(statusFn);
+    Value *stat4 = B.CreateCall(statFn);
+    foldFlag(B, State, B.CreateICmpNE(status, ConstantInt::get(i32, 0)),
+             0xA4756E49F2D31219ULL, "morok.antidbg.status");
+    foldState(B, State, stat4, 0xDA942042E4DD58B5ULL, "morok.antidbg.stat4");
+
+    Function *watch = linuxWatchThread(M, statusFn, statFn, State);
+    emitLinuxWatcherStart(B, M, watch);
+    B.CreateRetVoid();
+}
+
+void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    FunctionCallee getpid =
+        M.getOrInsertFunction("getpid", FunctionType::get(i32, false));
+    FunctionCallee sysctl = M.getOrInsertFunction(
+        "sysctl", FunctionType::get(i32, {ptr, i32, ptr, ptr, ptr, ip}, false));
+
+    auto *mibTy = ArrayType::get(i32, 4);
+    auto *mib = B.CreateAlloca(mibTy, nullptr, "morok.antidbg.mib");
+    auto storeMib = [&](std::uint32_t idx, Value *V) {
+        B.CreateStore(V, B.CreateInBoundsGEP(mibTy, mib,
+                                             {ConstantInt::get(ip, 0),
+                                              ConstantInt::get(ip, idx)}));
+    };
+    storeMib(0, ConstantInt::get(i32, 1));  // CTL_KERN
+    storeMib(1, ConstantInt::get(i32, 14)); // KERN_PROC
+    storeMib(2, ConstantInt::get(i32, 1));  // KERN_PROC_PID
+    storeMib(3, B.CreateCall(getpid));
+
+    constexpr std::uint64_t kKinfoProcBytes = 648;
+    constexpr std::uint64_t kPFlagOffset = 32;
+    auto *bufTy = ArrayType::get(i8, kKinfoProcBytes);
+    auto *buf = B.CreateAlloca(bufTy, nullptr, "morok.antidbg.kinfo");
+    auto *len = B.CreateAlloca(ip, nullptr, "morok.antidbg.kinfo.len");
+    B.CreateStore(ConstantInt::get(ip, kKinfoProcBytes), len);
+    Value *pflagPtr = B.CreateInBoundsGEP(
+        bufTy, buf,
+        {ConstantInt::get(ip, 0), ConstantInt::get(ip, kPFlagOffset)});
+    B.CreateStore(ConstantInt::get(i32, 0), pflagPtr);
+
+    Value *mibPtr = B.CreateInBoundsGEP(
+        mibTy, mib, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
+    Value *bufPtr = B.CreateInBoundsGEP(
+        bufTy, buf, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
+    Value *rc = B.CreateCall(sysctl, {mibPtr, ConstantInt::get(i32, 4), bufPtr,
+                                      len, ConstantPointerNull::get(ptr),
+                                      ConstantInt::get(ip, 0)});
+    Value *pflag = B.CreateLoad(i32, pflagPtr);
+    Value *traced =
+        B.CreateICmpNE(B.CreateAnd(pflag, ConstantInt::get(i32, 0x800)),
+                       ConstantInt::get(i32, 0));
+    Value *ok = B.CreateICmpEQ(rc, ConstantInt::get(i32, 0));
+    foldFlag(B, State, B.CreateAnd(ok, traced), 0xBD6A33A5F07A4E31ULL,
+             "morok.antidbg.sysctl");
+}
+
+void emitDarwinCsopsCheck(IRBuilder<> &B, Module &M, GlobalVariable *State) {
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    FunctionCallee getpid =
+        M.getOrInsertFunction("getpid", FunctionType::get(i32, false));
+    FunctionCallee csops = M.getOrInsertFunction(
+        "csops", FunctionType::get(i32, {i32, i32, ptr, ip}, false));
+
+    auto *status = B.CreateAlloca(i32, nullptr, "morok.antidbg.cs");
+    B.CreateStore(ConstantInt::get(i32, 0), status);
+    Value *rc =
+        B.CreateCall(csops, {B.CreateCall(getpid), ConstantInt::get(i32, 0),
+                             status, ConstantInt::get(ip, 4)});
+    Value *flags = B.CreateLoad(i32, status);
+    Value *debugged =
+        B.CreateICmpNE(B.CreateAnd(flags, ConstantInt::get(i32, 0x10000000)),
+                       ConstantInt::get(i32, 0));
+    Value *ok = B.CreateICmpEQ(rc, ConstantInt::get(i32, 0));
+    foldFlag(B, State, B.CreateAnd(ok, debugged), 0xF1D88C6C72195307ULL,
+             "morok.antidbg.csops");
+}
+
+void emitDarwinDyldCensus(IRBuilder<> &B, Module &M, GlobalVariable *State,
+                          ir::IRRandom &rng) {
+    LLVMContext &ctx = M.getContext();
+    auto *ptr = PointerType::getUnqual(ctx);
+    FunctionCallee getenv =
+        M.getOrInsertFunction("getenv", FunctionType::get(ptr, {ptr}, false));
+
+    constexpr std::array<StringLiteral, 8> names = {
+        StringLiteral("DYLD_INSERT_LIBRARIES"),
+        StringLiteral("DYLD_PRINT_LIBRARIES"),
+        StringLiteral("DYLD_PRINT_APIS"),
+        StringLiteral("DYLD_PRINT_BINDINGS"),
+        StringLiteral("DYLD_PRINT_INITIALIZERS"),
+        StringLiteral("DYLD_PRINT_SEGMENTS"),
+        StringLiteral("DYLD_PRINT_STATISTICS"),
+        StringLiteral("DYLD_PRINT_RPATHS"),
+    };
+    constexpr std::array<std::uint64_t, 8> salts = {
+        0x7758194AE9A77863ULL, 0xB4B38D68C02F02A5ULL, 0x219CA03416830A21ULL,
+        0x1B8E6F5EA72EF761ULL, 0x5CA7FB879A46141DULL, 0x87C23393A30D56A9ULL,
+        0xE4B80E501C94AB33ULL, 0xC09D8F3BA1F6C6EFULL,
+    };
+
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        Value *name = ir::emitCloakedSymbol(B, M, names[i], rng);
+        Value *found = B.CreateICmpNE(B.CreateCall(getenv, {name}),
+                                      ConstantPointerNull::get(ptr));
+        foldFlag(B, State, found, salts[i], "morok.antidbg.dyld");
+    }
+}
+
+void emitDarwinAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
+                         ir::IRRandom &rng) {
+    IRBuilder<> B(&Ctor->getEntryBlock());
+    emitPtrace(B, M, 31); // PT_DENY_ATTACH
+    emitDarwinSysctlCheck(B, M, State);
+    emitDarwinCsopsCheck(B, M, State);
+    emitDarwinDyldCensus(B, M, State, rng);
+    B.CreateRetVoid();
+}
+
+} // namespace
+
+bool antiDebuggingModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
 
-    // ptrace request that denies attachment: PT_DENY_ATTACH (31) on Darwin,
-    // PTRACE_TRACEME (0) elsewhere — both make subsequent attaches fail.
-    const int request = tt.isOSDarwin() ? 31 : 0;
-
-    FunctionCallee ptrace = M.getOrInsertFunction(
-        "ptrace", FunctionType::get(i32, {i32, i32, ptr, i32}, false));
-
     Function *ctor = makeCtorShell(M, "morok.antidbg");
-    IRBuilder<> B(&ctor->getEntryBlock());
-    B.CreateCall(
-        ptrace, {ConstantInt::getSigned(i32, request), ConstantInt::get(i32, 0),
-                 ConstantPointerNull::get(ptr), ConstantInt::get(i32, 0)});
-    B.CreateRetVoid();
+    GlobalVariable *state = antiDebugState(M, rng);
+    if (tt.isOSLinux())
+        emitLinuxAntiDebug(M, ctor, state, rng);
+    else if (tt.isOSDarwin())
+        emitDarwinAntiDebug(M, ctor, state, rng);
+    else {
+        IRBuilder<> B(&ctor->getEntryBlock());
+        emitPtrace(B, M, 0);
+        B.CreateRetVoid();
+    }
     appendToGlobalCtors(M, ctor, 0);
     return true;
+}
+
+bool antiDebuggingModule(Module &M) {
+    auto engine = core::Xoshiro256pp::fromSeed(0xA17D3B9u);
+    ir::IRRandom rng(engine);
+    return antiDebuggingModule(M, rng);
 }
 
 bool antiHookingModule(Module &M, ir::IRRandom &rng) {
@@ -123,8 +667,9 @@ bool antiClassDumpModule(Module &M) {
 }
 
 PreservedAnalyses AntiDebuggingPass::run(Module &M, ModuleAnalysisManager &) {
-    return antiDebuggingModule(M) ? PreservedAnalyses::none()
-                                  : PreservedAnalyses::all();
+    ir::IRRandom rng(engine_);
+    return antiDebuggingModule(M, rng) ? PreservedAnalyses::none()
+                                       : PreservedAnalyses::all();
 }
 PreservedAnalyses AntiHookingPass::run(Module &M, ModuleAnalysisManager &) {
     ir::IRRandom rng(engine_);

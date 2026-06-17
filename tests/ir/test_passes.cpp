@@ -210,6 +210,18 @@ std::size_t countCallsTo(Function &F, StringRef name) {
     return n;
 }
 
+bool hasReadableByteString(Module &M, StringRef needle) {
+    for (GlobalVariable &GV : M.globals()) {
+        if (!GV.hasInitializer())
+            continue;
+        if (auto *CDA = dyn_cast<ConstantDataArray>(GV.getInitializer()))
+            if (CDA->getElementType()->isIntegerTy(8))
+                if (CDA->getRawDataValues().find(needle) != StringRef::npos)
+                    return true;
+    }
+    return false;
+}
+
 std::vector<std::string> functionOrder(Module &M) {
     std::vector<std::string> Names;
     for (Function &F : M)
@@ -8431,6 +8443,60 @@ TEST_CASE("anti-analysis passes inject valid startup code") {
                 if (CDA->getElementType()->isIntegerTy(8))
                     CHECK(CDA->getRawDataValues().find("MSHookFunction") ==
                           StringRef::npos);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiDebuggingModule emits layered Linux checks without readable "
+          "proc strings") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(881);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng));
+
+    CHECK(M->getGlobalVariable("morok.antidbg.state", true) != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.status") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.stat4") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.watch") != nullptr);
+    CHECK(M->getFunction("ptrace") != nullptr);
+    CHECK(M->getFunction("prctl") != nullptr);
+    CHECK(M->getFunction("pthread_create") != nullptr);
+    CHECK(M->getFunction("pthread_detach") != nullptr);
+    CHECK(M->getFunction("open") != nullptr);
+    CHECK(M->getFunction("read") != nullptr);
+    CHECK(M->getFunction("close") != nullptr);
+    CHECK(M->getFunction("sleep") != nullptr);
+
+    CHECK_FALSE(hasReadableByteString(*M, "/proc/self/status"));
+    CHECK_FALSE(hasReadableByteString(*M, "/proc/self/stat"));
+    CHECK_FALSE(hasReadableByteString(*M, "TracerPid"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiDebuggingModule emits Darwin source checks and cloaked DYLD "
+          "census") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "arm64-apple-macosx13.0.0"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(882);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng));
+
+    CHECK(M->getGlobalVariable("morok.antidbg.state", true) != nullptr);
+    CHECK(M->getFunction("ptrace") != nullptr);
+    CHECK(M->getFunction("sysctl") != nullptr);
+    CHECK(M->getFunction("csops") != nullptr);
+    CHECK(M->getFunction("getenv") != nullptr);
+    CHECK(countGlobals(*M, "morok.cloak.c") >= 8u);
+    CHECK_FALSE(hasReadableByteString(*M, "DYLD_INSERT_LIBRARIES"));
+    CHECK_FALSE(hasReadableByteString(*M, "DYLD_PRINT"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
