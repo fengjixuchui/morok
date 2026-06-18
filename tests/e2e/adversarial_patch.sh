@@ -35,7 +35,38 @@ else LIMIT=(); fi
 
 run_limited() {
   local secs="$1"; shift
-  if [ "${#LIMIT[@]}" -gt 0 ]; then "${LIMIT[@]}" "$secs" "$@"; else "$@"; fi
+  if [ "${#LIMIT[@]}" -gt 0 ]; then
+    "${LIMIT[@]}" "$secs" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e '
+      use strict;
+      use warnings;
+      my $secs = shift @ARGV;
+      my $pid = fork();
+      die "fork failed\n" unless defined $pid;
+      if ($pid == 0) {
+        exec @ARGV;
+        exit 127;
+      }
+      my $timed_out = 0;
+      local $SIG{ALRM} = sub {
+        $timed_out = 1;
+        kill "TERM", $pid;
+        select undef, undef, undef, 0.2;
+        kill "KILL", $pid;
+      };
+      alarm $secs;
+      waitpid($pid, 0);
+      my $status = $?;
+      alarm 0;
+      exit 124 if $timed_out;
+      exit 127 if $status == -1;
+      exit(128 + ($status & 127)) if ($status & 127);
+      exit(($status >> 8) & 255);
+    ' "$secs" "$@"
+  else
+    "$@"
+  fi
 }
 
 resign_if_needed() {

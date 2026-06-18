@@ -122,7 +122,7 @@ if(APPLE)
       "$<TARGET_FILE:morok_plugin>;${CMAKE_CURRENT_SOURCE_DIR}/vm.toml")
 endif()
 
-if(Python3_EXECUTABLE)
+if(APPLE AND Python3_EXECUTABLE)
   add_test(NAME "e2e/adversarial_selfcheck_code_patch"
     COMMAND bash "${_adversarial_driver}"
             "${Python3_EXECUTABLE}"
@@ -156,7 +156,11 @@ if(Python3_EXECUTABLE)
     SKIP_RETURN_CODE 77
     TIMEOUT 120)
 else()
-  message(STATUS "adversarial e2e patch tests skipped (Python3 not found).")
+  if(NOT APPLE)
+    message(STATUS "adversarial e2e patch tests skipped off-Apple (Darwin post-link sealing only).")
+  else()
+    message(STATUS "adversarial e2e patch tests skipped (Python3 not found).")
+  endif()
 endif()
 
 # The full sample-program compile sweep runs only when the corpus is present.

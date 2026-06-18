@@ -54,8 +54,9 @@ constexpr std::uint32_t kMaxRegionBytes = 32;
 struct ArchLayout {
     StringRef dispatcher_asm;
     StringRef dispatcher_constraints;
-    StringRef carrier_asm;
-    StringRef carrier_constraints;
+    StringRef carrier_def_asm;
+    StringRef carrier_def_constraints;
+    StringRef carrier_anchor_constraints;
 };
 
 struct Site {
@@ -76,12 +77,13 @@ std::optional<ArchLayout> layoutFor(const Triple &TT) {
         return ArchLayout{
             "jmpq *%r14",
             "~{memory},~{dirflag},~{fpsr},~{flags}",
-            "movq $0, %r14",
-            "r,~{r14},~{memory},~{dirflag},~{fpsr},~{flags}"};
+            "movq $1, $0",
+            "={r14},r,~{memory},~{dirflag},~{fpsr},~{flags}",
+            "{r14},~{memory},~{dirflag},~{fpsr},~{flags}"};
     case Triple::aarch64:
     case Triple::aarch64_be:
-        return ArchLayout{"br x19", "~{memory}", "mov x19, $0",
-                          "r,~{x19},~{memory}"};
+        return ArchLayout{"br x19", "~{memory}", "mov $0, $1",
+                          "={x19},r,~{memory}", "{x19},~{memory}"};
     default:
         return std::nullopt;
     }
@@ -194,14 +196,24 @@ GlobalVariable *makeEncodedSlot(Module &M, ir::IRRandom &Rng) {
     return GV;
 }
 
-void emitCarrierMove(IRBuilder<> &B, Value *Target, const ArchLayout &Layout) {
-    auto *FTy =
-        FunctionType::get(Type::getVoidTy(B.getContext()), {Target->getType()},
-                          false);
-    InlineAsm *IA = InlineAsm::get(FTy, Layout.carrier_asm,
-                                   Layout.carrier_constraints,
+Value *emitCarrierDefine(IRBuilder<> &B, Value *Target,
+                         const ArchLayout &Layout) {
+    auto *FTy = FunctionType::get(Target->getType(), {Target->getType()},
+                                  false);
+    InlineAsm *IA = InlineAsm::get(FTy, Layout.carrier_def_asm,
+                                   Layout.carrier_def_constraints,
                                    /*hasSideEffects=*/true);
-    B.CreateCall(FTy, IA, {Target});
+    return B.CreateCall(FTy, IA, {Target}, "morok.ckd.carrier");
+}
+
+void emitCarrierAnchor(IRBuilder<> &B, Value *Carrier,
+                       const ArchLayout &Layout) {
+    auto *FTy =
+        FunctionType::get(Type::getVoidTy(B.getContext()),
+                          {Carrier->getType()}, false);
+    InlineAsm *IA = InlineAsm::get(FTy, "", Layout.carrier_anchor_constraints,
+                                   /*hasSideEffects=*/true);
+    B.CreateCall(FTy, IA, {Carrier});
 }
 
 void emitInit(Module &M, Function *Dispatcher, ArrayRef<Site> Sites,
@@ -248,7 +260,7 @@ void rewriteSite(Module &M, Function *Dispatcher, const Site &S,
         TargetInt, PointerType::getUnqual(M.getContext()), "morok.ckd.target");
 
     IRBuilder<> SideB(Old);
-    emitCarrierMove(SideB, Target, Layout);
+    Value *Carrier = emitCarrierDefine(SideB, Target, Layout);
 
     SmallVector<Value *, 16> Args;
     for (Use &Arg : Old->args())
@@ -260,6 +272,8 @@ void rewriteSite(Module &M, Function *Dispatcher, const Site &S,
     New->setAttributes(Old->getAttributes());
     New->setDebugLoc(Old->getDebugLoc());
     New->copyMetadata(*Old);
+    IRBuilder<> AnchorB(Old);
+    emitCarrierAnchor(AnchorB, Carrier, Layout);
 
     if (!Old->getType()->isVoidTy())
         Old->replaceAllUsesWith(New);

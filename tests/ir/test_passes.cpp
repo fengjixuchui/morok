@@ -287,6 +287,16 @@ std::size_t countInlineAsmCalls(Function &F) {
     return n;
 }
 
+std::size_t countInlineAsmConstraints(Function &F, StringRef needle) {
+    std::size_t n = 0;
+    for (Instruction &I : instructions(F))
+        if (auto *CB = dyn_cast<CallBase>(&I))
+            if (auto *Asm = dyn_cast<InlineAsm>(CB->getCalledOperand()))
+                if (Asm->getConstraintString().contains(needle))
+                    ++n;
+    return n;
+}
+
 bool valueDependsOnOpaqueBarrier(Value *V) {
     SmallVector<Value *, 32> Work;
     SmallPtrSet<Value *, 32> Seen;
@@ -8709,6 +8719,9 @@ entry:
     CHECK(countCallsTo(*Caller, "inc") == 0u);
     CHECK(countCallsTo(*Caller, "mix") == 0u);
     CHECK(countCallsThroughOperand(*Caller, Dispatch) == 2u);
+    CHECK(countInlineAsmConstraints(*Caller, "={x19}") == 2u);
+    CHECK(countInlineAsmConstraints(*Caller, "{x19}") == 4u);
+    CHECK(countInlineAsmConstraints(*Caller, "~{x19}") == 0u);
     CHECK(countGlobals(*M, "morok.ckd.enc") == 2u);
     CHECK(M->getGlobalVariable("llvm.global_ctors") != nullptr);
     CHECK(countCallsTo(*Init, "morok.ckd.dispatch") == 0u);
