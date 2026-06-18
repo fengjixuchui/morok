@@ -907,12 +907,29 @@ PassConfig makeMax() {
     c.func_wrap.times = 2;
 
     c.fco.enabled = true;
+    c.vtable_integrity.enabled = true;
 
     c.anti_hook.enabled = true;
     c.anti_dbg.enabled = true;
     c.anti_class_dump.enabled = true;
+    c.windows_pe_foundation.enabled = true;
+    c.windows_peb_heap_debug.enabled = true;
+    c.windows_debug_object.enabled = true;
+    c.windows_thread_hide.enabled = true;
+    c.windows_anti_attach.enabled = true;
+    c.windows_kernel_debugger.enabled = true;
+    c.windows_syscalls.enabled = true;
+    c.windows_unhook.enabled = true;
+    c.windows_veh_audit.enabled = true;
+    c.windows_process_mitigations.enabled = true;
     c.timing_oracles.enabled = true;
     c.trap_oracles.enabled = true;
+    c.page_fault_oracles.enabled = true;
+    c.cache_timing_oracles.enabled = true;
+    c.microarchitectural_canaries.enabled = true;
+    c.nanomites.enabled = true;
+    c.nanomites.probability = 100;
+    c.nanomites.max_sites = 16;
     c.decoy_strings.enabled = true;
     return c;
 }

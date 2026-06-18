@@ -373,11 +373,27 @@ TEST_CASE("max preset enables every pass at full intensity") {
     CHECK(c.indir_branch.enabled == true);
     CHECK(c.func_wrap.enabled == true);
     CHECK(c.fco.enabled == true);
+    CHECK(c.vtable_integrity.enabled == true);
     CHECK(c.anti_hook.enabled == true);
     CHECK(c.anti_dbg.enabled == true);
     CHECK(c.anti_class_dump.enabled == true);
+    CHECK(c.windows_pe_foundation.enabled == true);
+    CHECK(c.windows_peb_heap_debug.enabled == true);
+    CHECK(c.windows_debug_object.enabled == true);
+    CHECK(c.windows_thread_hide.enabled == true);
+    CHECK(c.windows_anti_attach.enabled == true);
+    CHECK(c.windows_kernel_debugger.enabled == true);
+    CHECK(c.windows_syscalls.enabled == true);
+    CHECK(c.windows_unhook.enabled == true);
+    CHECK(c.windows_veh_audit.enabled == true);
+    CHECK(c.windows_process_mitigations.enabled == true);
     CHECK(c.timing_oracles.enabled == true);
     CHECK(c.trap_oracles.enabled == true);
+    CHECK(c.page_fault_oracles.enabled == true);
+    CHECK(c.cache_timing_oracles.enabled == true);
+    CHECK(c.microarchitectural_canaries.enabled == true);
+    CHECK(c.nanomites.enabled == true);
+    CHECK(c.decoy_strings.enabled == true);
 
     // Probabilities are pinned at 100 and budgets exceed the high preset.
     CHECK(c.bcf.probability == 100u);
@@ -390,6 +406,8 @@ TEST_CASE("max preset enables every pass at full intensity") {
     CHECK(c.vec.width == 512u);
     CHECK(c.const_enc.share_count == 8u);
     CHECK(c.func_wrap.times == 2u);
+    CHECK(c.nanomites.probability == 100u);
+    CHECK(c.nanomites.max_sites == 16u);
 
     // Max is strictly at least as strong as high on shared scalar knobs.
     const PassConfig h = presetConfig(Preset::High);
