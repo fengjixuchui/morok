@@ -1,0 +1,17 @@
+# Adversarial binary-patching e2e config.
+#
+# Keep this focused: the test driver post-link seals self-checksum manifests,
+# then mutates native code bytes. Timing oracles are included so the same sealed
+# code window catches deletion of time-read blocks such as RDTSCP.
+
+[global]
+preset = "none"
+
+[passes.self_checksum_constants]
+enabled = true
+probability = 100
+max_constants = 16
+region_bytes = 48
+
+[passes.timing_oracles]
+enabled = true

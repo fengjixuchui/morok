@@ -28,6 +28,12 @@ set(_driver "${CMAKE_CURRENT_SOURCE_DIR}/differential.sh")
 set(_program_sweep "${CMAKE_CURRENT_SOURCE_DIR}/compile_programs.sh")
 set(_max_config "${CMAKE_CURRENT_SOURCE_DIR}/max.toml")
 set(_portable_config "${CMAKE_CURRENT_SOURCE_DIR}/portable.toml")
+set(_adversarial_driver "${CMAKE_CURRENT_SOURCE_DIR}/adversarial_patch.sh")
+set(_adversarial_config "${CMAKE_CURRENT_SOURCE_DIR}/adversarial.toml")
+set(_adversarial_workload
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/adversarial_integrity.c")
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
 
 # Platform-aware settings. On Apple the full built-in max/high presets and the
 # aggressive max.toml are exercised. On Linux/Windows several max-level passes are
@@ -114,6 +120,43 @@ if(APPLE)
     LABELS "e2e;max"
     REQUIRED_FILES
       "$<TARGET_FILE:morok_plugin>;${CMAKE_CURRENT_SOURCE_DIR}/vm.toml")
+endif()
+
+if(Python3_EXECUTABLE)
+  add_test(NAME "e2e/adversarial_selfcheck_code_patch"
+    COMMAND bash "${_adversarial_driver}"
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_adversarial_workload}"
+            "${_adversarial_config}"
+            "selfcheck-code"
+            4242)
+  set_tests_properties("e2e/adversarial_selfcheck_code_patch" PROPERTIES
+    LABELS "e2e;adversarial;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_config};${_adversarial_workload}"
+    TIMEOUT 120)
+
+  add_test(NAME "e2e/adversarial_timing_probe_patch"
+    COMMAND bash "${_adversarial_driver}"
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_adversarial_workload}"
+            "${_adversarial_config}"
+            "timing"
+            4242)
+  set_tests_properties("e2e/adversarial_timing_probe_patch" PROPERTIES
+    LABELS "e2e;adversarial;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_config};${_adversarial_workload}"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
+else()
+  message(STATUS "adversarial e2e patch tests skipped (Python3 not found).")
 endif()
 
 # The full sample-program compile sweep runs only when the corpus is present.
