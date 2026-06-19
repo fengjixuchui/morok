@@ -174,6 +174,12 @@ std::size_t countNamedInstructions(Function &F, StringRef prefix) {
     return n;
 }
 
+void checkSealEnforcement(Module &M, Function &F) {
+    CHECK(M.getGlobalVariable("morok.antidbg.seal", true) != nullptr);
+    CHECK(countNamedInstructions(F, "morok.antidbg.seal.trip") >= 1u);
+    CHECK(countNamedInstructions(F, "morok.antidbg.seal.next") >= 1u);
+}
+
 std::size_t countPhis(Function &F) {
     std::size_t n = 0;
     for (Instruction &I : instructions(F))
@@ -12415,6 +12421,7 @@ entry:
             isa<ConstantPointerNull>(CB->getArgOperand(0));
     }
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
+    checkSealEnforcement(*M, *Ctor);
     CHECK(M->getGlobalVariable("morok.antihook.mac.targets", true) != nullptr);
     GlobalVariable *SmcGate =
         M->getGlobalVariable("morok.antihook.dbi.smc.gate", true);
@@ -12552,6 +12559,7 @@ entry:
     CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
+    checkSealEnforcement(*M, *Work);
     CHECK(countNamedInstructions(*Maps, "morok.antihook.maps.rwx") >= 1u);
     CHECK(countNamedInstructions(*Maps, "morok.antihook.maps.anonymous.exec") >=
           1u);
@@ -12656,9 +12664,12 @@ entry:
     REQUIRE(AntiDump != nullptr);
     Function *NegativeTiming = M->getFunction("morok.negative.timing");
     REQUIRE(NegativeTiming != nullptr);
+    Function *Ctor = M->getFunction("morok.antihook");
+    REQUIRE(Ctor != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
+    checkSealEnforcement(*M, *Ctor);
     CHECK(M->getGlobalVariable("morok.antihook.mac.targets", true) != nullptr);
     CHECK(M->getFunction("morok.antihook.got.plt") == nullptr);
     CHECK(hasInlineAsmCall(*Clean));
@@ -12734,22 +12745,21 @@ entry:
           1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
-    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
-                                 "morok.negative.modules.extra") >= 1u);
-    CHECK(callToPrecedes(*M->getFunction("morok.antihook"),
-                         "morok.antihook.vm.darwin",
+    CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
+    CHECK(callToPrecedes(*Ctor, "morok.antihook.vm.darwin",
                          "morok.antihook.wxorx.darwin"));
-    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
-                                 "morok.corroborate.schro.changed") >= 1u);
-    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
+    CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
+          1u);
+    CHECK(countNamedInstructions(*Ctor,
                                  "morok.corroborate.antidump.changed") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
+    checkSealEnforcement(*M, *Work);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.rwx.large") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.vm.private.exec") >= 1u);
-    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
-                                 "morok.antihook.prologue.x86.hit") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.antihook.prologue.x86.hit") >=
+          1u);
     CHECK(M->getFunction("_NSGetExecutablePath") != nullptr);
     CHECK(M->getFunction("_dyld_image_count") != nullptr);
     CHECK(M->getFunction("_dyld_get_image_header") != nullptr);
@@ -12794,8 +12804,11 @@ entry:
     REQUIRE(Smc != nullptr);
     Function *NegativeTiming = M->getFunction("morok.negative.timing");
     REQUIRE(NegativeTiming != nullptr);
+    Function *Ctor = M->getFunction("morok.antihook");
+    REQUIRE(Ctor != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
+    checkSealEnforcement(*M, *Ctor);
     CHECK(M->getFunction("VirtualQuery") != nullptr);
     CHECK(M->getFunction("VirtualProtect") != nullptr);
     CHECK(M->getFunction("QueryPerformanceCounter") != nullptr);
@@ -12816,10 +12829,8 @@ entry:
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
-    CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
-                                 "morok.negative.modules.extra") >= 1u);
-    CHECK(callToPrecedes(*M->getFunction("morok.antihook"),
-                         "morok.antihook.vm.windows",
+    CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
+    CHECK(callToPrecedes(*Ctor, "morok.antihook.vm.windows",
                          "morok.antihook.wxorx.windows"));
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.virtualprotect") >=
           1u);
@@ -12827,6 +12838,7 @@ entry:
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.query") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
+    checkSealEnforcement(*M, *Work);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.rwx") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.rwx.large") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.private") >= 1u);
@@ -12861,6 +12873,7 @@ entry:
     REQUIRE(SchroHandler != nullptr);
     Function *AntiDump = M->getFunction("morok.antihook.antidump.macho");
     REQUIRE(AntiDump != nullptr);
+    checkSealEnforcement(*M, *Ctor);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antihook.prologue.arm64.hit") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
@@ -13378,6 +13391,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Indirect != nullptr);
     REQUIRE(Veh != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getGlobalVariable("morok.win.veh.handle", true) != nullptr);
     CHECK(M->getFunction("AddVectoredExceptionHandler") != nullptr);
     CHECK(hasInlineAsmCall(*Teb));
@@ -13451,6 +13465,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Probe != nullptr);
     REQUIRE(Peb != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(hasInlineAsmCall(*Peb));
     CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.peb") >= 1u);
     CHECK(countNamedInstructions(*Probe,
@@ -13492,6 +13507,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Ldr != nullptr);
     REQUIRE(WideHash != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("NtQueryInformationProcess") == nullptr);
     CHECK(M->getFunction("NtQueryObject") == nullptr);
     CHECK(hasInlineAsmCall(*Peb));
@@ -13550,6 +13566,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Resolve != nullptr);
     REQUIRE(Ldr != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("NtGetNextThread") == nullptr);
     CHECK(M->getFunction("NtSetInformationThread") == nullptr);
     CHECK(M->getFunction("NtQueryInformationThread") == nullptr);
@@ -13613,6 +13630,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Invalid != nullptr);
     REQUIRE(Resolve != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("DbgUiRemoteBreakin") == nullptr);
     CHECK(M->getFunction("DbgBreakPoint") == nullptr);
     CHECK(M->getFunction("ExitProcess") == nullptr);
@@ -13683,6 +13701,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Resolve != nullptr);
     REQUIRE(Ldr != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("NtQuerySystemInformation") == nullptr);
     CHECK(M->getFunction("NtQueryInformationProcess") == nullptr);
     CHECK(M->getFunction("FindWindowA") == nullptr);
@@ -13728,6 +13747,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Direct != nullptr);
     REQUIRE(Indirect != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("NtQuerySystemInformation") == nullptr);
     CHECK(M->getFunction("NtClose") == nullptr);
     CHECK(hasInlineAsmCall(*Peb));
@@ -13779,6 +13799,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Resolve != nullptr);
     REQUIRE(Ldr != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("NtOpenSection") == nullptr);
     CHECK(M->getFunction("NtMapViewOfSection") == nullptr);
     CHECK(M->getFunction("NtProtectVirtualMemory") == nullptr);
@@ -13849,6 +13870,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Resolve != nullptr);
     REQUIRE(Ldr != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("RtlAddVectoredExceptionHandler") == nullptr);
     CHECK(M->getFunction("RtlRemoveVectoredExceptionHandler") == nullptr);
     CHECK(M->getFunction("RtlDecodePointer") == nullptr);
@@ -13933,6 +13955,7 @@ define i32 @main() { ret i32 0 }
     Function *Oracle = M->getFunction("morok.timing.oracle");
     REQUIRE(Oracle != nullptr);
     CHECK(M->getGlobalVariable("morok.timing.state", true) != nullptr);
+    checkSealEnforcement(*M, *Oracle);
     CHECK(M->getFunction("morok.timing") != nullptr);
     CHECK(M->getFunction("clock_gettime") != nullptr);
     // The x86 timestamp read lives in a CPUID-gated helper (rdtscp + rdtsc
@@ -13997,6 +14020,7 @@ define i32 @main() { ret i32 0 }
     Function *Oracle = M->getFunction("morok.timing.oracle");
     REQUIRE(Oracle != nullptr);
     CHECK(M->getGlobalVariable("morok.timing.state", true) != nullptr);
+    checkSealEnforcement(*M, *Oracle);
     CHECK(M->getFunction("mach_absolute_time") != nullptr);
     CHECK(M->getFunction("clock_gettime") != nullptr);
     CHECK_FALSE(hasInlineAsmCall(*Oracle));
@@ -14020,6 +14044,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Handler != nullptr);
     CHECK(Handler->arg_size() == 3);
     CHECK(M->getGlobalVariable("morok.trap.state", true) != nullptr);
+    checkSealEnforcement(*M, *Ctor);
     CHECK(M->getGlobalVariable("morok.trap.hits", true) != nullptr);
     CHECK(M->getFunction("sigaction") != nullptr);
     CHECK(M->getFunction("signal") == nullptr);
@@ -14046,6 +14071,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Ctor != nullptr);
     REQUIRE(Handler != nullptr);
     CHECK(Handler->arg_size() == 3);
+    checkSealEnforcement(*M, *Ctor);
     CHECK(M->getFunction("sigaction") != nullptr);
     CHECK(M->getFunction("signal") == nullptr);
     CHECK(M->getFunction("raise") != nullptr);
@@ -14208,6 +14234,7 @@ entry:
     REQUIRE(Ctor != nullptr);
     REQUIRE(Oracle != nullptr);
     CHECK(M->getGlobalVariable("morok.cachetime.state", true) != nullptr);
+    checkSealEnforcement(*M, *Oracle);
     CHECK(M->getFunction("clock_gettime") != nullptr);
     // The x86 timestamp read is in the CPUID-gated helper the oracle calls.
     {
@@ -14271,6 +14298,7 @@ entry:
 
     Function *Oracle = M->getFunction("morok.cachetime.oracle");
     REQUIRE(Oracle != nullptr);
+    checkSealEnforcement(*M, *Oracle);
     CHECK(M->getFunction("mach_absolute_time") != nullptr);
     CHECK(M->getFunction("clock_gettime") != nullptr);
     CHECK_FALSE(hasInlineAsmCall(*Oracle));
@@ -14295,6 +14323,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Ctor != nullptr);
     REQUIRE(Oracle != nullptr);
     CHECK(M->getGlobalVariable("morok.microcanary.state", true) != nullptr);
+    checkSealEnforcement(*M, *Oracle);
     CHECK(M->getGlobalVariable("morok.microcanary.line", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.microcanary.evict", true) != nullptr);
     CHECK(M->getFunction("clock_gettime") != nullptr);
@@ -14326,6 +14355,7 @@ define i32 @main() { ret i32 0 }
 
     Function *Oracle = M->getFunction("morok.microcanary.oracle");
     REQUIRE(Oracle != nullptr);
+    checkSealEnforcement(*M, *Oracle);
     CHECK(M->getFunction("mach_absolute_time") != nullptr);
     CHECK(M->getFunction("clock_gettime") != nullptr);
     CHECK_FALSE(hasInlineAsmCall(*Oracle));

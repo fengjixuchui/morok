@@ -283,6 +283,14 @@ void sealFold(IRBuilderBase &B, Value *Flag, std::uint64_t Salt) {
     st->setAlignment(Align(8));
 }
 
+void foldEnforcedFlag(IRBuilderBase &B, GlobalVariable *State, Value *Flag,
+                      std::uint64_t Salt, const Twine &Name) {
+    foldFlag(B, State, Flag, Salt, Name);
+    // Only use this for detector verdicts proven false on clean e2e runs.
+    // Host/jitter-sensitive probes should remain foldFlag telemetry.
+    sealFold(B, Flag, Salt ^ 0xA5B0E176D83429CFULL);
+}
+
 Value *constIp(Module &M, std::uint64_t V) {
     return ConstantInt::get(intPtrTy(M), V);
 }
@@ -5607,9 +5615,11 @@ bool insertStackOriginChecks(Module &M, Function *Check, GlobalVariable *State,
         Value *ok =
             B.CreateCall(Check->getFunctionType(), Check, {addr},
                          "morok.antihook.stack.origin");
-        foldFlag(B, State, B.CreateICmpEQ(ok, ConstantInt::get(i32, 0)),
-                 rng.next() ^ (0xD6E8FEB86659FD93ULL * site++),
-                 "morok.antihook.stack.bad");
+        Value *bad = B.CreateICmpEQ(ok, ConstantInt::get(i32, 0),
+                                    "morok.antihook.stack.bad");
+        foldEnforcedFlag(B, State, bad,
+                         rng.next() ^ (0xD6E8FEB86659FD93ULL * site++),
+                         "morok.antihook.stack.bad");
         changed = true;
     }
     return changed;
@@ -6259,8 +6269,9 @@ void emitProloguePatternChecks(IRBuilder<> &B, Module &M, const Triple &TT,
     for (Function *target : Targets) {
         Value *hit = x86 ? emitX86ProloguePattern(B, M, target)
                          : emitArm64ProloguePattern(B, M, target);
-        foldFlag(B, State, hit, rng.next() ^ (0x9E3779B97F4A7C15ULL * site++),
-                 "morok.antihook.prologue");
+        foldEnforcedFlag(
+            B, State, hit, rng.next() ^ (0x9E3779B97F4A7C15ULL * site++),
+            "morok.antihook.prologue");
     }
 }
 
@@ -6643,11 +6654,16 @@ Function *timingOracleProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
               "morok.timing.bad.samples");
     foldState(B, State, divergentSamples, 0xC541A9E72318BE6FULL,
               "morok.timing.divergent.samples");
-    foldFlag(B, State, B.CreateICmpUGE(badSamples, ConstantInt::get(i32, 3)),
-             0xA331D8B47E1C5905ULL, "morok.timing.bad.distribution");
-    foldFlag(B, State,
-             B.CreateICmpUGE(divergentSamples, ConstantInt::get(i32, 2)),
-             0x5E74B29D13C8A60BULL, "morok.timing.divergent.distribution");
+    Value *badDistribution = B.CreateICmpUGE(
+        badSamples, ConstantInt::get(i32, 3),
+        "morok.timing.bad.distribution");
+    Value *divergentDistribution = B.CreateICmpUGE(
+        divergentSamples, ConstantInt::get(i32, 2),
+        "morok.timing.divergent.distribution");
+    foldEnforcedFlag(B, State, badDistribution, 0xA331D8B47E1C5905ULL,
+                     "morok.timing.bad.distribution");
+    foldEnforcedFlag(B, State, divergentDistribution, 0x5E74B29D13C8A60BULL,
+                     "morok.timing.divergent.distribution");
     B.CreateRetVoid();
     return fn;
 }
@@ -7979,13 +7995,16 @@ Function *cacheTimingProbe(Module &M, GlobalVariable *State,
               "morok.cachetime.bad.samples");
     foldState(B, State, divergentSamples, 0x3E49C807D2A6519BULL,
               "morok.cachetime.divergent.samples");
-    foldFlag(B, State,
-             B.CreateICmpUGE(badSamples, ConstantInt::get(i32, 2)),
-             0xB6417D0ECA52893FULL, "morok.cachetime.bad.distribution");
-    foldFlag(B, State,
-             B.CreateICmpUGE(divergentSamples, ConstantInt::get(i32, 2)),
-             0x59A3E7D14C2068BFULL,
-             "morok.cachetime.divergent.distribution");
+    Value *badDistribution = B.CreateICmpUGE(
+        badSamples, ConstantInt::get(i32, 2),
+        "morok.cachetime.bad.distribution");
+    Value *divergentDistribution = B.CreateICmpUGE(
+        divergentSamples, ConstantInt::get(i32, 2),
+        "morok.cachetime.divergent.distribution");
+    foldEnforcedFlag(B, State, badDistribution, 0xB6417D0ECA52893FULL,
+                     "morok.cachetime.bad.distribution");
+    foldEnforcedFlag(B, State, divergentDistribution, 0x59A3E7D14C2068BFULL,
+                     "morok.cachetime.divergent.distribution");
     B.CreateRetVoid();
     return fn;
 }
@@ -8187,13 +8206,16 @@ Function *microarchitecturalCanaryProbe(Module &M, GlobalVariable *State,
               "morok.microcanary.bad.samples");
     foldState(B, State, divergentSamples, 0x4F2B95A71C0E6D38ULL,
               "morok.microcanary.divergent.samples");
-    foldFlag(B, State,
-             B.CreateICmpUGE(badSamples, ConstantInt::get(i32, 2)),
-             0xA5B0E176D83429CFULL, "morok.microcanary.bad.distribution");
-    foldFlag(B, State,
-             B.CreateICmpUGE(divergentSamples, ConstantInt::get(i32, 2)),
-             0x2D78C4B50FA691E3ULL,
-             "morok.microcanary.divergent.distribution");
+    Value *badDistribution = B.CreateICmpUGE(
+        badSamples, ConstantInt::get(i32, 2),
+        "morok.microcanary.bad.distribution");
+    Value *divergentDistribution = B.CreateICmpUGE(
+        divergentSamples, ConstantInt::get(i32, 2),
+        "morok.microcanary.divergent.distribution");
+    foldEnforcedFlag(B, State, badDistribution, 0xA5B0E176D83429CFULL,
+                     "morok.microcanary.bad.distribution");
+    foldEnforcedFlag(B, State, divergentDistribution, 0x2D78C4B50FA691E3ULL,
+                     "morok.microcanary.divergent.distribution");
     B.CreateRetVoid();
     return fn;
 }
@@ -10075,8 +10097,9 @@ Function *windowsPeFoundationProbe(Module &M, GlobalVariable *State,
     Value *tebPtr = B.CreateIntToPtr(teb, ptr, "morok.win.foundation.teb.ptr");
     Value *pebFromTeb =
         loadAt(B, M, ip, tebPtr, 0x60, "morok.win.foundation.teb.peb");
-    foldFlag(B, State, B.CreateICmpNE(peb, pebFromTeb),
-             0xD92E0F61B47A35C8ULL, "morok.win.foundation.peb.mismatch");
+    foldEnforcedFlag(B, State, B.CreateICmpNE(peb, pebFromTeb),
+                     0xD92E0F61B47A35C8ULL,
+                     "morok.win.foundation.peb.mismatch");
     Value *pebPtr = B.CreateIntToPtr(peb, ptr, "morok.win.foundation.peb.ptr");
     Value *imageBase =
         loadAt(B, M, ip, pebPtr, 0x10, "morok.win.foundation.image.base");
@@ -10096,8 +10119,9 @@ Function *windowsPeFoundationProbe(Module &M, GlobalVariable *State,
         B.CreateICmpEQ(mz, ConstantInt::get(i16, 0x5A4D)),
         B.CreateICmpEQ(sig, ConstantInt::get(i32, 0x4550)),
         "morok.win.foundation.headers.ok");
-    foldFlag(B, State, B.CreateNot(headersOk), 0x81F36C2D9A4075BEULL,
-             "morok.win.foundation.headers.bad");
+    foldEnforcedFlag(B, State, B.CreateNot(headersOk),
+                     0x81F36C2D9A4075BEULL,
+                     "morok.win.foundation.headers.bad");
 
     Value *probeExport = B.CreateCall(
         resolver,
@@ -10116,8 +10140,10 @@ Function *windowsPeFoundationProbe(Module &M, GlobalVariable *State,
         addVeh, {ConstantInt::get(i32, 1), vehHandler},
         "morok.win.foundation.veh.handle");
     B.CreateStore(veh, windowsVehHandle(M))->setVolatile(true);
-    foldFlag(B, State, B.CreateICmpEQ(veh, ConstantPointerNull::get(ptr)),
-             0x4C62E5B190AD378FULL, "morok.win.foundation.veh.missing");
+    foldEnforcedFlag(B, State,
+                     B.CreateICmpEQ(veh, ConstantPointerNull::get(ptr)),
+                     0x4C62E5B190AD378FULL,
+                     "morok.win.foundation.veh.missing");
     B.CreateRetVoid();
     return fn;
 }
@@ -10171,17 +10197,21 @@ Function *windowsPebHeapDebugProbe(Module &M, GlobalVariable *State,
               "morok.win.pebheap.nt.global.flag.mix");
     foldState(PB, State, processHeap, rng.next(),
               "morok.win.pebheap.process.heap.mix");
-    foldFlag(PB, State,
-             PB.CreateICmpNE(beingDebugged, ConstantInt::get(i8, 0),
-                             "morok.win.pebheap.being.debugged.hit"),
-             0xBAE7D1C05A16E903ULL, "morok.win.pebheap.being.debugged");
+    foldEnforcedFlag(PB, State,
+                     PB.CreateICmpNE(
+                         beingDebugged, ConstantInt::get(i8, 0),
+                         "morok.win.pebheap.being.debugged.hit"),
+                     0xBAE7D1C05A16E903ULL,
+                     "morok.win.pebheap.being.debugged");
     Value *ntDebugBits =
         PB.CreateAnd(ntGlobalFlag, ConstantInt::get(i32, 0x70),
                      "morok.win.pebheap.nt.global.flag.bits");
-    foldFlag(PB, State,
-             PB.CreateICmpNE(ntDebugBits, ConstantInt::get(i32, 0),
-                             "morok.win.pebheap.nt.global.flag.hit"),
-             0xE43BC91F672A580DULL, "morok.win.pebheap.nt.global.flag");
+    foldEnforcedFlag(PB, State,
+                     PB.CreateICmpNE(
+                         ntDebugBits, ConstantInt::get(i32, 0),
+                         "morok.win.pebheap.nt.global.flag.hit"),
+                     0xE43BC91F672A580DULL,
+                     "morok.win.pebheap.nt.global.flag");
     PB.CreateCondBr(PB.CreateICmpNE(processHeap, ConstantInt::get(ip, 0),
                                     "morok.win.pebheap.heap.present"),
                     readHeapBB, retBB);
@@ -10200,14 +10230,18 @@ Function *windowsPebHeapDebugProbe(Module &M, GlobalVariable *State,
     Value *heapDebugBits =
         HB.CreateAnd(heapFlags, ConstantInt::get(i32, 0x40000060),
                      "morok.win.pebheap.heap.flags.debug.bits");
-    foldFlag(HB, State,
-             HB.CreateICmpNE(heapDebugBits, ConstantInt::get(i32, 0),
-                             "morok.win.pebheap.heap.flags.hit"),
-             0x6A278C0D4E95B1F3ULL, "morok.win.pebheap.heap.flags");
-    foldFlag(HB, State,
-             HB.CreateICmpNE(heapForceFlags, ConstantInt::get(i32, 0),
-                             "morok.win.pebheap.heap.force.flags.hit"),
-             0x91D630A24CFB5875ULL, "morok.win.pebheap.heap.force.flags");
+    foldEnforcedFlag(HB, State,
+                     HB.CreateICmpNE(
+                         heapDebugBits, ConstantInt::get(i32, 0),
+                         "morok.win.pebheap.heap.flags.hit"),
+                     0x6A278C0D4E95B1F3ULL,
+                     "morok.win.pebheap.heap.flags");
+    foldEnforcedFlag(HB, State,
+                     HB.CreateICmpNE(
+                         heapForceFlags, ConstantInt::get(i32, 0),
+                         "morok.win.pebheap.heap.force.flags.hit"),
+                     0x91D630A24CFB5875ULL,
+                     "morok.win.pebheap.heap.force.flags");
     Value *heapVsPeb =
         HB.CreateOr(HB.CreateZExt(heapDebugBits, ip),
                     HB.CreateShl(HB.CreateZExt(heapForceFlags, ip),
@@ -10336,8 +10370,8 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
               "morok.win.dbgobj.debug.port.status.mix");
     foldState(QB, State, debugPortValue, rng.next(),
               "morok.win.dbgobj.debug.port.mix");
-    foldFlag(QB, State, debugPortHit, 0xA1B0E76C39D4825FULL,
-             "morok.win.dbgobj.debug.port");
+    foldEnforcedFlag(QB, State, debugPortHit, 0xA1B0E76C39D4825FULL,
+                     "morok.win.dbgobj.debug.port");
 
     Value *debugObjectStatus = QB.CreateCall(
         qipTy, qipPtr,
@@ -10359,8 +10393,8 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
               "morok.win.dbgobj.debug.object.status.mix");
     foldState(QB, State, debugObjectValue, rng.next(),
               "morok.win.dbgobj.debug.object.mix");
-    foldFlag(QB, State, debugObjectHit, 0xD971A24B6E830C5FULL,
-             "morok.win.dbgobj.debug.object");
+    foldEnforcedFlag(QB, State, debugObjectHit, 0xD971A24B6E830C5FULL,
+                     "morok.win.dbgobj.debug.object");
 
     Value *debugFlagsStatus = QB.CreateCall(
         qipTy, qipPtr,
@@ -10382,8 +10416,8 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
               "morok.win.dbgobj.debug.flags.status.mix");
     foldState(QB, State, debugFlagsValue, rng.next(),
               "morok.win.dbgobj.debug.flags.mix");
-    foldFlag(QB, State, debugFlagsHit, 0x58C6E3B19A2D704FULL,
-             "morok.win.dbgobj.debug.flags");
+    foldEnforcedFlag(QB, State, debugFlagsHit, 0x58C6E3B19A2D704FULL,
+                     "morok.win.dbgobj.debug.flags");
     QB.CreateBr(objectGateBB);
 
     IRBuilder<> GB(objectGateBB);
@@ -10517,8 +10551,8 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     TB.CreateStore(nextCount, debugObjectCount)->setVolatile(true);
     foldState(TB, State, typeHash, rng.next(),
               "morok.win.dbgobj.object.type.hash.mix");
-    foldFlag(TB, State, debugObjectTypeHit, 0xCC7E31A04B962D85ULL,
-             "morok.win.dbgobj.object.debug");
+    foldEnforcedFlag(TB, State, debugObjectTypeHit, 0xCC7E31A04B962D85ULL,
+                     "morok.win.dbgobj.object.debug");
     TB.CreateBr(objectNextBB);
 
     IRBuilder<> NB(objectNextBB);
@@ -10547,10 +10581,11 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     cast<LoadInst>(finalCount)->setVolatile(true);
     foldState(RetB, State, finalCount, rng.next(),
               "morok.win.dbgobj.object.debug.count.mix");
-    foldFlag(RetB, State,
-             RetB.CreateICmpNE(finalCount, ConstantInt::get(i32, 0),
-                               "morok.win.dbgobj.object.debug.count.hit"),
-             0xE019A8C35F7B62D4ULL, "morok.win.dbgobj.object.debug.count");
+    foldEnforcedFlag(
+        RetB, State,
+        RetB.CreateICmpNE(finalCount, ConstantInt::get(i32, 0),
+                          "morok.win.dbgobj.object.debug.count.hit"),
+        0xE019A8C35F7B62D4ULL, "morok.win.dbgobj.object.debug.count");
     RetB.CreateRetVoid();
     return fn;
 }
@@ -10765,8 +10800,8 @@ Function *windowsThreadHideProbe(Module &M, GlobalVariable *State,
               "morok.win.thide.query.status.mix");
     foldState(PB, State, hiddenValue, rng.next(),
               "morok.win.thide.hidden.mix");
-    foldFlag(PB, State, failed, 0xB68F214CD03E975AULL,
-             "morok.win.thide.failed");
+    foldEnforcedFlag(PB, State, failed, 0xB68F214CD03E975AULL,
+                     "morok.win.thide.failed");
     PB.CreateBr(nextBB);
 
     IRBuilder<> NB(nextBB);
@@ -10814,10 +10849,10 @@ Function *windowsThreadHideProbe(Module &M, GlobalVariable *State,
               "morok.win.thide.seen.final.mix");
     foldState(DB, State, failFinal, rng.next(),
               "morok.win.thide.fail.final.mix");
-    foldFlag(DB, State,
-             DB.CreateICmpNE(failFinal, ConstantInt::get(i32, 0),
-                             "morok.win.thide.fail.any"),
-             0x2AC96D507B1E48F3ULL, "morok.win.thide.fail.any");
+    foldEnforcedFlag(DB, State,
+                     DB.CreateICmpNE(failFinal, ConstantInt::get(i32, 0),
+                                     "morok.win.thide.fail.any"),
+                     0x2AC96D507B1E48F3ULL, "morok.win.thide.fail.any");
     DB.CreateRetVoid();
     return fn;
 }
@@ -11183,8 +11218,8 @@ Function *windowsAntiAttachProbe(Module &M, GlobalVariable *State,
         RB.CreateICmpSLT(breakStatus, ConstantInt::get(i32, 0),
                          "morok.win.attach.patch.ret.failed"),
         "morok.win.attach.patch.failed");
-    foldFlag(RB, State, patchFailed, 0xE57B1490C6A32D8FULL,
-             "morok.win.attach.patch.failed");
+    foldEnforcedFlag(RB, State, patchFailed, 0xE57B1490C6A32D8FULL,
+                     "morok.win.attach.patch.failed");
     RB.CreateBr(retBB);
 
     IRBuilder<> RetB(retBB);
@@ -11244,8 +11279,8 @@ Function *windowsKernelDebuggerProbe(Module &M, GlobalVariable *State,
               "morok.win.kdbg.shared.enabled.mix");
     foldState(B, State, kdNotPresent, rng.next(),
               "morok.win.kdbg.shared.not.present.mix");
-    foldFlag(B, State, sharedHit, 0xB1DE6A540C92F731ULL,
-             "morok.win.kdbg.shared");
+    foldEnforcedFlag(B, State, sharedHit, 0xB1DE6A540C92F731ULL,
+                     "morok.win.kdbg.shared");
 
     Value *peb = B.CreateCall(pebReader, {}, "morok.win.kdbg.peb");
     B.CreateCondBr(B.CreateICmpNE(peb, ConstantInt::get(ip, 0),
@@ -11309,8 +11344,8 @@ Function *windowsKernelDebuggerProbe(Module &M, GlobalVariable *State,
         "morok.win.kdbg.system.kd.hit");
     foldState(SB, State, kdStatus, rng.next(),
               "morok.win.kdbg.system.kd.status.mix");
-    foldFlag(SB, State, sysKdHit, 0x794A0FE2D51B36C8ULL,
-             "morok.win.kdbg.system.kd");
+    foldEnforcedFlag(SB, State, sysKdHit, 0x794A0FE2D51B36C8ULL,
+                     "morok.win.kdbg.system.kd");
 
     Value *moduleStatus = SB.CreateCall(
         qsiTy, qsiPtr,
@@ -11371,8 +11406,8 @@ Function *windowsKernelDebuggerProbe(Module &M, GlobalVariable *State,
         WB.CreateOr(WB.CreateICmpNE(w1, ConstantPointerNull::get(ptr)),
                     WB.CreateICmpNE(w2, ConstantPointerNull::get(ptr))),
         "morok.win.kdbg.window.hit");
-    foldFlag(WB, State, windowHit, 0xC52F6B9038D41EA7ULL,
-             "morok.win.kdbg.window");
+    foldEnforcedFlag(WB, State, windowHit, 0xC52F6B9038D41EA7ULL,
+                     "morok.win.kdbg.window");
     WB.CreateBr(retBB);
 
     IRBuilder<> RetB(retBB);
@@ -11539,9 +11574,11 @@ Function *windowsSyscallsProbe(Module &M, GlobalVariable *State,
         "morok.win.syscalls.kd.diverged");
     foldState(IB, State, qsiIndirect, rng.next(),
               "morok.win.syscalls.ntqsi.indirect.mix");
-    foldFlag(IB, State, IB.CreateOr(qsiStatusDiverged, qsiDataDiverged,
-                                    "morok.win.syscalls.ntqsi.diverged"),
-             0x38B2E1F46D0A9C57ULL, "morok.win.syscalls.ntqsi.divergence");
+    foldEnforcedFlag(
+        IB, State,
+        IB.CreateOr(qsiStatusDiverged, qsiDataDiverged,
+                    "morok.win.syscalls.ntqsi.diverged"),
+        0x38B2E1F46D0A9C57ULL, "morok.win.syscalls.ntqsi.divergence");
     IB.CreateBr(closeGateBB);
 
     IRBuilder<> CGB(closeGateBB);
@@ -11581,10 +11618,11 @@ Function *windowsSyscallsProbe(Module &M, GlobalVariable *State,
         closeIndirect, i32, "morok.win.syscalls.ntclose.indirect.i32");
     foldState(CIB, State, closeIndirect, rng.next(),
               "morok.win.syscalls.ntclose.indirect.mix");
-    foldFlag(CIB, State,
-             CIB.CreateICmpNE(closeDirectStatus, closeIndirectStatus,
-                              "morok.win.syscalls.ntclose.diverged"),
-             0xA65C04D3189BE72FULL, "morok.win.syscalls.ntclose.divergence");
+    foldEnforcedFlag(
+        CIB, State,
+        CIB.CreateICmpNE(closeDirectStatus, closeIndirectStatus,
+                         "morok.win.syscalls.ntclose.diverged"),
+        0xA65C04D3189BE72FULL, "morok.win.syscalls.ntclose.divergence");
     CIB.CreateBr(retBB);
 
     IRBuilder<> RetB(retBB);
@@ -11696,8 +11734,8 @@ Function *windowsUnhookProbe(Module &M, GlobalVariable *State,
         RB.CreateICmpSLT(kernelStatus, ConstantInt::get(i32, 0),
                          "morok.win.unhook.kernel32.failed"),
         "morok.win.unhook.failed");
-    foldFlag(RB, State, failed, 0x43D2BE581F09A76CULL,
-             "morok.win.unhook.failure");
+    foldEnforcedFlag(RB, State, failed, 0x43D2BE581F09A76CULL,
+                     "morok.win.unhook.failure");
     RB.CreateBr(retBB);
 
     IRBuilder<> RetB(retBB);
@@ -11832,10 +11870,10 @@ Function *windowsVehAuditProbe(Module &M, GlobalVariable *State,
               "morok.win.veh.audit.shifted.mix");
     foldState(AB, State, seenTotal, rng.next(),
               "morok.win.veh.seen.total.mix");
-    foldFlag(AB, State,
-             AB.CreateICmpNE(badTotal, ConstantInt::get(i32, 0),
-                             "morok.win.veh.bad.any"),
-             0xAE6D401E2B75893FULL, "morok.win.veh.foreign");
+    foldEnforcedFlag(AB, State,
+                     AB.CreateICmpNE(badTotal, ConstantInt::get(i32, 0),
+                                     "morok.win.veh.bad.any"),
+                     0xAE6D401E2B75893FULL, "morok.win.veh.foreign");
     AB.CreateBr(retBB);
 
     IRBuilder<> RetB(retBB);
@@ -11990,6 +12028,7 @@ bool antiDebuggingModule(Module &M) {
 bool timingOracleModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
     Function *ctor = makeCtorShell(M, "morok.timing");
+    antiDebugSeal(M, rng);
     GlobalVariable *state = timingOracleState(M, rng);
     Function *oracle = timingOracleProbe(M, state, rng, tt);
 
@@ -12013,6 +12052,7 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
     constexpr int kSigTrap = 5;
 
     Function *ctor = makeCtorShell(M, "morok.trap");
+    antiDebugSeal(M, rng);
     GlobalVariable *state = trapOracleState(M, rng);
     GlobalVariable *counter = trapHitCounter(M);
     Function *handler = trapSignalHandler(M, counter, state, tt);
@@ -12042,8 +12082,10 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
     auto *hits = B.CreateLoad(i32, counter, "morok.trap.hits.final");
     hits->setVolatile(true);
     foldState(B, state, hits, 0x91D0F736B52C48EAULL, "morok.trap.final");
-    foldFlag(B, state, B.CreateICmpULT(hits, ConstantInt::get(i32, expected)),
-             0xE2AB41739D08C6F5ULL, "morok.trap.missing");
+    Value *missing = B.CreateICmpULT(hits, ConstantInt::get(i32, expected),
+                                     "morok.trap.missing");
+    foldEnforcedFlag(B, state, missing, 0xE2AB41739D08C6F5ULL,
+                     "morok.trap.missing");
     if (useLinuxX86SiginfoTrapHandler(tt)) {
         constexpr int kSigIll = 4;
         B.CreateCall(sigactionFn,
@@ -12064,6 +12106,7 @@ bool trapOracleModule(Module &M, ir::IRRandom &rng) {
 
 bool pageFaultTlbOracleModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = pageFaultTlbState(M, rng);
     Function *oracle = pageFaultTlbProbe(M, state, rng, tt);
     if (!oracle)
@@ -12081,6 +12124,7 @@ bool cacheTimingOracleModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
     if (intPtrTy(M)->getBitWidth() != 64)
         return false;
+    antiDebugSeal(M, rng);
     constexpr std::uint32_t kMaxTargets = 16;
     std::vector<Function *> targets;
     targets.reserve(kMaxTargets);
@@ -12108,6 +12152,7 @@ bool cacheTimingOracleModule(Module &M, ir::IRRandom &rng) {
 
 bool microarchitecturalCanaryModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = microCanaryState(M, rng);
     Function *oracle = microarchitecturalCanaryProbe(M, state, rng, tt);
     if (!oracle)
@@ -12139,6 +12184,7 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     functionMacTargetTable(M, prologueTargets);
 
     Function *ctor = makeCtorShell(M, "morok.antihook");
+    antiDebugSeal(M, rng);
     GlobalVariable *state = antiHookState(M, rng);
     IRBuilder<> B(&ctor->getEntryBlock());
     AllocaInst *corroboration =
@@ -12165,8 +12211,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                            "morok.corroborate.got.changed");
         incrementDiff(B, corroboration, changed, "morok.corroborate.got");
         foldState(B, state, diff, 0xF93A8B7C62D514E1ULL, "morok.antihook.got");
-        foldFlag(B, state, changed, 0xB17D4E23C9A5806FULL,
-                 "morok.antihook.got.changed");
+        foldEnforcedFlag(B, state, changed, 0xB17D4E23C9A5806FULL,
+                         "morok.antihook.got.changed");
     }
     if (Function *fixups = darwinFixupProbe(M, tt)) {
         Value *diff = B.CreateCall(fixups, {}, "morok.antihook.fixup.diff");
@@ -12190,8 +12236,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldState(B, state, diff, 0x6B4E9D718C2A35F0ULL,
                   "morok.antihook.census");
         changed->setName("morok.negative.modules.extra");
-        foldFlag(B, state, changed,
-                 0xA7815E3C49D206BFULL, "morok.antihook.census.changed");
+        foldFlag(B, state, changed, 0xA7815E3C49D206BFULL,
+                 "morok.antihook.census.changed");
         foldFlag(B, state, changed, 0xB2E746D9108CA53FULL,
                  "morok.negative.modules.extra");
     }
@@ -12203,8 +12249,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         incrementDiff(B, corroboration, changed, "morok.corroborate.wxorx");
         foldState(B, state, diff, 0x14E2B7C95A680D3FULL,
                   "morok.antihook.wxorx");
-        foldFlag(B, state, changed, 0xD8F31C6A4B927E50ULL,
-                 "morok.antihook.wxorx.changed");
+        foldEnforcedFlag(B, state, changed, 0xD8F31C6A4B927E50ULL,
+                         "morok.antihook.wxorx.changed");
     }
     if (Function *diverge = methodDivergenceProbe(M, tt)) {
         Value *diff =
@@ -12215,8 +12261,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         incrementDiff(B, corroboration, changed, "morok.corroborate.diverge");
         foldState(B, state, diff, 0x2F8D6C1E9A7453B0ULL,
                   "morok.antihook.diverge");
-        foldFlag(B, state, changed, 0xC58E90A37B42D16FULL,
-                 "morok.antihook.diverge.changed");
+        foldEnforcedFlag(B, state, changed, 0xC58E90A37B42D16FULL,
+                         "morok.antihook.diverge.changed");
     }
     if (Function *sandbox = sandboxHeuristicProbe(M, tt)) {
         Value *score =
@@ -12227,8 +12273,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         incrementDiff(B, corroboration, changed, "morok.corroborate.sandbox");
         foldState(B, state, score, 0x9A01C7E52D63B48FULL,
                   "morok.antihook.sandbox");
-        foldFlag(B, state, changed, 0x4E87A61D39C205B3ULL,
-                 "morok.antihook.sandbox.changed");
+        foldEnforcedFlag(B, state, changed, 0x4E87A61D39C205B3ULL,
+                         "morok.antihook.sandbox.changed");
     }
     if (Function *smc = dbiSmcTripwireProbe(M, tt)) {
         Value *diff = B.CreateCall(smc, {}, "morok.antihook.dbi.smc.diff");
@@ -12238,8 +12284,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         incrementDiff(B, corroboration, changed, "morok.corroborate.dbi.smc");
         foldState(B, state, diff, 0xE62D41B98A3F570CULL,
                   "morok.antihook.dbi.smc");
-        foldFlag(B, state, changed, 0x73B5D02E6C49A18FULL,
-                 "morok.antihook.dbi.smc.changed");
+        foldEnforcedFlag(B, state, changed, 0x73B5D02E6C49A18FULL,
+                         "morok.antihook.dbi.smc.changed");
     }
     if (Function *schro = schrodingerPageProbe(M, state, rng, tt)) {
         Value *diff = B.CreateCall(schro, {}, "morok.antihook.schro.diff");
@@ -12272,8 +12318,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         incrementDiff(B, corroboration, changed, "morok.corroborate.dbi");
         foldState(B, state, diff, 0x1B89E4C76F20DA53ULL,
                   "morok.antihook.dbi");
-        foldFlag(B, state, changed, 0xF4A7812C39D60E5BULL,
-                 "morok.antihook.dbi.changed");
+        foldEnforcedFlag(B, state, changed, 0xF4A7812C39D60E5BULL,
+                         "morok.antihook.dbi.changed");
     }
     if (Function *negativeTiming = negativeTimingProbe(M, rng, tt)) {
         Value *diff =
@@ -12285,8 +12331,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                       "morok.corroborate.negative.timing");
         foldState(B, state, diff, 0x4D91C2A8F76E350BULL,
                   "morok.negative.timing");
-        foldFlag(B, state, changed, 0x8A6357D1C49E20BFULL,
-                 "morok.negative.timing.changed");
+        foldEnforcedFlag(B, state, changed, 0x8A6357D1C49E20BFULL,
+                         "morok.negative.timing.changed");
     }
     insertStackOriginChecks(M, stackOriginCheck(M), state, prologueTargets, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);
@@ -12384,6 +12430,7 @@ bool antiClassDumpModule(Module &M) {
 
 bool windowsPeFoundationModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsPeFoundationProbe(M, state, rng, tt);
     if (!probe)
@@ -12399,6 +12446,7 @@ bool windowsPeFoundationModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsPebHeapDebugModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsPebHeapDebugProbe(M, state, rng, tt);
     if (!probe)
@@ -12414,6 +12462,7 @@ bool windowsPebHeapDebugModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsDebugObjectModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsDebugObjectProbe(M, state, rng, tt);
     if (!probe)
@@ -12429,6 +12478,7 @@ bool windowsDebugObjectModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsThreadHideModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsThreadHideProbe(M, state, rng, tt);
     if (!probe)
@@ -12444,6 +12494,7 @@ bool windowsThreadHideModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsAntiAttachModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsAntiAttachProbe(M, state, rng, tt);
     if (!probe)
@@ -12459,6 +12510,7 @@ bool windowsAntiAttachModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsKernelDebuggerModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsKernelDebuggerProbe(M, state, rng, tt);
     if (!probe)
@@ -12474,6 +12526,7 @@ bool windowsKernelDebuggerModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsSyscallsModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsSyscallsProbe(M, state, rng, tt);
     if (!probe)
@@ -12489,6 +12542,7 @@ bool windowsSyscallsModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsUnhookModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsUnhookProbe(M, state, rng, tt);
     if (!probe)
@@ -12504,6 +12558,7 @@ bool windowsUnhookModule(Module &M, ir::IRRandom &rng) {
 
 bool windowsVehAuditModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
+    antiDebugSeal(M, rng);
     GlobalVariable *state = windowsPeState(M, rng);
     Function *probe = windowsVehAuditProbe(M, state, rng, tt);
     if (!probe)
