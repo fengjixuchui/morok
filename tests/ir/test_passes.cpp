@@ -12683,12 +12683,14 @@ entry:
     CHECK(Memfd->arg_size() == 3);
     CHECK(M->getFunction("morok.watchdog") != nullptr);
     CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
+    Function *AntiDbg = M->getFunction("morok.antidbg");
+    REQUIRE(AntiDbg != nullptr);
     CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(hasInlineAsmCall(*Memfd));
-    CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg")));
+    CHECK(hasInlineAsmCall(*AntiDbg));
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.status")));
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.stat4")));
     CHECK(hasInlineAsmCall(*Watch));
@@ -12741,10 +12743,30 @@ entry:
                                         "morok.watchdog.crypto") >= 1u);
     CHECK(countMonotonicAtomicStoresTo(*HeartbeatWatch,
                                        "morok.watchdog.crypto") >= 1u);
-    CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
-                                 "morok.antidbg.dr.fork") >= 1u);
-    CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
-                                 "morok.antidbg.ptrace.init") == 0u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.fork") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.dr.child.dumpable") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.dr.child.ptracer") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.dr.child.no_new_privs") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.ptrace.init") == 0u);
+    BasicBlock *DrChild = nullptr;
+    for (BasicBlock &BB : *AntiDbg)
+        if (BB.getName() == "morok.antidbg.dr.child")
+            DrChild = &BB;
+    REQUIRE(DrChild != nullptr);
+    std::size_t childHardening = 0;
+    bool childCallsHelperAfterHardening = false;
+    for (Instruction &I : *DrChild) {
+        if (I.getName().starts_with("morok.antidbg.dr.child."))
+            ++childHardening;
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            if (CI->getCalledFunction() == Sentinel && childHardening >= 3u)
+                childCallsHelperAfterHardening = true;
+    }
+    CHECK(childHardening >= 3u);
+    CHECK(childCallsHelperAfterHardening);
     CHECK(M->getFunction("pthread_create") != nullptr);
     CHECK(M->getFunction("pthread_detach") != nullptr);
     CHECK(M->getFunction("open") == nullptr);

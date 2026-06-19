@@ -1958,6 +1958,13 @@ bool emitLinuxDrSentinelStart(IRBuilder<> &B, Module &M, GlobalVariable *State,
                    parentBB);
 
     IRBuilder<> ChildB(childBB);
+    Value *childDumpable = emitLinuxPrctl(ChildB, M, TT, 4, 0, 0, 0, 0);
+    childDumpable->setName("morok.antidbg.dr.child.dumpable");
+    Value *childPtracer =
+        emitLinuxPrctl(ChildB, M, TT, 0x59616D61, 0, 0, 0, 0);
+    childPtracer->setName("morok.antidbg.dr.child.ptracer");
+    Value *childNoNewPrivs = emitLinuxPrctl(ChildB, M, TT, 38, 1, 0, 0, 0);
+    childNoNewPrivs->setName("morok.antidbg.dr.child.no_new_privs");
     ChildB.CreateCall(helper->getFunctionType(), helper, {});
     emitLinuxSyscall(ChildB, M, TT, exitNr, {ConstantInt::get(ip, 0)});
     ChildB.CreateUnreachable();
