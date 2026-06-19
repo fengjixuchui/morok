@@ -421,12 +421,12 @@ void emitInit(Module &M, Function *Dispatcher, ArrayRef<Site> Sites,
             B.CreateBr(SealedBB);
 
             Builder SB(SealedBB);
-            Value *Poison = SB.CreateXor(
-                Existing,
-                SB.CreateXor(SealState,
-                             ConstantInt::get(I64, 0xC1D64E5B8A17F239ULL),
+            Value *PoisonDelta = SB.CreateOr(
+                SB.CreateXor(SealState, ExpectedSeal,
                              "morok.ckd.enc.poison.mix"),
-                "morok.ckd.enc.poison");
+                ConstantInt::get(I64, 1), "morok.ckd.enc.poison.delta");
+            Value *Poison =
+                SB.CreateAdd(Existing, PoisonDelta, "morok.ckd.enc.poison");
             Value *SealedEncoded = SB.CreateSelect(
                 ValidSealed, Existing, Poison, "morok.ckd.target.sealed");
             auto *Store = SB.CreateStore(SealedEncoded, S.encoded,
@@ -456,12 +456,13 @@ void emitInit(Module &M, Function *Dispatcher, ArrayRef<Site> Sites,
         FB.CreateBr(StoreBB);
 
         Builder SB(SealedBB);
-        Value *Poison = SB.CreateXor(
-            Existing,
-            SB.CreateXor(SealState,
-                         ConstantInt::get(I64, 0xC1D64E5B8A17F239ULL),
-                         "morok.ckd.seal.bad.mix"),
-            "morok.ckd.seal.bad");
+        Value *PoisonDelta =
+            SB.CreateOr(SB.CreateXor(SealState, ExpectedSeal,
+                                     "morok.ckd.seal.bad.mix"),
+                        ConstantInt::get(I64, 1),
+                        "morok.ckd.seal.bad.delta");
+        Value *Poison =
+            SB.CreateAdd(Existing, PoisonDelta, "morok.ckd.seal.bad");
         Value *SealedEncoded = SB.CreateSelect(ValidSealed, Existing, Poison,
                                                "morok.ckd.target.sealed");
         SB.CreateBr(StoreBB);

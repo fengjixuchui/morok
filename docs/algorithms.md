@@ -841,7 +841,9 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   from the retained manifest.  At startup, a sealed site only accepts the
   existing encoded value when the code-size and seal-state word agree; resetting
   the mutable code-size slot back to the unsealed sentinel no longer re-enables
-  live-byte self-sealing.
+  live-byte self-sealing.  Invalid seal-state observations corrupt the retained
+  encoded value with a per-site nonzero delta derived from the expected seal, so
+  no single seal-state word can neutralize fail-closed poisoning.
 
 ## Shamir threshold sharing — `core/ShamirGf256` / `core/Galois8`
 - The pure core implements GF(2^8) polynomial evaluation, `(k,n)` splitting,

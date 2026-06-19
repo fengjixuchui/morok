@@ -195,6 +195,15 @@ std::size_t countNamedInstructions(Function &F, StringRef prefix) {
     return n;
 }
 
+std::size_t countNamedInstructionsWithOpcode(Function &F, StringRef prefix,
+                                             unsigned opcode) {
+    std::size_t n = 0;
+    for (Instruction &I : instructions(F))
+        if (I.getName().starts_with(prefix) && I.getOpcode() == opcode)
+            ++n;
+    return n;
+}
+
 void checkSealEnforcement(Module &M, Function &F) {
     CHECK(M.getGlobalVariable("morok.seal.root.anti_debug", true) != nullptr);
     CHECK(countNamedInstructions(F, "morok.seal.fold.anti_debug.trip") >= 1u);
@@ -11713,6 +11722,10 @@ entry:
         CHECK(countNamedInstructions(*Init, "morok.ckd.byte") == 0u);
         CHECK(countNamedInstructions(*Init, "morok.ckd.target.enc") == 0u);
         CHECK(countNamedInstructions(*Init, "morok.ckd.enc.poison") >= 1u);
+        CHECK(countNamedInstructionsWithOpcode(
+                  *Init, "morok.ckd.enc.poison", Instruction::Add) >= 1u);
+        CHECK(countNamedInstructionsWithOpcode(
+                  *Init, "morok.ckd.enc.poison.delta", Instruction::Or) >= 1u);
         // The dispatch-site decode still hashes the live bytes, so a patched
         // caller region still decodes a wrong target.
         CHECK(countNamedInstructions(*Caller, "morok.ckd.byte") >= 1u);
@@ -11739,6 +11752,10 @@ entry:
         CHECK(countNamedInstructions(*Init, "morok.ckd.byte") >= 1u);
         CHECK(countNamedInstructions(*Init, "morok.ckd.target.enc") >= 1u);
         CHECK(countNamedInstructions(*Init, "morok.ckd.enc.poison") == 0u);
+        CHECK(countNamedInstructionsWithOpcode(*Init, "morok.ckd.seal.bad",
+                                               Instruction::Add) >= 1u);
+        CHECK(countNamedInstructionsWithOpcode(
+                  *Init, "morok.ckd.seal.bad.delta", Instruction::Or) >= 1u);
         CHECK_FALSE(verifyModule(*M, &errs()));
     }
 }
