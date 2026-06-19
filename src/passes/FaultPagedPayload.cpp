@@ -7,8 +7,9 @@
 // VM bytecode delivery that keeps only one encrypted page materialized.  The VM
 // helpers produced by Virtualization.cpp read morok.vm.bytecode.* through
 // volatile i8 loads.  This pass replaces those loads with a per-payload accessor
-// that decrypts only the touched page into a fixed-size cache, clears the cache
-// on page switches, and leaves the original bytecode global encrypted.
+// that decrypts only the touched page into a per-thread fixed-size cache,
+// clears the cache on page switches, and leaves the original bytecode global
+// encrypted.
 
 #include "morok/passes/FaultPagedPayload.hpp"
 
@@ -262,6 +263,11 @@ GlobalVariable *createI64State(Module &M, StringRef Name,
                                   GlobalValue::PrivateLinkage,
                                   ConstantInt::get(I64, Initial), Name.str());
     GV->setAlignment(Align(8));
+    return GV;
+}
+
+GlobalVariable *makeThreadLocal(GlobalVariable *GV) {
+    GV->setThreadLocalMode(GlobalVariable::GeneralDynamicTLSModel);
     return GV;
 }
 
@@ -574,14 +580,14 @@ bool protectPayload(Module &M, Payload &P,
     if (GlobalVariable *Decoy =
             createDecoys(M, P.suffix, Params.decoy_pages, PageSize, Rng))
         Retained.push_back(Decoy);
-    GlobalVariable *Cache =
-        createZeroArray(M, PageSize, "morok.fpp.page.cache." + P.suffix);
-    GlobalVariable *Loaded =
-        createZeroArray(M, PageCount, "morok.fpp.page.loaded." + P.suffix);
-    GlobalVariable *Active =
-        createI32State(M, "morok.fpp.page.active." + P.suffix, kInvalidPage);
-    GlobalVariable *Faults =
-        createI64State(M, "morok.fpp.fault.count." + P.suffix, 0);
+    GlobalVariable *Cache = makeThreadLocal(
+        createZeroArray(M, PageSize, "morok.fpp.page.cache." + P.suffix));
+    GlobalVariable *Loaded = makeThreadLocal(
+        createZeroArray(M, PageCount, "morok.fpp.page.loaded." + P.suffix));
+    GlobalVariable *Active = makeThreadLocal(createI32State(
+        M, "morok.fpp.page.active." + P.suffix, kInvalidPage));
+    GlobalVariable *Faults = makeThreadLocal(
+        createI64State(M, "morok.fpp.fault.count." + P.suffix, 0));
     Function *Accessor = createAccessor(M, P, Params, PageSize, PageCount, S,
                                         Cache, Loaded, Active, Faults);
     appendToUsed(M, Retained);

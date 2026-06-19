@@ -8218,10 +8218,23 @@ entry:
 
     GlobalVariable *Cache =
         M->getGlobalVariable("morok.fpp.page.cache.vm_secret", true);
+    GlobalVariable *Loaded =
+        M->getGlobalVariable("morok.fpp.page.loaded.vm_secret", true);
+    GlobalVariable *Active =
+        M->getGlobalVariable("morok.fpp.page.active.vm_secret", true);
+    GlobalVariable *Faults =
+        M->getGlobalVariable("morok.fpp.fault.count.vm_secret", true);
     REQUIRE(Cache);
+    REQUIRE(Loaded);
+    REQUIRE(Active);
+    REQUIRE(Faults);
     auto *CacheTy = dyn_cast<ArrayType>(Cache->getValueType());
     REQUIRE(CacheTy);
     CHECK(CacheTy->getNumElements() == 16u);
+    CHECK(Cache->isThreadLocal());
+    CHECK(Loaded->isThreadLocal());
+    CHECK(Active->isThreadLocal());
+    CHECK(Faults->isThreadLocal());
     CHECK(maxStaticAllocaArrayBytes(*Accessor, "morok.fpp") == 0u);
     CHECK(countGlobals(*M, "morok.fpp.page.loaded.vm_secret") == 1u);
     CHECK(countGlobals(*M, "morok.fpp.page.active.vm_secret") == 1u);
