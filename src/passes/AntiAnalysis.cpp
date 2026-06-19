@@ -6098,12 +6098,20 @@ Function *dbiSmcTripwireProbe(Module &M, const Triple &TT) {
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
     auto *hotBB = BasicBlock::Create(ctx, "hot", fn);
+    auto *writeBB = BasicBlock::Create(ctx, "write", fn);
     auto *retBB = BasicBlock::Create(ctx, "ret", fn);
 
     IRBuilder<> B(entry);
     AllocaInst *diff = B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.smc.diff");
     B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
-    auto *gate = B.CreateLoad(i8, dbiSmcGate(M), "morok.antihook.dbi.smc.load");
+    GlobalVariable *smcGate = dbiSmcGate(M);
+    Value *gateSeed =
+        B.CreatePtrToInt(target, ip, "morok.antihook.dbi.smc.gate.seed");
+    Value *gateArm = B.CreateOr(
+        B.CreateTrunc(gateSeed, i8, "morok.antihook.dbi.smc.gate.seed8"),
+        ConstantInt::get(i8, 1), "morok.antihook.dbi.smc.gate.arm");
+    B.CreateStore(gateArm, smcGate)->setVolatile(true);
+    auto *gate = B.CreateLoad(i8, smcGate, "morok.antihook.dbi.smc.load");
     gate->setVolatile(true);
     B.CreateCondBr(B.CreateICmpNE(gate, ConstantInt::get(i8, 0),
                                   "morok.antihook.dbi.smc.armed"),
@@ -6114,52 +6122,62 @@ Function *dbiSmcTripwireProbe(Module &M, const Triple &TT) {
     Value *page = HB.CreateAnd(targetAddr, ConstantInt::get(ip, ~0xfffULL),
                                "morok.antihook.dbi.smc.page");
     Value *codePtr = HB.CreateIntToPtr(targetAddr, ptr, "morok.antihook.dbi.smc.ptr");
+    Value *protectOk = ConstantInt::getTrue(ctx);
     if (TT.isOSLinux()) {
         Value *rc = emitLinuxMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
                                       ConstantInt::get(i32, 7));
         rc->setName("morok.antihook.dbi.smc.mprotect.rwx");
+        protectOk = HB.CreateICmpEQ(rc, ConstantInt::get(i32, 0),
+                                    "morok.antihook.dbi.smc.rwx.ok");
     } else if (TT.isOSDarwin()) {
         Value *rc = emitDarwinMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
                                        ConstantInt::get(i32, 7));
         rc->setName("morok.antihook.dbi.smc.mprotect.rwx");
+        protectOk = HB.CreateICmpEQ(rc, ConstantInt::get(i32, 0),
+                                    "morok.antihook.dbi.smc.rwx.ok");
     } else if (TT.isOSWindows()) {
         auto *oldProt = HB.CreateAlloca(i32, nullptr, "morok.antihook.dbi.smc.old");
         FunctionCallee virtualProtect = M.getOrInsertFunction(
             "VirtualProtect", FunctionType::get(i32, {ptr, ip, i32, ptr}, false));
-        HB.CreateCall(virtualProtect,
-                      {HB.CreateIntToPtr(page, ptr), ConstantInt::get(ip, 4096),
-                       ConstantInt::get(i32, 0x40), oldProt},
-                      "morok.antihook.dbi.smc.virtualprotect.rwx");
+        Value *rc = HB.CreateCall(
+            virtualProtect,
+            {HB.CreateIntToPtr(page, ptr), ConstantInt::get(ip, 4096),
+             ConstantInt::get(i32, 0x40), oldProt},
+            "morok.antihook.dbi.smc.virtualprotect.rwx");
+        protectOk = HB.CreateICmpNE(rc, ConstantInt::get(i32, 0),
+                                    "morok.antihook.dbi.smc.rwx.ok");
     }
+    HB.CreateCondBr(protectOk, writeBB, retBB);
 
-    auto *oldByte = HB.CreateLoad(i8, codePtr, "morok.antihook.dbi.smc.byte");
+    IRBuilder<> WB(writeBB);
+    auto *oldByte = WB.CreateLoad(i8, codePtr, "morok.antihook.dbi.smc.byte");
     oldByte->setVolatile(true);
-    auto *touch = HB.CreateStore(oldByte, codePtr);
+    auto *touch = WB.CreateStore(oldByte, codePtr);
     touch->setVolatile(true);
     if (TT.isOSLinux()) {
-        Value *rc = emitLinuxMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
+        Value *rc = emitLinuxMprotect(WB, M, TT, page, ConstantInt::get(ip, 4096),
                                       ConstantInt::get(i32, 5));
         rc->setName("morok.antihook.dbi.smc.mprotect.rx");
     } else if (TT.isOSDarwin()) {
-        Value *rc = emitDarwinMprotect(HB, M, TT, page, ConstantInt::get(ip, 4096),
+        Value *rc = emitDarwinMprotect(WB, M, TT, page, ConstantInt::get(ip, 4096),
                                        ConstantInt::get(i32, 5));
         rc->setName("morok.antihook.dbi.smc.mprotect.rx");
     } else if (TT.isOSWindows()) {
         auto *oldProt2 =
-            HB.CreateAlloca(i32, nullptr, "morok.antihook.dbi.smc.old2");
+            WB.CreateAlloca(i32, nullptr, "morok.antihook.dbi.smc.old2");
         FunctionCallee virtualProtect = M.getOrInsertFunction(
             "VirtualProtect", FunctionType::get(i32, {ptr, ip, i32, ptr}, false));
-        HB.CreateCall(virtualProtect,
-                      {HB.CreateIntToPtr(page, ptr), ConstantInt::get(ip, 4096),
+        WB.CreateCall(virtualProtect,
+                      {WB.CreateIntToPtr(page, ptr), ConstantInt::get(ip, 4096),
                        ConstantInt::get(i32, 0x20), oldProt2},
                       "morok.antihook.dbi.smc.virtualprotect.rx");
     }
-    Value *result = HB.CreateCall(target, {}, "morok.antihook.dbi.smc.result");
-    incrementDiff(HB, diff,
-                  HB.CreateICmpNE(result, ConstantInt::get(i32, 0x13579BDFu),
+    Value *result = WB.CreateCall(target, {}, "morok.antihook.dbi.smc.result");
+    incrementDiff(WB, diff,
+                  WB.CreateICmpNE(result, ConstantInt::get(i32, 0x13579BDFu),
                                   "morok.antihook.dbi.smc.trip"),
                   "morok.antihook.dbi.smc.trip");
-    HB.CreateBr(retBB);
+    WB.CreateBr(retBB);
 
     IRBuilder<> RB(retBB);
     emitRetDiff(RB, diff);

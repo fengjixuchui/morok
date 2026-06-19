@@ -12350,6 +12350,9 @@ entry:
     }
     CHECK(M->getGlobalVariable("morok.antihook.state", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.mac.targets", true) != nullptr);
+    GlobalVariable *SmcGate =
+        M->getGlobalVariable("morok.antihook.dbi.smc.gate", true);
+    REQUIRE(SmcGate != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.schro.page", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.schro.armed", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.schro.old.segv", true) !=
@@ -12423,6 +12426,15 @@ entry:
     CHECK(countNamedInstructions(*Dbi, "morok.antihook.dbi.maps.sig") >= 1u);
     CHECK(countNamedInstructions(*Dbi, "morok.antihook.dbi.thread.sig") >= 1u);
     CHECK(countNamedInstructions(*Dbi, "morok.antihook.dbi.port.sig0") >= 1u);
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.gate.arm") >=
+          1u);
+    std::size_t smcGateStores = 0;
+    for (User *U : SmcGate->users())
+        if (auto *SI = dyn_cast<StoreInst>(U))
+            if (SI->isVolatile() && SI->getPointerOperand() == SmcGate)
+                ++smcGateStores;
+    CHECK(smcGateStores >= 1u);
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.rwx.ok") >= 1u);
     CHECK(countNamedInstructions(*Smc,
                                  "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
