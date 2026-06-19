@@ -12944,6 +12944,26 @@ entry:
     CHECK(hasInlineAsmCall(*Watch));
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.readlink") >=
           1u);
+    CHECK(hasNamedIcmpWithConstant(*Memfd,
+                                   "morok.antidbg.memfd.prefix.enough", 7u));
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.prefix.ch") ==
+          7u);
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
+                                   '/'));
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
+                                   'm'));
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
+                                   'e'));
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
+                                   'f'));
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
+                                   'd'));
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
+                                   ':'));
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.idx") == 0u);
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.range") ==
+          0u);
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.next") == 0u);
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.create") >= 1u);
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.execveat") >=
           1u);

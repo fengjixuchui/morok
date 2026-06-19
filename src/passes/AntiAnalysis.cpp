@@ -1104,10 +1104,8 @@ void emitLinuxMemfdReexecCtor(Module &M, ir::IRRandom &rng, const Triple &TT) {
     envp->setName("envp");
 
     auto *entry = &fn->getEntryBlock();
-    auto *scanInitBB = BasicBlock::Create(ctx, "scan.init", fn);
-    auto *scanBB = BasicBlock::Create(ctx, "scan", fn);
-    auto *scanBodyBB = BasicBlock::Create(ctx, "scan.body", fn);
-    auto *scanNextBB = BasicBlock::Create(ctx, "scan.next", fn);
+    auto *prefixInitBB = BasicBlock::Create(ctx, "prefix.init", fn);
+    auto *prefixBodyBB = BasicBlock::Create(ctx, "prefix.body", fn);
     auto *openBB = BasicBlock::Create(ctx, "open", fn);
     auto *memfdBB = BasicBlock::Create(ctx, "memfd", fn);
     auto *copyBB = BasicBlock::Create(ctx, "copy", fn);
@@ -1164,40 +1162,29 @@ void emitLinuxMemfdReexecCtor(Module &M, ir::IRRandom &rng, const Triple &TT) {
         B.CreateICmpSGT(pathLen, ConstantInt::get(ip, 0)),
         B.CreateICmpULT(pathLen, ConstantInt::get(ip, kBufBytes - 1)),
         "morok.antidbg.memfd.path.ok");
-    B.CreateCondBr(pathOk, scanInitBB, retBB);
+    B.CreateCondBr(pathOk, prefixInitBB, retBB);
 
-    IRBuilder<> SIB(scanInitBB);
-    Value *scanEnough = SIB.CreateICmpUGE(
-        pathLen, ConstantInt::get(ip, 6), "morok.antidbg.memfd.scan.enough");
-    SIB.CreateCondBr(scanEnough, scanBB, openBB);
-
-    IRBuilder<> SB(scanBB);
-    auto *scanIdx = SB.CreatePHI(ip, 2, "morok.antidbg.memfd.scan.idx");
-    scanIdx->addIncoming(ConstantInt::get(ip, 0), scanInitBB);
-    Value *last = SB.CreateSub(pathLen, ConstantInt::get(ip, 6),
-                               "morok.antidbg.memfd.scan.last");
-    Value *scanRange =
-        SB.CreateICmpULE(scanIdx, last, "morok.antidbg.memfd.scan.range");
-    SB.CreateCondBr(scanRange, scanBodyBB, openBB);
-
-    IRBuilder<> SBB(scanBodyBB);
-    constexpr std::array<unsigned char, 6> marker = {'m', 'e', 'm',
+    IRBuilder<> PIB(prefixInitBB);
+    constexpr std::array<unsigned char, 7> marker = {'/', 'm', 'e', 'm',
                                                      'f', 'd', ':'};
+    Value *prefixEnough = PIB.CreateICmpUGE(
+        pathLen, ConstantInt::get(ip, marker.size()),
+        "morok.antidbg.memfd.prefix.enough");
+    PIB.CreateCondBr(prefixEnough, prefixBodyBB, openBB);
+
+    IRBuilder<> PBB(prefixBodyBB);
     Value *match = ConstantInt::get(i1, true);
     for (std::uint32_t i = 0; i < marker.size(); ++i) {
-        Value *off = SBB.CreateAdd(scanIdx, ConstantInt::get(ip, i));
-        Value *ch = SBB.CreateLoad(i8, gepI8(SBB, M, pathBuf, off,
-                                             "morok.antidbg.memfd.scan.ch"));
-        Value *eq = SBB.CreateICmpEQ(ch, ConstantInt::get(i8, marker[i]));
-        match = SBB.CreateAnd(match, eq);
+        Value *off = ConstantInt::get(ip, i);
+        Value *ch = PBB.CreateLoad(i8, gepI8(PBB, M, pathBuf, off,
+                                             "morok.antidbg.memfd.prefix.ch"));
+        Value *eq = PBB.CreateICmpEQ(
+            ch, ConstantInt::get(i8, marker[i]),
+            "morok.antidbg.memfd.prefix.eq");
+        match = PBB.CreateAnd(match, eq,
+                              "morok.antidbg.memfd.prefix.match");
     }
-    SBB.CreateCondBr(match, retBB, scanNextBB);
-
-    IRBuilder<> SNB(scanNextBB);
-    Value *scanNext = SNB.CreateAdd(scanIdx, ConstantInt::get(ip, 1),
-                                    "morok.antidbg.memfd.scan.next");
-    SNB.CreateBr(scanBB);
-    scanIdx->addIncoming(scanNext, scanNextBB);
+    PBB.CreateCondBr(match, retBB, openBB);
 
     IRBuilder<> OB(openBB);
     OB.CreateStore(ConstantInt::get(i8, 0),
