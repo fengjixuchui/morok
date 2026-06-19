@@ -996,9 +996,17 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
     // Nanomites consume the branch shape that survives all per-function CFG
     // passes.  Keep them late so their trap sites are not restructured away.
+    //
+    // These late module-pass gates measure USER code only (measureUserModule):
+    // string encryption runs earlier and can emit thousands of generated
+    // `morok.strdec` decryptor functions, and counting those against the
+    // module-function budget would push a string-heavy-but-otherwise-small
+    // module past the limit and silently drop these configured protections on
+    // the actual user code (#40).  The clone budgets below stay on measureModule
+    // because a whole-module clone really does copy the helpers too.
     if (InitialModuleGrowthOk &&
         config_.passes.nanomites.enabled.value_or(false) &&
-        moduleGrowthOk(measureModule(M))) {
+        moduleGrowthOk(measureUserModule(M))) {
         passes::NanomiteParams p;
         p.probability = config_.passes.nanomites.probability.value_or(35);
         p.max_sites = config_.passes.nanomites.max_sites.value_or(16);
@@ -1031,7 +1039,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // scalar fragments outlined into shared noinline helpers.
     if (InitialModuleGrowthOk &&
         config_.passes.adversarial_merge.enabled.value_or(false) &&
-        moduleGrowthOk(measureModule(M))) {
+        moduleGrowthOk(measureUserModule(M))) {
         passes::AdversarialMergeParams p;
         p.probability =
             config_.passes.adversarial_merge.probability.value_or(25);
@@ -1051,7 +1059,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // `morok.wrap` callees for this pass to skip.
     if (InitialModuleGrowthOk &&
         config_.passes.caller_keyed_dispatch.enabled.value_or(false) &&
-        moduleGrowthOk(measureModule(M))) {
+        moduleGrowthOk(measureUserModule(M))) {
         passes::CallerKeyedDispatchParams p;
         p.probability =
             config_.passes.caller_keyed_dispatch.probability.value_or(100);
@@ -1077,7 +1085,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // neutral volatile return anchors after every other configured transform.
     if (InitialModuleGrowthOk &&
         config_.passes.per_build_polymorphism.enabled.value_or(false) &&
-        moduleGrowthOk(measureModule(M))) {
+        moduleGrowthOk(measureUserModule(M))) {
         passes::PerBuildPolymorphismParams p;
         p.function_order =
             config_.passes.per_build_polymorphism.function_order.value_or(true);

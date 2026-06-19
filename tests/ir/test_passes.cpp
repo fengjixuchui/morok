@@ -741,6 +741,42 @@ TEST_CASE("MorokPass stops per-function growth on oversized modules") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #40: string encryption emits one generated morok.strdec
+// decryptor per string (here >1500, past kModuleGrowthFunctionLimit).  Those
+// generated helpers must NOT consume the module-function budget that gates the
+// late module passes, or a string-heavy-but-otherwise-small module would
+// silently drop configured protections on the actual user code.  Here the late
+// adversarial-merge pass must still run on the two user functions.
+TEST_CASE("MorokPass keeps late module passes on string-heavy modules") {
+    LLVMContext ctx;
+    auto M = std::make_unique<Module>("string-heavy", ctx);
+    for (unsigned I = 0; I < 1600; ++I)
+        makePrivateString(*M, (Twine("s") + Twine(I)).str(),
+                          (Twine("payload") + Twine(I)).str());
+    makeTinyAddFunction(*M, "user_a");
+    makeTinyAddFunction(*M, "user_b");
+
+    morok::config::Config cfg;
+    cfg.seed = 4001;
+    cfg.passes.str_enc.enabled = true;
+    cfg.passes.str_enc.probability = 100;
+    cfg.passes.adversarial_merge.enabled = true;
+    cfg.passes.adversarial_merge.probability = 100;
+    cfg.passes.adversarial_merge.max_groups = 1;
+    cfg.passes.adversarial_merge.max_functions = 2;
+
+    ModuleAnalysisManager AM;
+    morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+    // Encryption created a flood of decryptor functions (> the module-function
+    // budget) ...
+    CHECK(countFunctions(*M, "morok.strdec") > 1500u);
+    // ... yet the late module pass still ran, because the generated decryptors
+    // do not count against the user-code budget that gates it.
+    CHECK(countFunctions(*M, "morok.afm.") >= 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("MorokPass caps eligible function visits on wide modules") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("wide-module", ctx);
