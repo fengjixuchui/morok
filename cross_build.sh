@@ -357,15 +357,21 @@ build_macos() {
   [ -d "$sdk" ] || die "macOS SDK not found: $sdk"
 
   # macOS artifacts are post-link sealed on this Darwin host (seal_binary), so
-  # bind caller-keyed dispatch to the sealer: drop the startup self-seal
-  # fallback and poison unsealed targets, so a static patcher cannot reset the
-  # code_size sentinel to make startup re-seal tampered code (#21).  Only set
-  # this where sealing actually runs; an unsealed seal_required build would
-  # poison its own dispatch.  (Linux artifacts are not sealed, so build_linux
-  # deliberately leaves the self-recovering fallback in place.)
-  local ckd_seal=()
+  # bind the seal-dependent passes to the sealer:
+  #   * -morok-ckd-seal-required (#21): drop caller-keyed dispatch's startup
+  #     self-seal fallback and poison unsealed targets, so a static patcher
+  #     cannot reset the code_size sentinel to re-seal tampered code.
+  #   * -morok-fail-closed-on-unsealed (#106): fold the unsealed sentinel into
+  #     self-checksum / mutual-guard / dispatch key material, so a binary that
+  #     was never sealed (a forgotten seal step) reconstructs garbage and dies
+  #     at startup instead of silently running unprotected.
+  # Only set these where sealing actually runs — an unsealed strict build would
+  # corrupt itself.  Linux artifacts are not sealed (build_linux), so they keep
+  # the fail-SAFE self-recovering behaviour.
+  local seal_strict=()
   if [ "$SEAL_BINARIES" -eq 1 ]; then
-    ckd_seal=(-mllvm -morok-ckd-seal-required)
+    seal_strict=(-mllvm -morok-ckd-seal-required
+                 -mllvm -morok-fail-closed-on-unsealed)
   fi
 
   local arch
@@ -382,7 +388,7 @@ build_macos() {
     local out="$OUT_DIR/$STEM-macos-$suffix"
     echo ">> macos $suffix -> $out"
     "$COMPILER" "${target_args[@]}" -isysroot "$sdk" \
-      -mmacosx-version-min="$MACOS_MIN" "${MOROK_CONFIG[@]}" "${ckd_seal[@]}" \
+      -mmacosx-version-min="$MACOS_MIN" "${MOROK_CONFIG[@]}" "${seal_strict[@]}" \
       "${COMMON[@]}" \
       -o "$out"
     strip_macos "$out"

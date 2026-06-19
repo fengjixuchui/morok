@@ -254,7 +254,7 @@ LoadInst *volatileExpectedLoad(Builder &B, GlobalVariable *Expected,
 Value *emitCoveredRegionCheck(Module &M, Function *Fn, Function *Target,
                               Builder &B, const NodeRuntime &Covered,
                               std::uint32_t RegionIndex, bool Peer,
-                              Value *Acc) {
+                              Value *Acc, bool FailClosed) {
     LLVMContext &Ctx = M.getContext();
     auto *I8 = Type::getInt8Ty(Ctx);
     auto *I32 = Type::getInt32Ty(Ctx);
@@ -298,7 +298,8 @@ Value *emitCoveredRegionCheck(Module &M, Function *Fn, Function *Target,
     code_region_kdf::SealedCodeHash CodeHash =
         code_region_kdf::emitSealedCodeHash(
             CB, CodeCheck, CodeLoop, Exit, Target, Covered.code_size, CodeSeed,
-            ConstantInt::get(I64, 0), "morok.mg", "morok.mg.code.final");
+            ConstantInt::get(I64, 0), "morok.mg", "morok.mg.code.final",
+            FailClosed);
 
     Builder XB(Exit);
     PHINode *NativeH = CodeHash.final_hash;
@@ -336,7 +337,15 @@ Value *emitCoveredRegionCheck(Module &M, Function *Fn, Function *Target,
         XB.CreateXor(NativeDiff, NativeRot, "morok.mg.native.diff.mix"),
         ConstantInt::get(I64, 0xbf58476d1ce4e5b9ULL + RegionIndex * 0x211u),
         Peer ? "morok.mg.peer.native.diff.mul" : "morok.mg.native.diff.mul");
-    NativeMix = XB.CreateSelect(HasCode, NativeMix, ConstantInt::get(I64, 0),
+    // Fail-safe default zeroes the native term when unsealed so an unsealed
+    // build's cover diff still resolves (runs unprotected).  In fail-closed mode
+    // (#106) keep the native term live instead: an unsealed code_size yields a
+    // corrupted NativeH (see emitSealedCodeHash) so NativeMix is nonzero and the
+    // cover diff no longer resolves, killing the never-sealed binary.  Sealed
+    // builds take the HasCode branch in both modes and are unaffected.
+    Value *UnsealedNative =
+        FailClosed ? NativeMix : static_cast<Value *>(ConstantInt::get(I64, 0));
+    NativeMix = XB.CreateSelect(HasCode, NativeMix, UnsealedNative,
                                 "morok.mg.native.diff");
     Value *CoverDiff =
         XB.CreateXor(RegionDiff, ExpectedMix, "morok.mg.node.diff");
@@ -353,7 +362,8 @@ Value *emitCoveredRegionCheck(Module &M, Function *Fn, Function *Target,
 }
 
 Function *createNodeFunction(Module &M, Function &Target, StringRef Suffix,
-                             std::uint32_t Index, ArrayRef<NodeRuntime> Nodes) {
+                             std::uint32_t Index, ArrayRef<NodeRuntime> Nodes,
+                             bool FailClosed) {
     LLVMContext &Ctx = M.getContext();
     auto *I64 = Type::getInt64Ty(Ctx);
     const std::uint32_t Count = static_cast<std::uint32_t>(Nodes.size());
@@ -368,7 +378,8 @@ Function *createNodeFunction(Module &M, Function &Target, StringRef Suffix,
     Value *Acc = ConstantInt::get(I64, 0);
     for (std::uint32_t RegionIndex : coveredRegionIndices(Index, Count)) {
         Acc = emitCoveredRegionCheck(M, Fn, &Target, B, Nodes[RegionIndex],
-                                     RegionIndex, RegionIndex != Index, Acc);
+                                     RegionIndex, RegionIndex != Index, Acc,
+                                     FailClosed);
     }
     Value *Rot = rotl64(B, Acc, 9u + Index * 7u, "morok.mg.node.diff.rot");
     Value *Mul = B.CreateMul(
@@ -470,8 +481,9 @@ GraphRuntime createGraph(Function &F, const MutualGuardGraphParams &Params,
     }
 
     for (std::uint32_t I = 0; I != Count; ++I)
-        G.nodes[I].checker =
-            createNodeFunction(M, F, Suffix, I, ArrayRef<NodeRuntime>(G.nodes));
+        G.nodes[I].checker = createNodeFunction(
+            M, F, Suffix, I, ArrayRef<NodeRuntime>(G.nodes),
+            Params.fail_closed_on_unsealed);
     createPostlinkManifest(M, F, Suffix, ArrayRef<NodeRuntime>(G.nodes),
                            RegionSize, coverageDepth(Count));
     G.diff = createDiffFunction(M, Suffix, ArrayRef<NodeRuntime>(G.nodes));

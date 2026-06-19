@@ -398,7 +398,7 @@ Function *createDiffFunction(Module &M, StringRef Suffix,
                              GlobalVariable *TracerSeal,
                              std::uint64_t TracerS0,
                              GlobalVariable *AntiAnalysisPoison,
-                             std::uint64_t Seed) {
+                             std::uint64_t Seed, bool FailClosed) {
     LLVMContext &Ctx = M.getContext();
     auto *I8 = Type::getInt8Ty(Ctx);
     auto *I32 = Type::getInt32Ty(Ctx);
@@ -444,7 +444,8 @@ Function *createDiffFunction(Module &M, StringRef Suffix,
     code_region_kdf::SealedCodeHash CodeHash =
         code_region_kdf::emitSealedCodeHash(CB, CodeCheck, CodeLoop, Exit,
                                             Target, CodeSize, NextH, NextH,
-                                            "morok.sc", "morok.sc.final.hash");
+                                            "morok.sc", "morok.sc.final.hash",
+                                            FailClosed);
 
     Builder XB(Exit);
     PHINode *FinalH = CodeHash.final_hash;
@@ -529,7 +530,8 @@ Runtime createRuntime(Function &F, const SelfChecksumParams &Params,
                                 &F, R.heartbeat_crypto, R.runtime_seal,
                                 R.runtime_seal_s0, R.external_proof_seal,
                                 R.external_proof_s0, R.tracer_seal,
-                                R.tracer_s0, R.anti_analysis_poison, Seed);
+                                R.tracer_s0, R.anti_analysis_poison, Seed,
+                                Params.fail_closed_on_unsealed);
     return R;
 }
 

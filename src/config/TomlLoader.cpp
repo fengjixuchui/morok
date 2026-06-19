@@ -579,6 +579,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseToggle(*t, pc.decoy_strings);
     if (auto *t = p["vtable_integrity"].as_table())
         parseToggle(*t, pc.vtable_integrity);
+    // Cross-pass top-level switch (#106), e.g. [passes] fail_closed_on_unsealed.
+    pc.fail_closed_on_unsealed = readBool(p["fail_closed_on_unsealed"]);
 }
 
 Policy parsePolicy(const toml::table &pt) {

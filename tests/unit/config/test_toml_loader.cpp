@@ -156,6 +156,16 @@ TEST_CASE("caller keyed dispatch opt-in inherits usable preset knobs") {
     REQUIRE(sealed.ok);
     CHECK(sealed.config.passes.caller_keyed_dispatch.seal_required == true);
     CHECK_FALSE(high.config.passes.caller_keyed_dispatch.seal_required.has_value());
+
+    // The cross-pass fail-closed-on-unsealed knob (#106) is a top-level
+    // [passes] key, unset (nullopt) when absent so default builds stay fail-safe.
+    const auto strict = loadFromString(R"(
+    [passes]
+    fail_closed_on_unsealed = true
+  )");
+    REQUIRE(strict.ok);
+    CHECK(strict.config.passes.fail_closed_on_unsealed == true);
+    CHECK_FALSE(high.config.passes.fail_closed_on_unsealed.has_value());
 }
 
 TEST_CASE("preset is the base and [passes.*] overrides it") {

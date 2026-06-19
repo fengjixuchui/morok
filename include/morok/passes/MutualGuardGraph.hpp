@@ -25,6 +25,10 @@ struct MutualGuardGraphParams {
     std::uint32_t nodes = 3;          ///< per-function checker nodes
     std::uint32_t region_bytes = 32;  ///< bytes hashed by each checker
     std::uint32_t max_returns = 2;    ///< return values poisoned by graph diff
+    /// Fail-closed-on-unsealed (#106): keep the native code-hash term live (not
+    /// zeroed) when the code_size slot is unsealed, so a never-sealed binary's
+    /// cover diff no longer resolves and it cannot run.  Sealed builds unchanged.
+    bool fail_closed_on_unsealed = false;
 };
 
 /// Emit an overlapping integrity graph and feed its combined diff into selected

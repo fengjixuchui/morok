@@ -288,6 +288,23 @@ if(APPLE AND Python3_EXECUTABLE)
       "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_config};${_adversarial_workload}"
     SKIP_RETURN_CODE 77
     TIMEOUT 120)
+
+  # Regression for #106: a fail_closed_on_unsealed build must be non-functional
+  # when the post-link seal step is skipped, yet run normally once sealed.
+  add_test(NAME "e2e/fail_closed_unsealed"
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/fail_closed_unsealed.sh"
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_adversarial_ckd_workload}"
+            4242)
+  set_tests_properties("e2e/fail_closed_unsealed" PROPERTIES
+    LABELS "e2e;adversarial;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${CMAKE_CURRENT_SOURCE_DIR}/fail_closed_unsealed.sh;${_adversarial_ckd_workload}"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
 else()
   if(NOT APPLE)
     message(STATUS "adversarial e2e patch tests skipped off-Apple (Darwin post-link sealing only).")

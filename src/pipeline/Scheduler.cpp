@@ -989,6 +989,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
                 p.probability = eff.self_checksum.probability.value_or(35);
                 p.max_constants = eff.self_checksum.max_constants.value_or(8);
                 p.region_bytes = eff.self_checksum.region_bytes.value_or(32);
+                p.fail_closed_on_unsealed =
+                    eff.fail_closed_on_unsealed.value_or(false);
                 changed |= passes::selfChecksumConstantsFunction(F, p, rng);
             }
 
@@ -1003,6 +1005,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
                 p.nodes = eff.mutual_guard.nodes.value_or(3);
                 p.region_bytes = eff.mutual_guard.region_bytes.value_or(32);
                 p.max_returns = eff.mutual_guard.max_returns.value_or(2);
+                p.fail_closed_on_unsealed =
+                    eff.fail_closed_on_unsealed.value_or(false);
                 changed |= passes::mutualGuardGraphFunction(F, p, rng);
             }
 
@@ -1190,8 +1194,12 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             config_.passes.caller_keyed_dispatch.max_calls.value_or(4096);
         p.region_bytes =
             config_.passes.caller_keyed_dispatch.region_bytes.value_or(16);
+        // Fail-closed-on-unsealed (#106) subsumes CKD's seal_required: when an
+        // unsealed binary must die, the dispatch target poison is exactly the
+        // behaviour wanted, so enable the same poison path here too.
         p.seal_required =
-            config_.passes.caller_keyed_dispatch.seal_required.value_or(false);
+            config_.passes.caller_keyed_dispatch.seal_required.value_or(false) ||
+            config_.passes.fail_closed_on_unsealed.value_or(false);
         changed |= passes::callerKeyedDispatchModule(M, p, rng);
     }
 

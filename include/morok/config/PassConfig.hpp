@@ -464,6 +464,15 @@ struct PassConfig {
         Opt<std::uint32_t> probability;
         Opt<std::uint32_t> times;
     } func_wrap;
+
+    // Cross-pass fail-closed-on-unsealed mode (#106).  When set, the seal-
+    // dependent passes (self-checksum, mutual-guard, caller-keyed dispatch) bind
+    // the post-link code_size sentinel into their live key material so a binary
+    // that was never post-link sealed (or whose seal slot was reset by a
+    // downgrade patch) reconstructs garbage and cannot perform any seal-
+    // dependent operation, instead of silently running unprotected.  Off by
+    // default; only enable it for builds that are guaranteed to be sealed.
+    Opt<bool> fail_closed_on_unsealed;
 };
 
 } // namespace morok::config

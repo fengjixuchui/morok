@@ -24,6 +24,10 @@ struct SelfChecksumParams {
     std::uint32_t probability = 100;    ///< per eligible constant, 0..100
     std::uint32_t max_constants = 16;   ///< per-function replacement cap
     std::uint32_t region_bytes = 32;    ///< bytes hashed by the runtime stub
+    /// Fail-closed-on-unsealed (#106): when set, an unsealed code_size slot folds
+    /// a nonzero corruption into the diff so reconstructed constants/returns are
+    /// garbage and the never-sealed binary cannot run.  Sealed builds unaffected.
+    bool fail_closed_on_unsealed = false;
 };
 
 /// Fuse selected scalar constant operands, including PHI incoming values,

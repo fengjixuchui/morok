@@ -36,6 +36,13 @@ std::uint64_t hashBytes(llvm::ArrayRef<std::uint8_t> Bytes,
 llvm::Value *emitHashStep(llvm::IRBuilderBase &B, llvm::Value *H,
                           llvm::Value *Byte, const llvm::Twine &Name);
 
+// When FailClosedOnUnsealed is true, the value the Exit PHI takes on the
+// UNSEALED path is replaced by a nonzero corruption avalanched from the live
+// code_size sentinel (instead of the caller-supplied UnsealedValue), so a
+// never-sealed / downgrade-reset binary reconstructs garbage from this hash and
+// fails closed (#106).  Sealed binaries take the real-hash path and are
+// byte-for-byte unaffected — UnsealedValue / the corruption are never consumed
+// when code_size holds the real window length.
 SealedCodeHash emitSealedCodeHash(llvm::IRBuilderBase &CheckB,
                                   llvm::BasicBlock *CodeCheck,
                                   llvm::BasicBlock *CodeLoop,
@@ -45,6 +52,7 @@ SealedCodeHash emitSealedCodeHash(llvm::IRBuilderBase &CheckB,
                                   llvm::Value *Seed,
                                   llvm::Value *UnsealedValue,
                                   llvm::StringRef Prefix,
-                                  llvm::StringRef FinalName);
+                                  llvm::StringRef FinalName,
+                                  bool FailClosedOnUnsealed = false);
 
 } // namespace morok::passes::code_region_kdf

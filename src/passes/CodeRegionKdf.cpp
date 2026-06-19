@@ -70,7 +70,8 @@ SealedCodeHash emitSealedCodeHash(IRBuilderBase &CheckB,
                                   Value *Seed,
                                   Value *UnsealedValue,
                                   StringRef Prefix,
-                                  StringRef FinalName) {
+                                  StringRef FinalName,
+                                  bool FailClosedOnUnsealed) {
     auto *I32 = CheckB.getInt32Ty();
     auto *I64 = CheckB.getInt64Ty();
     auto *I8 = CheckB.getInt8Ty();
@@ -108,8 +109,35 @@ SealedCodeHash emitSealedCodeHash(IRBuilderBase &CheckB,
     CheckB.CreateCondBr(CodeDone, Exit, CodeLoop);
 
     CheckB.SetInsertPoint(Exit);
+    Value *UnsealedIncoming = UnsealedValue;
+    if (FailClosedOnUnsealed) {
+        // Fail closed (#106): instead of the caller's benign cancel-to-zero
+        // value, avalanche the live (sentinel) code_size load into a nonzero,
+        // unpredictable corruption so the unsealed path's final hash diverges
+        // from the sealed expected value and every downstream key/constant
+        // reconstruction yields garbage.  This block is only reachable when the
+        // slot is unsealed (HasCode == false); a sealed binary takes the
+        // real-hash path above, so the corruption is never consumed and the
+        // sealed key is reproduced byte-for-byte.  The OR 1 guarantees nonzero.
+        IRBuilderBase::InsertPointGuard CorruptGuard(CheckB);
+        CheckB.SetInsertPoint(CodeCheck->getTerminator());
+        Value *Wide =
+            CheckB.CreateZExt(CodeSizeLoad, I64, Prefix + ".unsealed.wide");
+        Value *Salted = CheckB.CreateOr(
+            CheckB.CreateXor(Wide,
+                             ConstantInt::get(I64, 0x9e3779b97f4a7c15ULL),
+                             Prefix + ".unsealed.salt"),
+            ConstantInt::get(I64, 1), Prefix + ".unsealed.nz");
+        Value *Mixed = CheckB.CreateMul(
+            Salted, ConstantInt::get(I64, 0xff51afd7ed558ccdULL),
+            Prefix + ".unsealed.mix");
+        Mixed = CheckB.CreateXor(
+            Mixed, CheckB.CreateLShr(Mixed, ConstantInt::get(I64, 33)),
+            Prefix + ".unsealed.mix");
+        UnsealedIncoming = Mixed;
+    }
     auto *FinalH = CheckB.CreatePHI(I64, 2, FinalName);
-    FinalH->addIncoming(UnsealedValue, CodeCheck);
+    FinalH->addIncoming(UnsealedIncoming, CodeCheck);
     FinalH->addIncoming(NextCH, CodeLoop);
     return {HasCode, FinalH};
 }

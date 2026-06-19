@@ -112,6 +112,15 @@ cl::opt<bool> MorokCkdSealRequired(
     "morok-ckd-seal-required", cl::init(false),
     cl::desc("Caller-keyed dispatch: assume post-link sealing; drop the "
              "startup self-seal fallback and poison unsealed targets."));
+// Cross-pass fail-closed-on-unsealed mode (#106): bind the post-link code_size
+// sentinel into the seal-dependent passes' live key material so a never-sealed
+// binary reconstructs garbage and cannot run, instead of silently running
+// unprotected.  Off by default; set by the build pipeline only where post-link
+// sealing is guaranteed (an unsealed binary built with this on will not run).
+cl::opt<bool> MorokFailClosedOnUnsealed(
+    "morok-fail-closed-on-unsealed", cl::init(false),
+    cl::desc("Corrupt seal-dependent key material when the post-link code_size "
+             "slot is unsealed, so an unsealed binary fails closed."));
 
 // Whether the auto-injection (clang -fpass-plugin) entry points should fire.
 // On Unix this is driven by the `-morok` cl::opt (`-mllvm -morok`).  On Windows
@@ -174,6 +183,10 @@ morok::config::Config loadConfig() {
     // the flag for the Windows static-LLVM registry where cl::opts are unseen.
     if (MorokCkdSealRequired || std::getenv("MOROK_CKD_SEAL_REQUIRED") != nullptr)
         cfg.passes.caller_keyed_dispatch.seal_required = true;
+
+    if (MorokFailClosedOnUnsealed ||
+        std::getenv("MOROK_FAIL_CLOSED_ON_UNSEALED") != nullptr)
+        cfg.passes.fail_closed_on_unsealed = true;
 
     return cfg;
 }

@@ -410,6 +410,7 @@ void merge(PassConfig &dst, const PassConfig &src) {
     mergeOpt(dst.func_wrap.enabled, src.func_wrap.enabled);
     mergeOpt(dst.func_wrap.probability, src.func_wrap.probability);
     mergeOpt(dst.func_wrap.times, src.func_wrap.times);
+    mergeOpt(dst.fail_closed_on_unsealed, src.fail_closed_on_unsealed);
 }
 
 PassConfig resolve(const Config &cfg, std::string_view module_name,

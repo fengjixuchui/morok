@@ -220,6 +220,7 @@ TEST_CASE("merge handles every pass family") {
     src.caller_keyed_dispatch.max_calls = 1024u;
     src.caller_keyed_dispatch.region_bytes = 24u;
     src.caller_keyed_dispatch.seal_required = true;
+    src.fail_closed_on_unsealed = true;
     src.nanomites.enabled = true;
     src.nanomites.probability = 79u;
     src.nanomites.max_sites = 5u;
@@ -414,6 +415,7 @@ TEST_CASE("merge handles every pass family") {
     CHECK(dst.caller_keyed_dispatch.max_calls == 1024u);
     CHECK(dst.caller_keyed_dispatch.region_bytes == 24u);
     CHECK(dst.caller_keyed_dispatch.seal_required == true);
+    CHECK(dst.fail_closed_on_unsealed == true);
     CHECK(dst.nanomites.enabled == true);
     CHECK(dst.nanomites.probability == 79u);
     CHECK(dst.nanomites.max_sites == 5u);

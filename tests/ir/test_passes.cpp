@@ -9313,6 +9313,81 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #106: fail-closed-on-unsealed binds the post-link code_size
+// sentinel into the seal-dependent passes' live key material, so a never-sealed
+// (or downgrade-reset) binary reconstructs garbage and cannot run instead of
+// silently running unprotected.  The corruption is emitted ONLY on the unsealed
+// code path (emitSealedCodeHash's unsealed PHI for self-checksum, and the
+// retained native term for mutual-guard), so sealed binaries — which take the
+// real-hash branch — are byte-for-byte unaffected: with the flag off, no
+// "*.unsealed.*" corruption instructions exist at all.
+TEST_CASE("self-check and mutual-guard fail closed on the unsealed sentinel") {
+    auto countAll = [](Module &M, StringRef prefix) {
+        std::size_t n = 0;
+        for (Function &F : M)
+            n += countNamedInstructions(F, prefix);
+        return n;
+    };
+
+    auto runSC = [&](bool failClosed) {
+        LLVMContext ctx;
+        auto M = parse(ctx, R"ir(
+define i32 @selfcheck(i32 %a) {
+entry:
+  %x = xor i32 %a, 305419896
+  %y = add i32 %x, 17
+  ret i32 %y
+}
+)ir");
+        auto *I64 = Type::getInt64Ty(ctx);
+        auto *Crypto = new GlobalVariable(
+            *M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+            ConstantInt::get(I64, 0), "morok.watchdog.crypto");
+        Crypto->setAlignment(Align(8));
+        addAntiAnalysisPoison(*M, ctx);
+        auto engine = morok::core::Xoshiro256pp::fromSeed(606);
+        morok::ir::IRRandom rng(engine);
+        morok::passes::runtime_seal::getChannel(
+            *M, morok::passes::runtime_seal::kExternalProofChannel, rng);
+        morok::passes::runtime_seal::getChannel(
+            *M, morok::passes::runtime_seal::kTracerChannel, rng);
+        CHECK(morok::passes::selfChecksumConstantsFunction(
+            *M->getFunction("selfcheck"),
+            {/*probability=*/100, /*max_constants=*/8, /*region_bytes=*/32,
+             /*fail_closed_on_unsealed=*/failClosed},
+            rng));
+        std::size_t corruption = countAll(*M, "morok.sc.unsealed");
+        CHECK_FALSE(verifyModule(*M, &errs()));
+        return corruption;
+    };
+    CHECK(runSC(/*failClosed=*/true) >= 1u);
+    CHECK(runSC(/*failClosed=*/false) == 0u);
+
+    auto runMG = [&](bool failClosed) {
+        LLVMContext ctx;
+        auto M = parse(ctx, R"ir(
+define i32 @guard(i32 %a, i32 %b) {
+entry:
+  %x = add i32 %a, %b
+  %y = xor i32 %x, 42
+  ret i32 %y
+}
+)ir");
+        auto engine = morok::core::Xoshiro256pp::fromSeed(707);
+        morok::ir::IRRandom rng(engine);
+        CHECK(morok::passes::mutualGuardGraphFunction(
+            *M->getFunction("guard"),
+            {/*probability=*/100, /*nodes=*/3, /*region_bytes=*/32,
+             /*max_returns=*/2, /*fail_closed_on_unsealed=*/failClosed},
+            rng));
+        std::size_t corruption = countAll(*M, "morok.mg.unsealed");
+        CHECK_FALSE(verifyModule(*M, &errs()));
+        return corruption;
+    };
+    CHECK(runMG(/*failClosed=*/true) >= 1u);
+    CHECK(runMG(/*failClosed=*/false) == 0u);
+}
+
 TEST_CASE(
     "selfChecksumConstantsFunction supports sub-byte and odd-width literals") {
     LLVMContext ctx;
