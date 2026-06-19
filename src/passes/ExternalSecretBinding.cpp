@@ -180,12 +180,17 @@ bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
     auto *Acc = B.CreateLoad(I64, Accum, "morok.proof.finish.accum");
     Acc->setVolatile(true);
     Acc->setAlignment(Align(8));
-    Value *Material =
-        B.CreateXor(Acc, Domain, "morok.proof.finish.domain");
-    Material = mix64(B, Material, 0x9B1A3B5D7F0E24C6ULL,
-                     "morok.proof.finish.mix");
-    Material = B.CreateOr(Material, ConstantInt::get(I64, 1),
-                          "morok.proof.finish.material.nonzero");
+    // Zero-on-clean (#95): an AUTHORIZED run (a proof was provided, so SeenLoad
+    // is true) must leave the external_proof seal at its S0 baseline, so the
+    // seal-derived consumers — the VM keystream fold and the self-checksum diff,
+    // both encoded at build time against the clean zero-delta state — decode
+    // correctly.  Folding the proof-derived material here (a non-zero word even
+    // for a valid proof) moved the seal off S0 on every authorized run, so a
+    // successful proof submission corrupted VM bytecode keys and checksum
+    // constants — a regression that broke the systemic "seal folds are zero on
+    // clean runs" invariant.  Binding is enforced entirely by the MISSING path:
+    // with no proof the contribution is non-zero, the seal diverges, and every
+    // seal-dependent computation fails closed.
     Value *Missing = B.CreateXor(Acc, Domain,
                                  "morok.proof.finish.missing.domain");
     Missing = B.CreateXor(Missing, ConstantInt::get(I64, 0xD6E8FEB86659FD93ULL),
@@ -195,7 +200,7 @@ bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
     Missing = B.CreateOr(Missing, ConstantInt::get(I64, 1),
                          "morok.proof.finish.missing.nonzero");
     Value *Contribution =
-        B.CreateSelect(SeenLoad, Material, Missing,
+        B.CreateSelect(SeenLoad, ConstantInt::get(I64, 0), Missing,
                        "morok.proof.finish.contribution");
     if (BindToRuntimeSeal)
         runtime_seal::foldWord(B, runtime_seal::kExternalProofChannel,

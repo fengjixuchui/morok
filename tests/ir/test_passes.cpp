@@ -8901,16 +8901,24 @@ entry:
     CHECK(countNamedInstructions(*Finish, "morok.proof.finish.seal.next") ==
           1u);
 
+    // Regression for #95: an AUTHORIZED run (proof seen) must contribute a ZERO
+    // word so the external_proof seal stays at its S0 baseline and the seal's
+    // consumers (VM keystream / self-checksum diff, encoded against the clean
+    // zero-delta state) decode correctly; only a MISSING proof poisons the seal.
     bool missingProofPoisonsSeal = false;
+    bool validProofKeepsSealClean = false;
     for (Instruction &I : instructions(*Finish)) {
         auto *SI = dyn_cast<SelectInst>(&I);
         if (!SI || SI->getName() != "morok.proof.finish.contribution")
             continue;
+        auto *SeenContribution = dyn_cast<ConstantInt>(SI->getTrueValue());
+        validProofKeepsSealClean = SeenContribution && SeenContribution->isZero();
         if (auto *CI = dyn_cast<ConstantInt>(SI->getFalseValue()))
             missingProofPoisonsSeal |= !CI->isZero();
         else
             missingProofPoisonsSeal = true;
     }
+    CHECK(validProofKeepsSealClean);
     CHECK(missingProofPoisonsSeal);
 
     bool finishStoresSeal = false;
