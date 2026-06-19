@@ -12072,7 +12072,8 @@ TEST_CASE("cloakSeed rejects a malformed pre-existing seed global") {
 // with a larger one.  It dropped the original address space (so RAUW across a
 // mismatched pointer type is invalid IR), forced Align(1) (UB if loads relied
 // on a higher alignment), and dropped any pinned section.  The replacement must
-// keep the address space and alignment, and section-pinned globals are skipped.
+// keep the address space and alignment, and section-pinned user strings must be
+// encrypted in place without losing their section identity.
 TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -12096,13 +12097,15 @@ TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     REQUIRE(Aligned);
     CHECK(Aligned->getAlign().valueOrOne().value() >= 8u);
 
-    // Section-pinned string is left untouched (still plaintext, section kept).
+    // Section-pinned user strings keep their section but are no longer left as
+    // readable plaintext.
     GlobalVariable *Sec = M->getGlobalVariable("s_sec", true);
     REQUIRE(Sec);
     CHECK(Sec->getSection() == "mysec");
     auto *SecCDA = dyn_cast<ConstantDataArray>(Sec->getInitializer());
     REQUIRE(SecCDA);
-    CHECK(SecCDA->getRawDataValues().starts_with("sec"));
+    CHECK_FALSE(SecCDA->getRawDataValues().starts_with("sec"));
+    CHECK_FALSE(Sec->isConstant());
 
     CHECK_FALSE(verifyModule(*M, &errs()));
 }

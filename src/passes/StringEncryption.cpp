@@ -69,11 +69,10 @@ bool eligible(const GlobalVariable &gv) {
     // by cheap triage such as `strings` while real user strings are encrypted.
     if (gv.getName().starts_with("morok."))
         return false;
-    // Skip any section-pinned global.  The length-hiding path replaces the
-    // global with a larger one, and re-emitting cipher bytes into a pinned
-    // section (e.g. a mergeable cstring section, or llvm.metadata) changes its
-    // identity/semantics; leave such globals alone rather than mis-rewrite them.
-    if (!gv.getSection().empty())
+    // LLVM metadata is not program string data.  Other section-pinned user
+    // strings are still encrypted, but they stay same-sized so their explicit
+    // section identity is not lost through global replacement.
+    if (gv.getSection() == "llvm.metadata")
         return false;
     const auto *cda = dyn_cast<ConstantDataArray>(gv.getInitializer());
     return cda && cda->getElementType()->isIntegerTy(8) &&
@@ -499,7 +498,8 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
             plain[i] = static_cast<std::uint8_t>(raw[i]);
         // Only length-pad read-only C strings; a mutable global may be indexed
         // up to its original size by the program, so its size must not change.
-        if (gv->isConstant() && cda->isCString()) {
+        if (gv->isConstant() && cda->isCString() &&
+            gv->getSection().empty()) {
             constexpr std::uint64_t kBlock = 16;
             const std::uint64_t blocks =
                 (n + kBlock - 1) / kBlock + rng.range(3);
