@@ -243,6 +243,20 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     max_payloads = 3
     max_payload_bytes = 4096
     context_keying = true
+    [passes.fault_paged_payload]
+    enabled = true
+    probability = 93
+    max_payloads = 4
+    max_payload_bytes = 8192
+    page_size = 2048
+    delivery = "fault_paged"
+    backend = "lazy_accessor"
+    per_page_keys = true
+    reseal_after_use = false
+    decoy_pages = 2
+    fallback = true
+    bind_to_runtime_seal = true
+    virtualize_helpers = false
     [passes.tracer_attestation]
     enabled = true
     mode = "linux_ptrace"
@@ -456,6 +470,19 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.hash_self_decrypt.max_payloads == 3u);
     CHECK(r.config.passes.hash_self_decrypt.max_payload_bytes == 4096u);
     CHECK(r.config.passes.hash_self_decrypt.context_keying == true);
+    CHECK(r.config.passes.fault_paged_payload.enabled == true);
+    CHECK(r.config.passes.fault_paged_payload.probability == 93u);
+    CHECK(r.config.passes.fault_paged_payload.max_payloads == 4u);
+    CHECK(r.config.passes.fault_paged_payload.max_payload_bytes == 8192u);
+    CHECK(r.config.passes.fault_paged_payload.page_size == 2048u);
+    CHECK(r.config.passes.fault_paged_payload.delivery == "fault_paged");
+    CHECK(r.config.passes.fault_paged_payload.backend == "lazy_accessor");
+    CHECK(r.config.passes.fault_paged_payload.per_page_keys == true);
+    CHECK(r.config.passes.fault_paged_payload.reseal_after_use == false);
+    CHECK(r.config.passes.fault_paged_payload.decoy_pages == 2u);
+    CHECK(r.config.passes.fault_paged_payload.fallback == true);
+    CHECK(r.config.passes.fault_paged_payload.bind_to_runtime_seal == true);
+    CHECK(r.config.passes.fault_paged_payload.virtualize_helpers == false);
     CHECK(r.config.passes.tracer_attestation.enabled == true);
     CHECK(r.config.passes.tracer_attestation.mode == "linux_ptrace");
     CHECK(r.config.passes.tracer_attestation.shares == 3u);

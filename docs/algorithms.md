@@ -406,8 +406,8 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   because their names start with `morok.`.  After per-function passes finish
   emitting helpers, the scheduler applies the same dense BCF/extop/MBA shell to
   an allowlist of sensitive helpers: per-string decryptors, hash-gated bytecode
-  ensure functions, table/DFI/self-check/mutual-guard hash helpers, and
-  anti-debug/anti-hook constructors/helpers.
+  ensure functions, fault-paged payload accessors, table/DFI/self-check/
+  mutual-guard hash helpers, and anti-debug/anti-hook constructors/helpers.
 - The generated-helper phase is bounded by the normal module growth gate, a
   helper visit cap, and a separate sensitive-function size cap.  It does not
   recursively harden its own scaffold (`morok.extop.*`, `morok.bcf.*`) or every
@@ -589,8 +589,40 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   and vtable helpers have been emitted.  That late pass only considers
   allowlisted generated checker prefixes (`morok.antidbg`, `morok.antihook`,
   `morok.timing`, `morok.trap`, `morok.sc.diff.*`, `morok.mg.*`,
-  `morok.dfi.hash.*`, `morok.vti.*`) so VM infrastructure and unrelated
-  decoys are not recursively lifted.
+  `morok.dfi.hash.*`, `morok.vti.*`, and eligible `morok.fpp.*` accessors)
+  so VM infrastructure and unrelated decoys are not recursively lifted.  Future
+  FPP signal/mprotect/VEH handler prefixes remain native because VM lifting
+  would disturb their page-fault choreography.
+
+## Fault-paged VM bytecode payloads — IR structure
+- Selected `morok.vm.bytecode.*` globals are transformed before hash-gated
+  self-decrypt sees them.  The bytecode global becomes mutable ciphertext with a
+  per-payload schedule, and the VM helper's direct volatile byte loads are
+  replaced by calls to a private `morok.fpp.load.*` accessor.
+- The accessor computes the requested byte's page, materializes only that page
+  into a fixed-size private `morok.fpp.page.cache.*` byte array, and returns the
+  requested offset from that cache.  The cache size is `page_size` clamped to the
+  implementation's bounded page range; it is never the full payload size unless
+  the payload itself is one page.
+- Each payload has private page state: `morok.fpp.page.loaded.*`,
+  `morok.fpp.page.active.*`, `morok.fpp.fault.count.*`, and
+  `morok.fpp.meta.*`.  With `reseal_after_use=true`, switching pages clears the
+  previous cache before decrypting the new page.  Optional decoy page ciphertext
+  is retained under `morok.fpp.decoy.*`.
+- Per-page keys are derived from a unique per-payload schedule, the page index,
+  the byte index, and a zero-on-clean `fault_paged_payload` runtime-seal delta
+  when `bind_to_runtime_seal=true`.  Normal page first-touch events increment
+  local fault counters without changing the key stream; anomalous out-of-range
+  accesses fold into the runtime seal so later decoding drifts.
+- The current backend is `lazy_accessor`: it provides page-granular lazy
+  materialization at IR level and is the configured fallback when OS fault
+  backends are unavailable.  The public config keeps `delivery`/`backend`
+  fields so later `userfaultfd`, signal/mprotect, or VEH backends can share the
+  same scheduler and payload metadata contract.
+- Scheduler placement is immediately after Virtualization and immediately
+  before HashGatedSelfDecrypt.  Since FPP makes protected bytecode globals
+  mutable, the hash-gated pass skips them and only wraps remaining eager
+  payloads.
 
 ## Hash-gated self-decrypting VM bytecode — IR structure
 - Native block encryption needs post-link layout and W^X runtime cooperation,
@@ -650,9 +682,10 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   bytes back to ciphertext before VM helper return, and clears the active flag.
   Later calls therefore re-hash encrypted bytes and expose plaintext only for
   the current helper invocation.
-- Scheduler placement is directly after Virtualization and before the
+- Scheduler placement is after fault-paged payload delivery and before the
   per-function pipeline, so VM bytecode exists and generated `morok.*` helpers
-  remain outside later function-local transforms.
+  remain outside later function-local transforms.  Already FPP-protected
+  payloads are mutable and skipped.
 
 ## Self-checksum-fused constants — IR structure
 - True code-region checksums need post-link byte ranges.  The IR pass emits the
@@ -1082,6 +1115,8 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 - TableArithmetic: encrypted lazy `i1..i8` and const-indexed `i9..i16` op lookup tables.
 - UniformPrimitiveLowering: `i1..i8`/const-indexed `i9..i16` op tables plus memory-loaded indirectbr dispatch.
 - Virtualization: encrypted per-function bytecode plus threaded computed-goto VM helpers.
+- FaultPagedPayload: VM bytecode globals get per-page ciphertext and lazy
+  page-local accessors instead of full-payload plaintext materialization.
 - HashGatedSelfDecrypt: VM bytecode globals get hash/context-gated outer
   decryptors that re-encrypt each payload on VM helper exit.
 - MutualGuardGraph: overlapping checksum nodes whose combined diff poisons scalar integer/FP returns.
@@ -1462,10 +1497,13 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   slices of VM lifting/hash self-decrypt, self-check constants, DFI, MQ,
   MicrocodeStress, and FunctionWrapper while keeping MutualGuardGraph,
   AdversarialSelfTuning, and AdversarialFunctionMerging disabled unless
-  explicitly configured.  The enabled heavyweight slices use local caps before
-  they can clone or generate dense IR.
+  explicitly configured.  Fault-paged payload delivery keeps preset knobs but
+  stays opt-in while the portable backend is `lazy_accessor`, because the max
+  runtime gate requires OS-backed page-fault delivery before enabling it by
+  default.  The enabled heavyweight slices use local caps before they can clone
+  or generate dense IR.
 
 ## Scheduler order (to preserve semantics)
-Virtualization(user) → HashSelfDecrypt → AntiHook → AntiClassDump → WindowsPEFoundation → WindowsPebHeapDebug → WindowsDebugObject → WindowsThreadHide → WindowsAntiAttach → WindowsKernelDebugger → WindowsSyscalls → WindowsUnhook → WindowsVehAudit → WindowsProcessMitigations → AntiDebug → TimingOracle → TrapOracle → PageFaultTlbOracle → CacheTimingOracle → MicroarchitecturalCanary → StringEnc → FCO(fn) → VTableIntegrity → per-fn{ Split, BCF, OptAmp, Sub,
+Virtualization(user) → FaultPagedPayload → HashSelfDecrypt → AntiHook → AntiClassDump → WindowsPEFoundation → WindowsPebHeapDebug → WindowsDebugObject → WindowsThreadHide → WindowsAntiAttach → WindowsKernelDebugger → WindowsSyscalls → WindowsUnhook → WindowsVehAudit → WindowsProcessMitigations → AntiDebug → TimingOracle → TrapOracle → PageFaultTlbOracle → CacheTimingOracle → MicroarchitecturalCanary → StringEnc → FCO(fn) → VTableIntegrity → per-fn{ Split, BCF, OptAmp, Sub,
 MBA, AliasOp, ExtOp, CoherentDecoys, NiState/EntFla/CSM(generator)/Flatten, StateOp, IFSM, PhiTangle, TypePun, StackCoalesce, StackDelta, PointerLaunder, DataFlowIntegrity, TableArith, Uniform, Vec, PathExplosion, MqGate, TraceKeying, Dispatcherless, MicrocodeStress, SelfChecksum, MutualGuardGraph, ShamirShare, ConstEnc, IndirectBranch } → ProtectionHelperVM → SensitiveHelperHardening → Nanomites → AdversarialSelfTuning → AdversarialFunctionMerging → FunctionWrapper → PerBuildPolymorphism →
 MisleadingMetadata → FeatureElimination (strip debug/names) → cleanup marker decls.

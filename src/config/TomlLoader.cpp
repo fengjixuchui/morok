@@ -220,6 +220,23 @@ void parseHashSelfDecrypt(const toml::table &t, HashSelfDecryptConfig &c) {
     c.context_keying = readBool(t["context_keying"]);
 }
 
+void parseFaultPagedPayload(const toml::table &t,
+                            FaultPagedPayloadConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.probability = readU32(t["probability"]);
+    c.max_payloads = readU32(t["max_payloads"]);
+    c.max_payload_bytes = readU32(t["max_payload_bytes"]);
+    c.page_size = readU32(t["page_size"]);
+    c.delivery = readString(t["delivery"]);
+    c.backend = readString(t["backend"]);
+    c.per_page_keys = readBool(t["per_page_keys"]);
+    c.reseal_after_use = readBool(t["reseal_after_use"]);
+    c.decoy_pages = readU32(t["decoy_pages"]);
+    c.fallback = readBool(t["fallback"]);
+    c.bind_to_runtime_seal = readBool(t["bind_to_runtime_seal"]);
+    c.virtualize_helpers = readBool(t["virtualize_helpers"]);
+}
+
 void parseExternalSecretBinding(const toml::table &t,
                                 ExternalSecretBindingConfig &c) {
     c.enabled = readBool(t["enabled"]);
@@ -454,6 +471,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseVirtualization(*t, pc.virtualization);
     if (auto *t = p["hash_gated_self_decrypt"].as_table())
         parseHashSelfDecrypt(*t, pc.hash_self_decrypt);
+    if (auto *t = p["fault_paged_payload"].as_table())
+        parseFaultPagedPayload(*t, pc.fault_paged_payload);
     if (auto *t = p["external_secret_binding"].as_table())
         parseExternalSecretBinding(*t, pc.external_secret_binding);
     if (auto *t = p["tracer_attestation"].as_table())

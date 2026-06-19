@@ -32,6 +32,7 @@
 #include "morok/passes/ExternalOpaquePredicates.hpp"
 #include "morok/passes/ExternalSecretBinding.hpp"
 #include "morok/passes/Flattening.hpp"
+#include "morok/passes/FaultPagedPayload.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
 #include "morok/passes/FunctionWrapper.hpp"
 #include "morok/passes/HashGatedSelfDecrypt.hpp"
@@ -365,7 +366,6 @@ private:
 namespace morok::pipeline {
 
 PassPluginLibraryInfo getPluginInfo() {
-
     return {
         LLVM_PLUGIN_API_VERSION, "Morok", LLVM_VERSION_STRING,
         [](PassBuilder &PB) {
@@ -416,6 +416,10 @@ PassPluginLibraryInfo getPluginInfo() {
                     }
                     if (name == "morok-selfdecrypt") {
                         MPM.addPass(passes::HashGatedSelfDecryptPass());
+                        return true;
+                    }
+                    if (name == "morok-fpp") {
+                        MPM.addPass(passes::FaultPagedPayloadPass());
                         return true;
                     }
                     if (name == "morok-proofbind") {

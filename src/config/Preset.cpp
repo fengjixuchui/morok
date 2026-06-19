@@ -165,6 +165,20 @@ PassConfig makeLow() {
     c.hash_self_decrypt.max_payload_bytes = 0;
     c.hash_self_decrypt.context_keying = false;
 
+    c.fault_paged_payload.enabled = false;
+    c.fault_paged_payload.probability = 0;
+    c.fault_paged_payload.max_payloads = 0;
+    c.fault_paged_payload.max_payload_bytes = 0;
+    c.fault_paged_payload.page_size = 4096;
+    c.fault_paged_payload.delivery = "lazy_accessor";
+    c.fault_paged_payload.backend = "lazy_accessor";
+    c.fault_paged_payload.per_page_keys = true;
+    c.fault_paged_payload.reseal_after_use = true;
+    c.fault_paged_payload.decoy_pages = 0;
+    c.fault_paged_payload.fallback = true;
+    c.fault_paged_payload.bind_to_runtime_seal = true;
+    c.fault_paged_payload.virtualize_helpers = true;
+
     c.tracer_attestation.enabled = false;
     c.tracer_attestation.mode = "linux_ptrace";
     c.tracer_attestation.shares = 0;
@@ -389,6 +403,20 @@ PassConfig makeMid() {
     c.hash_self_decrypt.max_payloads = 0;
     c.hash_self_decrypt.max_payload_bytes = 0;
     c.hash_self_decrypt.context_keying = false;
+
+    c.fault_paged_payload.enabled = false;
+    c.fault_paged_payload.probability = 0;
+    c.fault_paged_payload.max_payloads = 0;
+    c.fault_paged_payload.max_payload_bytes = 0;
+    c.fault_paged_payload.page_size = 4096;
+    c.fault_paged_payload.delivery = "lazy_accessor";
+    c.fault_paged_payload.backend = "lazy_accessor";
+    c.fault_paged_payload.per_page_keys = true;
+    c.fault_paged_payload.reseal_after_use = true;
+    c.fault_paged_payload.decoy_pages = 0;
+    c.fault_paged_payload.fallback = true;
+    c.fault_paged_payload.bind_to_runtime_seal = true;
+    c.fault_paged_payload.virtualize_helpers = true;
 
     c.tracer_attestation.enabled = false;
     c.tracer_attestation.mode = "linux_ptrace";
@@ -620,6 +648,20 @@ PassConfig makeHigh() {
     c.hash_self_decrypt.max_payloads = 1;
     c.hash_self_decrypt.max_payload_bytes = 64 * 1024;
     c.hash_self_decrypt.context_keying = true;
+
+    c.fault_paged_payload.enabled = false;
+    c.fault_paged_payload.probability = 100;
+    c.fault_paged_payload.max_payloads = 1;
+    c.fault_paged_payload.max_payload_bytes = 64 * 1024;
+    c.fault_paged_payload.page_size = 4096;
+    c.fault_paged_payload.delivery = "lazy_accessor";
+    c.fault_paged_payload.backend = "lazy_accessor";
+    c.fault_paged_payload.per_page_keys = true;
+    c.fault_paged_payload.reseal_after_use = true;
+    c.fault_paged_payload.decoy_pages = 1;
+    c.fault_paged_payload.fallback = true;
+    c.fault_paged_payload.bind_to_runtime_seal = true;
+    c.fault_paged_payload.virtualize_helpers = true;
 
     c.tracer_attestation.enabled = true;
     c.tracer_attestation.mode = "linux_ptrace";
@@ -874,6 +916,20 @@ PassConfig makeMax() {
     c.hash_self_decrypt.max_payloads = 16;
     c.hash_self_decrypt.max_payload_bytes = 64 * 1024;
     c.hash_self_decrypt.context_keying = true;
+
+    c.fault_paged_payload.enabled = false;
+    c.fault_paged_payload.probability = 100;
+    c.fault_paged_payload.max_payloads = 16;
+    c.fault_paged_payload.max_payload_bytes = 64 * 1024;
+    c.fault_paged_payload.page_size = 4096;
+    c.fault_paged_payload.delivery = "lazy_accessor";
+    c.fault_paged_payload.backend = "lazy_accessor";
+    c.fault_paged_payload.per_page_keys = true;
+    c.fault_paged_payload.reseal_after_use = true;
+    c.fault_paged_payload.decoy_pages = 2;
+    c.fault_paged_payload.fallback = true;
+    c.fault_paged_payload.bind_to_runtime_seal = true;
+    c.fault_paged_payload.virtualize_helpers = true;
 
     c.tracer_attestation.enabled = true;
     c.tracer_attestation.mode = "linux_ptrace";

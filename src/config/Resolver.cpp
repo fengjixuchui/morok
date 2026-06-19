@@ -166,6 +166,33 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.hash_self_decrypt.max_payload_bytes);
     mergeOpt(dst.hash_self_decrypt.context_keying,
              src.hash_self_decrypt.context_keying);
+    // Fault-paged VM bytecode delivery
+    mergeOpt(dst.fault_paged_payload.enabled,
+             src.fault_paged_payload.enabled);
+    mergeOpt(dst.fault_paged_payload.probability,
+             src.fault_paged_payload.probability);
+    mergeOpt(dst.fault_paged_payload.max_payloads,
+             src.fault_paged_payload.max_payloads);
+    mergeOpt(dst.fault_paged_payload.max_payload_bytes,
+             src.fault_paged_payload.max_payload_bytes);
+    mergeOpt(dst.fault_paged_payload.page_size,
+             src.fault_paged_payload.page_size);
+    mergeOpt(dst.fault_paged_payload.delivery,
+             src.fault_paged_payload.delivery);
+    mergeOpt(dst.fault_paged_payload.backend,
+             src.fault_paged_payload.backend);
+    mergeOpt(dst.fault_paged_payload.per_page_keys,
+             src.fault_paged_payload.per_page_keys);
+    mergeOpt(dst.fault_paged_payload.reseal_after_use,
+             src.fault_paged_payload.reseal_after_use);
+    mergeOpt(dst.fault_paged_payload.decoy_pages,
+             src.fault_paged_payload.decoy_pages);
+    mergeOpt(dst.fault_paged_payload.fallback,
+             src.fault_paged_payload.fallback);
+    mergeOpt(dst.fault_paged_payload.bind_to_runtime_seal,
+             src.fault_paged_payload.bind_to_runtime_seal);
+    mergeOpt(dst.fault_paged_payload.virtualize_helpers,
+             src.fault_paged_payload.virtualize_helpers);
     // External proof/license binding
     mergeOpt(dst.external_secret_binding.enabled,
              src.external_secret_binding.enabled);

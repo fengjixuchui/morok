@@ -101,6 +101,20 @@ max_payloads = 16
 max_payload_bytes = 65536
 context_keying = true
 
+[passes.fault_paged_payload]
+enabled = true
+probability = 100
+max_payloads = 16
+max_payload_bytes = 65536
+page_size = 4096
+backend = "lazy_accessor"
+per_page_keys = true
+reseal_after_use = true
+decoy_pages = 2
+fallback = true
+bind_to_runtime_seal = true
+virtualize_helpers = true
+
 [passes.tracer_attestation]
 enabled = true
 mode = "linux_ptrace"

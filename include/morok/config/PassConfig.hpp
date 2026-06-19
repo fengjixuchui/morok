@@ -176,6 +176,22 @@ struct HashSelfDecryptConfig {
     Opt<bool> context_keying;
 };
 
+struct FaultPagedPayloadConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> probability;
+    Opt<std::uint32_t> max_payloads;
+    Opt<std::uint32_t> max_payload_bytes;
+    Opt<std::uint32_t> page_size;
+    Opt<std::string> delivery;
+    Opt<std::string> backend;
+    Opt<bool> per_page_keys;
+    Opt<bool> reseal_after_use;
+    Opt<std::uint32_t> decoy_pages;
+    Opt<bool> fallback;
+    Opt<bool> bind_to_runtime_seal;
+    Opt<bool> virtualize_helpers;
+};
+
 struct ExternalSecretBindingConfig {
     Opt<bool> enabled;
     Opt<std::string> mode;
@@ -383,6 +399,7 @@ struct PassConfig {
     UniformLowerConfig uniform_lower;
     VirtualizationConfig virtualization;
     HashSelfDecryptConfig hash_self_decrypt;
+    FaultPagedPayloadConfig fault_paged_payload;
     ExternalSecretBindingConfig external_secret_binding;
     TracerAttestationConfig tracer_attestation;
     SealedBlobConfig sealed_blob;

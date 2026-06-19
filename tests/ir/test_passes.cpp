@@ -28,6 +28,7 @@
 #include "morok/passes/ExternalOpaquePredicates.hpp"
 #include "morok/passes/ExternalSecretBinding.hpp"
 #include "morok/passes/Flattening.hpp"
+#include "morok/passes/FaultPagedPayload.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
 #include "morok/passes/FunctionWrapper.hpp"
 #include "morok/passes/HashGatedSelfDecrypt.hpp"
@@ -78,6 +79,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/AtomicOrdering.h"
@@ -359,6 +361,30 @@ bool instructionReferencesGlobal(const Instruction &I, const GlobalValue *GV) {
                 return true;
     }
     return false;
+}
+
+bool pointerReferencesGlobal(Value *V, const GlobalValue *GV) {
+    if (!V || !GV)
+        return false;
+    if (V->stripPointerCasts() == GV)
+        return true;
+    if (auto *GEP = dyn_cast<GEPOperator>(V->stripPointerCasts()))
+        if (GEP->getPointerOperand()->stripPointerCasts() == GV)
+            return true;
+    if (auto *C = dyn_cast<Constant>(V))
+        return constantReferencesGlobal(C, GV);
+    return false;
+}
+
+std::size_t countVolatileLoadsFromGlobal(Function &F, GlobalVariable *GV) {
+    std::size_t N = 0;
+    for (Instruction &I : instructions(F)) {
+        auto *LI = dyn_cast<LoadInst>(&I);
+        if (LI && LI->isVolatile() &&
+            pointerReferencesGlobal(LI->getPointerOperand(), GV))
+            ++N;
+    }
+    return N;
 }
 
 std::size_t countFunctions(Module &M, StringRef prefix) {
@@ -7926,6 +7952,171 @@ entry:
                 if (Function *C = CI->getCalledFunction())
                     intrinCalls += C->getName().starts_with("llvm.") ? 1u : 0u;
     CHECK(intrinCalls == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("faultPagedPayloadModule rewrites VM bytecode to page-local accessor") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+define i32 @vm_secret(i32 %a, i32 %b) {
+entry:
+  %x = add i32 %a, %b
+  %y = xor i32 %x, 1515870810
+  %z = mul i32 %y, %a
+  ret i32 %z
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(9901);
+    morok::ir::IRRandom rng(engine);
+
+    REQUIRE(morok::passes::virtualizeModule(
+        *M,
+        {/*probability=*/100, /*max_functions=*/1,
+         /*max_instructions=*/16, /*max_registers=*/32},
+        rng));
+
+    GlobalVariable *Bytecode = nullptr;
+    for (GlobalVariable &GV : M->globals())
+        if (GV.getName().starts_with("morok.vm.bytecode"))
+            Bytecode = &GV;
+    REQUIRE(Bytecode);
+    REQUIRE(Bytecode->isConstant());
+    auto *BeforeData = dyn_cast<ConstantDataArray>(Bytecode->getInitializer());
+    REQUIRE(BeforeData);
+    std::vector<std::uint8_t> Before;
+    for (unsigned I = 0; I < BeforeData->getNumElements(); ++I)
+        Before.push_back(
+            static_cast<std::uint8_t>(BeforeData->getElementAsInteger(I)));
+
+    Function *Helper = M->getFunction("morok.vm.vm_secret.exec");
+    REQUIRE(Helper);
+    REQUIRE(countVolatileLoadsFromGlobal(*Helper, Bytecode) > 0u);
+
+    morok::passes::FaultPagedPayloadParams Params;
+    Params.probability = 100;
+    Params.max_payloads = 4;
+    Params.max_payload_bytes = 64 * 1024;
+    Params.page_size = 16;
+    Params.decoy_pages = 1;
+    Params.virtualize_helpers = false;
+    CHECK(morok::passes::faultPagedPayloadModule(*M, Params, rng));
+
+    CHECK_FALSE(Bytecode->isConstant());
+    auto *AfterData = dyn_cast<ConstantDataArray>(Bytecode->getInitializer());
+    REQUIRE(AfterData);
+    bool payloadChanged = false;
+    for (unsigned I = 0; I < AfterData->getNumElements() && I < Before.size();
+         ++I)
+        payloadChanged |= Before[I] != static_cast<std::uint8_t>(
+                                           AfterData->getElementAsInteger(I));
+    CHECK(payloadChanged);
+
+    Function *Accessor = M->getFunction("morok.fpp.load.vm_secret");
+    REQUIRE(Accessor);
+    CHECK(Accessor->hasFnAttribute("morok.fpp.no_vm"));
+    CHECK(countCallsTo(*Helper, "morok.fpp.load.vm_secret") > 0u);
+    CHECK(countVolatileLoadsFromGlobal(*Helper, Bytecode) == 0u);
+    CHECK(countVolatileLoadsFromGlobal(*Accessor, Bytecode) > 0u);
+    CHECK(M->getFunction("morok.sdb.ensure.vm_secret") == nullptr);
+    CHECK(M->getFunction("morok.sdb.seal.vm_secret") == nullptr);
+
+    GlobalVariable *Cache =
+        M->getGlobalVariable("morok.fpp.page.cache.vm_secret", true);
+    REQUIRE(Cache);
+    auto *CacheTy = dyn_cast<ArrayType>(Cache->getValueType());
+    REQUIRE(CacheTy);
+    CHECK(CacheTy->getNumElements() == 16u);
+    CHECK(maxStaticAllocaArrayBytes(*Accessor, "morok.fpp") == 0u);
+    CHECK(countGlobals(*M, "morok.fpp.page.loaded.vm_secret") == 1u);
+    CHECK(countGlobals(*M, "morok.fpp.page.active.vm_secret") == 1u);
+    CHECK(countGlobals(*M, "morok.fpp.fault.count.vm_secret") == 1u);
+    CHECK(countGlobals(*M, "morok.fpp.meta.vm_secret") == 1u);
+    CHECK(countGlobals(*M, "morok.fpp.decoy.vm_secret") == 1u);
+    GlobalVariable *Meta =
+        M->getGlobalVariable("morok.fpp.meta.vm_secret", true);
+    GlobalVariable *Decoy =
+        M->getGlobalVariable("morok.fpp.decoy.vm_secret", true);
+    REQUIRE(Meta);
+    REQUIRE(Decoy);
+    GlobalVariable *LinkerUsed = M->getGlobalVariable("llvm.used");
+    GlobalVariable *CompilerUsed = M->getGlobalVariable("llvm.compiler.used");
+    REQUIRE(LinkerUsed);
+    REQUIRE(CompilerUsed);
+    CHECK(constantReferencesGlobal(LinkerUsed->getInitializer(), Meta));
+    CHECK(constantReferencesGlobal(LinkerUsed->getInitializer(), Decoy));
+    CHECK(constantReferencesGlobal(CompilerUsed->getInitializer(), Meta));
+    CHECK(constantReferencesGlobal(CompilerUsed->getInitializer(), Decoy));
+    CHECK(M->getGlobalVariable("morok.seal.root.fault_paged_payload", true) !=
+          nullptr);
+    CHECK(countNamedInstructions(*Accessor, "morok.fpp.page.key") >= 1u);
+    CHECK(countNamedInstructions(*Accessor, "morok.fpp.fault.seal") >= 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("faultPagedPayloadModule is a no-op when no payload is selected") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+@morok.vm.bytecode.skip = private constant [16 x i8] c"0123456789abcdef"
+
+define void @morok.vm.skip.exec() {
+entry:
+  ret void
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(9903);
+    morok::ir::IRRandom rng(engine);
+
+    morok::passes::FaultPagedPayloadParams Params;
+    Params.probability = 0;
+    Params.max_payloads = 1;
+    CHECK_FALSE(morok::passes::faultPagedPayloadModule(*M, Params, rng));
+    CHECK(M->getGlobalVariable("morok.seal.root.fault_paged_payload", true) ==
+          nullptr);
+    CHECK(M->getFunction("morok.fpp.load.skip") == nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("MorokPass prefers fault-paged delivery before self-decrypt") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+define i32 @vm_delivery(i32 %a, i32 %b) {
+entry:
+  %x = add i32 %a, %b
+  %y = xor i32 %x, 305419896
+  ret i32 %y
+}
+)ir");
+
+    morok::config::Config cfg;
+    cfg.seed = 9902;
+    cfg.passes.virtualization.enabled = true;
+    cfg.passes.virtualization.probability = 100;
+    cfg.passes.virtualization.max_functions = 1;
+    cfg.passes.virtualization.max_instructions = 16;
+    cfg.passes.virtualization.max_registers = 32;
+    cfg.passes.fault_paged_payload.enabled = true;
+    cfg.passes.fault_paged_payload.probability = 100;
+    cfg.passes.fault_paged_payload.max_payloads = 1;
+    cfg.passes.fault_paged_payload.max_payload_bytes = 64 * 1024;
+    cfg.passes.fault_paged_payload.page_size = 16;
+    cfg.passes.fault_paged_payload.virtualize_helpers = false;
+    cfg.passes.hash_self_decrypt.enabled = true;
+    cfg.passes.hash_self_decrypt.probability = 100;
+    cfg.passes.hash_self_decrypt.max_payloads = 1;
+
+    ModuleAnalysisManager AM;
+    morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+    CHECK(M->getFunction("morok.fpp.load.vm_delivery") != nullptr);
+    CHECK(M->getFunction("morok.sdb.ensure.vm_delivery") == nullptr);
+    CHECK(countGlobals(*M, "morok.sdb.ready.vm_delivery") == 0u);
+    Function *Helper = M->getFunction("morok.vm.vm_delivery.exec");
+    REQUIRE(Helper);
+    CHECK(countCallsTo(*Helper, "morok.fpp.load.vm_delivery") > 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

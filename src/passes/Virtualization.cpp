@@ -213,6 +213,12 @@ bool generatedProtectionFunction(const Function &F) {
         return !F.hasFnAttribute("morok.tracer.no_vm");
     if (Name.starts_with("morok.sealed.open."))
         return true;
+    if (Name.starts_with("morok.fpp.signal.") ||
+        Name.starts_with("morok.fpp.mprotect.") ||
+        Name.starts_with("morok.fpp.veh."))
+        return false;
+    if (Name.starts_with("morok.fpp."))
+        return !F.hasFnAttribute("morok.fpp.no_vm");
     // Generated protection helpers are already hardened natively by the
     // scheduler.  Lifting startup checkers into the threaded VM makes normal
     // launches pay interpreter cost before user code runs, and can perturb

@@ -290,6 +290,17 @@ TEST_CASE("high preset matches the documented table") {
     CHECK(c.hash_self_decrypt.max_payloads == 1u);
     CHECK(c.hash_self_decrypt.max_payload_bytes == 65536u);
     CHECK(c.hash_self_decrypt.context_keying == true);
+    CHECK(c.fault_paged_payload.enabled == false);
+    CHECK(c.fault_paged_payload.probability == 100u);
+    CHECK(c.fault_paged_payload.max_payloads == 1u);
+    CHECK(c.fault_paged_payload.max_payload_bytes == 65536u);
+    CHECK(c.fault_paged_payload.page_size == 4096u);
+    CHECK(c.fault_paged_payload.backend == "lazy_accessor");
+    CHECK(c.fault_paged_payload.per_page_keys == true);
+    CHECK(c.fault_paged_payload.reseal_after_use == true);
+    CHECK(c.fault_paged_payload.decoy_pages == 1u);
+    CHECK(c.fault_paged_payload.bind_to_runtime_seal == true);
+    CHECK(c.fault_paged_payload.virtualize_helpers == true);
     CHECK(c.tracer_attestation.enabled == true);
     CHECK(c.tracer_attestation.mode == "linux_ptrace");
     CHECK(c.tracer_attestation.shares == 1u);
@@ -410,6 +421,9 @@ TEST_CASE("max preset enables every pass at full intensity") {
     CHECK(c.virtualization.enabled == true);
     CHECK(c.hash_self_decrypt.enabled == true);
     CHECK(c.hash_self_decrypt.max_payload_bytes == 65536u);
+    CHECK(c.fault_paged_payload.enabled == false);
+    CHECK(c.fault_paged_payload.max_payloads == 16u);
+    CHECK(c.fault_paged_payload.decoy_pages == 2u);
     CHECK(c.tracer_attestation.enabled == true);
     CHECK(c.sealed_blob.enabled == true);
     CHECK(c.sealed_blob.max_blobs == 16u);

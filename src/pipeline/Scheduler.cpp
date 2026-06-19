@@ -27,6 +27,7 @@
 #include "morok/passes/ExternalOpaquePredicates.hpp"
 #include "morok/passes/ExternalSecretBinding.hpp"
 #include "morok/passes/Flattening.hpp"
+#include "morok/passes/FaultPagedPayload.hpp"
 #include "morok/passes/FunctionCallObfuscate.hpp"
 #include "morok/passes/FunctionWrapper.hpp"
 #include "morok/passes/HashGatedSelfDecrypt.hpp"
@@ -223,6 +224,7 @@ bool hasSensitiveGeneratedPrefix(StringRef Name) {
            Name.starts_with("morok.sealed.") ||
            Name.starts_with("morok.mg.node.") ||
            Name.starts_with("morok.mg.diff.") ||
+           Name.starts_with("morok.fpp.") ||
            Name.starts_with("morok.antidbg") ||
            Name.starts_with("morok.watchdog") ||
            Name.starts_with("morok.antihook") ||
@@ -236,8 +238,12 @@ bool isSensitiveGeneratedFunction(const Function &F) {
     StringRef Name = F.getName();
     // Keep fault/page-protection choreography native; generic shell hardening
     // can disturb the exact signal and mprotect edge these probes rely on.
-    if (Name == "morok.antihook" || Name.starts_with("morok.antihook.schro") ||
-        Name.starts_with("morok.antihook.antidump"))
+    if (Name == "morok.antihook" ||
+        Name.starts_with("morok.antihook.schro") ||
+        Name.starts_with("morok.antihook.antidump") ||
+        Name.starts_with("morok.fpp.signal.") ||
+        Name.starts_with("morok.fpp.mprotect.") ||
+        Name.starts_with("morok.fpp.veh."))
         return false;
     return hasSensitiveGeneratedPrefix(Name);
 }
@@ -305,6 +311,24 @@ passes::SealedBlobParams sealedBlobParams(const config::SealedBlobConfig &C) {
         P.key_sources = C.key_sources;
     P.delivery = C.delivery.value_or(P.delivery);
     P.zeroize_after_use = C.zeroize_after_use.value_or(P.zeroize_after_use);
+    return P;
+}
+
+passes::FaultPagedPayloadParams
+faultPagedPayloadParams(const config::FaultPagedPayloadConfig &C) {
+    passes::FaultPagedPayloadParams P;
+    P.enabled = C.enabled.value_or(true);
+    P.probability = C.probability.value_or(100);
+    P.max_payloads = C.max_payloads.value_or(4);
+    P.max_payload_bytes = C.max_payload_bytes.value_or(P.max_payload_bytes);
+    P.page_size = C.page_size.value_or(P.page_size);
+    P.backend = C.backend.value_or(C.delivery.value_or(P.backend));
+    P.per_page_keys = C.per_page_keys.value_or(true);
+    P.reseal_after_use = C.reseal_after_use.value_or(true);
+    P.decoy_pages = C.decoy_pages.value_or(0);
+    P.fallback = C.fallback.value_or(true);
+    P.bind_to_runtime_seal = C.bind_to_runtime_seal.value_or(true);
+    P.virtualize_helpers = C.virtualize_helpers.value_or(true);
     return P;
 }
 
@@ -423,12 +447,13 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // later passes rewrite those bodies in ways the bytecode cannot encode and
     // would make them ineligible — decoy-string injection plants references to
     // global string pointers (un-encodable as bytecode immediates), and the
-    // per-function loop's splitting/flattening reshapes the CFG.  Running the
-    // VM up front lets it claim the clean kernels; every later pass then layers
-    // on top of the resulting wrappers/helpers.  Hash-gated self-decrypt wraps
-    // this first wave of emitted bytecode, so it runs immediately after.  A
-    // later protection-helper-only VM pass covers generated checker helpers
-    // once the anti-analysis/integrity passes have emitted them.
+    // per-function loop's splitting/flattening reshapes the CFG.  Running the VM
+    // up front lets it claim the clean kernels; every later pass then layers on
+    // top of the resulting wrappers/helpers.  Fault-paged payload delivery and
+    // hash-gated self-decrypt wrap this first wave of emitted bytecode, so they
+    // run immediately after.  A later protection-helper-only VM pass covers
+    // generated checker helpers once the anti-analysis/integrity passes have
+    // emitted them.
     if (InitialModuleGrowthOk &&
         config_.passes.virtualization.enabled.value_or(false)) {
         passes::VirtualizationParams p;
@@ -447,6 +472,13 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         // stack frames and trap.  Indirect/import/vararg calls remain excluded.
         p.allow_internal_user_calls = true;
         changed |= passes::virtualizeModule(M, p, rng);
+    }
+
+    if (InitialModuleGrowthOk &&
+        config_.passes.fault_paged_payload.enabled.value_or(false)) {
+        passes::FaultPagedPayloadParams p =
+            faultPagedPayloadParams(config_.passes.fault_paged_payload);
+        changed |= passes::faultPagedPayloadModule(M, p, rng);
     }
 
     if (InitialModuleGrowthOk &&
@@ -1056,9 +1088,16 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         changed |= hardenSensitiveGeneratedFunctions(M, config_.passes, rng);
 
     // Re-scan after the late generated-helper stage.  Already wrapped user VM
-    // bytecode is mutable and skipped by HashGatedSelfDecrypt, while any new
-    // helper bytecode emitted late is still a constant morok.vm.bytecode.*
-    // payload and receives the same lazy ensure/seal boundary.
+    // bytecode is mutable and skipped, while any new helper bytecode emitted
+    // late is still a constant morok.vm.bytecode.* payload and receives the
+    // same configured delivery boundary.
+    if (InitialModuleGrowthOk &&
+        config_.passes.fault_paged_payload.enabled.value_or(false)) {
+        passes::FaultPagedPayloadParams p =
+            faultPagedPayloadParams(config_.passes.fault_paged_payload);
+        changed |= passes::faultPagedPayloadModule(M, p, rng);
+    }
+
     if (InitialModuleGrowthOk &&
         config_.passes.hash_self_decrypt.enabled.value_or(false)) {
         passes::HashGatedSelfDecryptParams p =

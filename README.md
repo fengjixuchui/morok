@@ -418,8 +418,8 @@ function matching uses demangled names where possible.
 | `none` | No preset base. Only explicitly enabled pass sections or policies apply. |
 | `low` | Light scalar/control rewriting, string encryption, constant sharing, split blocks, and retained decoy strings. |
 | `mid` | Broader scalar/control obfuscation with more density and vector/table features than `low`. |
-| `high` | Bounded aggressive mode: capped VM/self-decrypt/integrity/table/MQ/microstress/function-wrapper slices while keeping expensive graph-wide searches controlled. |
-| `max` | Full preset-managed stack: high probabilities, maximal tested budgets, anti-debug/anti-hook/timing/trap bundle, FCO, VM, self-decrypt, integrity, routing, wrappers, Windows pass toggles, and decoys. |
+| `high` | Bounded aggressive mode: capped VM/self-decrypt/integrity/table/MQ/microstress/function-wrapper slices while keeping expensive graph-wide searches controlled. Fault-paged payload knobs are preset but opt-in while the portable backend is `lazy_accessor`. |
+| `max` | Full preset-managed stack: high probabilities, maximal tested budgets, anti-debug/anti-hook/timing/trap bundle, FCO, VM, self-decrypt, integrity, routing, wrappers, Windows pass toggles, and decoys. Fault-paged payload delivery remains opt-in until an OS-backed backend meets the max runtime gate. |
 
 The scheduler enforces instruction, block, function, module, byte, table,
 route, callsite, clone, payload, and visit caps. If a function or module grows
@@ -461,7 +461,8 @@ composition:
 
 ```text
 VM(user code)
--> hash-gated VM self-decrypt
+-> fault-paged VM payload delivery
+-> hash-gated VM self-decrypt for remaining eager payloads
 -> anti-hook / anti-class-dump / Windows substrate and Windows probes
 -> anti-debug / timing / trap / page-fault / cache / microarchitectural probes
 -> decoy strings
@@ -598,6 +599,7 @@ helper, then volatile-zero the temporary buffer when configured.
 | Capability | `-passes` name | TOML section | Summary |
 |---|---|---|---|
 | Virtualization | `morok-vm` | `virtualization` | Lifts eligible integer/pointer computation kernels to encrypted threaded bytecode VMs, including multi-block, memory, cast, compare, division, selected intrinsics, and direct internal helper calls when safe. |
+| Fault-paged payload delivery | `morok-fpp` | `fault_paged_payload` | Encrypts VM bytecode per page and replaces direct bytecode loads with a lazy accessor that decrypts one page-local cache at a time, re-clears page state on switches, and binds anomalous access to the `fault_paged_payload` runtime seal channel. |
 | Hash-gated self-decrypt | `morok-selfdecrypt` | `hash_gated_self_decrypt` | Lazily decrypts VM bytecode from runtime hashes/context and re-encrypts on helper exit. |
 | External proof binding | `morok-proofbind` | `external_secret_binding` | Materializes a proof feed/finish API and folds proof-derived material into the `external_proof` runtime seal channel instead of returning a branchable verdict. |
 | Tracer attestation | `morok-tracer` | `tracer_attestation` | Uses a Linux/x86_64 buddy tracer to inject runtime-only share words into the parent and folds them into the `tracer` runtime seal channel. |
@@ -609,10 +611,14 @@ helper, then volatile-zero the temporary buffer when configured.
 VM dispatch is total over all 256 decoded handler IDs. Invalid decoded opcodes,
 registers, pointer-table indexes, branch targets, and unsafe div/rem operands
 are folded into a local poison accumulator and canonicalized to in-bounds state
-instead of trapping or indexing out of range. Hash-gated self-decrypt follows the
-same release-mode policy: a failed payload hash poisons the bytecode and
-publishes it as ready so tamper surfaces as wrong VM output, not a fixed
-`llvm.trap` oracle.
+instead of trapping or indexing out of range. Fault-paged payload delivery is
+preferred for configured VM payloads and leaves already protected bytecode
+mutable, so hash-gated self-decrypt only wraps remaining eager payloads. It does
+not allocate a full-payload plaintext scratch buffer; the accessor decrypts the
+requested page into a fixed-size cache and clears it before another page is
+materialized. Hash-gated self-decrypt follows the same release-mode policy: a
+failed payload hash poisons the bytecode and publishes it as ready so tamper
+surfaces as wrong VM output, not a fixed `llvm.trap` oracle.
 
 The scheduler runs a second, restricted VM/hardening stage over allowlisted
 generated protection helpers so anti-debug, anti-hook, decryptor, and integrity
@@ -723,6 +729,7 @@ shares where needed.
 | `vtable_integrity` | `enabled` |
 | `decoy_strings` | `enabled` |
 | `virtualization` | `enabled`, `probability`, `max_functions`, `max_instructions`, `max_registers` |
+| `fault_paged_payload` | `enabled`, `probability`, `max_payloads`, `max_payload_bytes`, `page_size`, `delivery`, `backend`, `per_page_keys`, `reseal_after_use`, `decoy_pages`, `fallback`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `hash_gated_self_decrypt` | `enabled`, `probability`, `max_payloads`, `max_payload_bytes`, `context_keying` |
 | `external_secret_binding` | `enabled`, `mode`, `public_key`, `identity_policy`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `tracer_attestation` | `enabled`, `mode`, `shares`, `renewal`, `bind_to_runtime_seal`, `virtualize_helpers` |
