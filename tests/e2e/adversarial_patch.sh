@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Compile a clean binary and a Morok-protected binary, post-link seal the
-# protected self-checksum manifests, then deliberately patch selected native
-# bytes. The patched binary must not retain the same exit code and output as the
-# sealed baseline.
+# Compile a clean binary and a Morok-protected binary, post-link seal protected
+# integrity manifests, then deliberately patch selected native bytes. The
+# patched binary must not retain the same exit code and output as the sealed
+# baseline.
 #
 # Usage:
 #   adversarial_patch.sh <python3> <clang> <plugin> <sdk> <source> <config.toml> <patch-mode> [seed]
@@ -113,7 +113,7 @@ if ! env "${MOROK_ENV[@]}" "$CLANG" "${SYSROOT[@]}" -O2 -std=c11 -D_GNU_SOURCE \
 fi
 
 if ! "$PYTHON" "$TOOL" seal "$OBF" --window 262144; then
-  echo "FAIL post-link seal produced no self-check manifests" >&2
+  echo "FAIL post-link seal produced no integrity manifests" >&2
   exit 1
 fi
 if ! "$PYTHON" "$TOOL" assert-no-postlink-oracles "$OBF"; then
@@ -137,6 +137,10 @@ cp "$OBF" "$PATCHED"
 case "$PATCH_MODE" in
   selfcheck-code)
     "$PYTHON" "$TOOL" patch-selfcheck-code "$PATCHED"
+    patch_rc="$?"
+    ;;
+  mutualguard-code)
+    "$PYTHON" "$TOOL" patch-mutualguard-code "$PATCHED"
     patch_rc="$?"
     ;;
   timing)

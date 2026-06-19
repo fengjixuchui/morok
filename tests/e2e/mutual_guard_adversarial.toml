@@ -1,0 +1,11 @@
+# Adversarial mutual-guard binary-patching e2e config.
+
+[global]
+preset = "none"
+
+[passes.mutual_guard_graph]
+enabled = true
+probability = 100
+nodes = 3
+region_bytes = 48
+max_returns = 2

@@ -3,10 +3,10 @@
 #
 # Test-only binary mutator for adversarial e2e gates.
 #
-# `seal` finalizes self_checksum_constants post-link manifests by filling the
-# expected hash and code-window length after native layout is known. `patch-*`
-# deliberately mutates protected bytes so the sealed binary must stop behaving
-# like the unpatched one.
+# `seal` finalizes post-link integrity manifests by filling expected hashes and
+# code-window lengths after native layout is known. `patch-*` deliberately
+# mutates protected bytes so the sealed binary must stop behaving like the
+# unpatched one.
 
 from __future__ import annotations
 
@@ -23,7 +23,10 @@ SC_MAGIC = 0xA7D13C5E9000C3B2
 SC_MANIFEST_SIZE = 72
 MG_MAGIC = 0x8E21B7C4005AF10D
 MG_HEADER_SIZE = 24
-MG_RECORD_SIZE = 32
+MG_RECORD_V2_SIZE = 32
+MG_RECORD_V3_SIZE = 56
+MG_UNSEALED_CODE_SIZE = 0xFFFFFFFF
+MASK64 = 0xFFFFFFFFFFFFFFFF
 
 CPU_TYPE_X86_64 = 0x01000007
 CPU_TYPE_ARM64 = 0x0100000C
@@ -70,6 +73,28 @@ class Manifest:
     expected_hash: int
     target: int
     code_size: int
+
+
+@dataclass
+class MgNodeManifest:
+    offset: int
+    index: int
+    region: int
+    expected: int
+    target: int
+    code_size: int
+    native_expected: int
+    seed: int
+    expected_hash: int
+
+
+@dataclass
+class MgManifest:
+    offset: int
+    version: int
+    region_size: int
+    coverage_depth: int
+    nodes: list[MgNodeManifest]
 
 
 class Binary:
@@ -314,6 +339,93 @@ class Binary:
                 found.append(m)
         return found
 
+    def find_mg_manifests(self) -> list[MgManifest]:
+        needle = struct.pack("<Q", MG_MAGIC)
+        found: list[MgManifest] = []
+        start = 0
+        while True:
+            off = self.data.find(needle, start)
+            if off < 0:
+                break
+            start = off + 1
+            if off + MG_HEADER_SIZE > len(self.data):
+                continue
+            version = self.u32(off + 8)
+            count = self.u32(off + 12)
+            region_size = self.u32(off + 16)
+            coverage = self.u32(off + 20)
+            if version == 2:
+                record_size = MG_RECORD_V2_SIZE
+            elif version == 3:
+                record_size = MG_RECORD_V3_SIZE
+            else:
+                continue
+            if count == 0 or count > 1024 or region_size == 0 or region_size > 1 << 20:
+                continue
+            total_size = MG_HEADER_SIZE + count * record_size
+            if off + total_size > len(self.data):
+                continue
+
+            nodes: list[MgNodeManifest] = []
+            for i in range(count):
+                rec = off + MG_HEADER_SIZE + i * record_size
+                region = self.decode_pointer(self.u64(rec))
+                expected = self.decode_pointer(self.u64(rec + 8))
+                if (
+                    self.fileoff_for_addr(region) is None
+                    or self.fileoff_for_addr(expected) is None
+                ):
+                    continue
+                if version == 2:
+                    nodes.append(
+                        MgNodeManifest(
+                            offset=rec,
+                            index=i,
+                            region=region,
+                            expected=expected,
+                            target=0,
+                            code_size=0,
+                            native_expected=0,
+                            seed=self.u64(rec + 16),
+                            expected_hash=self.u64(rec + 24),
+                        )
+                    )
+                    continue
+
+                target = self.decode_pointer(self.u64(rec + 16))
+                code_size = self.decode_pointer(self.u64(rec + 24))
+                native_expected = self.decode_pointer(self.u64(rec + 32))
+                if (
+                    self.fileoff_for_addr(target) is None
+                    or self.fileoff_for_addr(code_size) is None
+                    or self.fileoff_for_addr(native_expected) is None
+                ):
+                    continue
+                nodes.append(
+                    MgNodeManifest(
+                        offset=rec,
+                        index=i,
+                        region=region,
+                        expected=expected,
+                        target=target,
+                        code_size=code_size,
+                        native_expected=native_expected,
+                        seed=self.u64(rec + 40),
+                        expected_hash=self.u64(rec + 48),
+                    )
+                )
+            if nodes:
+                found.append(
+                    MgManifest(
+                        offset=off,
+                        version=version,
+                        region_size=region_size,
+                        coverage_depth=coverage,
+                        nodes=nodes,
+                    )
+                )
+        return found
+
     def macho_stub_offsets(self, wanted: set[str]) -> list[tuple[str, int, int]]:
         if self.kind != "macho" or not self.symbols or not self.indirect_symbols:
             return []
@@ -365,6 +477,18 @@ def hash_bytes(blob: bytes, seed: int) -> int:
     return h
 
 
+def rotl64_value(value: int, amount: int) -> int:
+    sh = (amount % 63) + 1
+    return ((value << sh) | (value >> (64 - sh))) & MASK64
+
+
+def mg_native_seed(region_hash: int, index: int) -> int:
+    salt = (0xD6E8FEB86659FD93 + index * 0x100000001B3) & MASK64
+    mul = (0x94D049BB133111EB + index * 0x9E37) & MASK64
+    mixed = ((region_hash ^ salt) * mul) & MASK64
+    return (rotl64_value(region_hash, 17 + index * 11) ^ mixed) & MASK64
+
+
 def resign_macho(binary: "Binary", path: Path) -> None:
     """Re-sign a modified Mach-O so the kernel will run it.
 
@@ -395,7 +519,7 @@ def resign_macho(binary: "Binary", path: Path) -> None:
 def seal(path: Path, window: int) -> int:
     binary = Binary(path)
     manifests = binary.find_sc_manifests()
-    sealed = 0
+    sealed_sc = 0
     for m in manifests:
         if m.seed == 0 and m.expected_hash == 0:
             continue
@@ -422,12 +546,47 @@ def seal(path: Path, window: int) -> int:
         binary.put_u32(code_size_off, code_len)
         binary.put_u64(m.offset + 40, 0)
         binary.put_u64(m.offset + 48, 0)
-        sealed += 1
-    if sealed:
+        sealed_sc += 1
+
+    sealed_mg = 0
+    for manifest in binary.find_mg_manifests():
+        if manifest.version != 3:
+            continue
+        for node in manifest.nodes:
+            expected_off = binary.fileoff_for_addr(node.expected)
+            target_seg = binary.segment_for_addr(node.target)
+            target_off = binary.fileoff_for_addr(node.target)
+            code_size_off = binary.fileoff_for_addr(node.code_size)
+            native_expected_off = binary.fileoff_for_addr(node.native_expected)
+            if (
+                expected_off is None
+                or target_seg is None
+                or target_off is None
+                or code_size_off is None
+                or native_expected_off is None
+            ):
+                continue
+            seg_end_addr = target_seg.vmaddr + target_seg.filesize
+            code_len = max(0, min(window, seg_end_addr - node.target))
+            if code_len <= 0 or code_len == MG_UNSEALED_CODE_SIZE:
+                continue
+            code = bytes(binary.data[target_off : target_off + code_len])
+            region_hash = binary.u64(expected_off)
+            native_expected = hash_bytes(code, mg_native_seed(region_hash, node.index))
+            binary.put_u64(native_expected_off, native_expected)
+            binary.put_u32(code_size_off, code_len)
+            binary.put_u64(node.offset + 40, 0)
+            binary.put_u64(node.offset + 48, 0)
+            sealed_mg += 1
+
+    if sealed_sc or sealed_mg:
         binary.write()
         resign_macho(binary, path)
-    print(f"sealed self-check manifests={sealed} binary={path}")
-    return 0 if sealed else 1
+    print(
+        f"sealed self-check manifests={sealed_sc} "
+        f"mutual-guard nodes={sealed_mg} binary={path}"
+    )
+    return 0 if sealed_sc or sealed_mg else 1
 
 
 def postlink_oracle_findings(binary: Binary) -> list[str]:
@@ -439,37 +598,12 @@ def postlink_oracle_findings(binary: Binary) -> list[str]:
                 "seed/expected_hash"
             )
 
-    needle = struct.pack("<Q", MG_MAGIC)
-    start = 0
-    while True:
-        off = binary.data.find(needle, start)
-        if off < 0:
-            break
-        start = off + 1
-        if off + MG_HEADER_SIZE > len(binary.data):
-            continue
-        version = binary.u32(off + 8)
-        count = binary.u32(off + 12)
-        region_size = binary.u32(off + 16)
-        if version != 2 or count == 0 or count > 1024 or region_size > 1 << 20:
-            continue
-        total_size = MG_HEADER_SIZE + count * MG_RECORD_SIZE
-        if off + total_size > len(binary.data):
-            continue
-        for i in range(count):
-            rec = off + MG_HEADER_SIZE + i * MG_RECORD_SIZE
-            region = binary.decode_pointer(binary.u64(rec))
-            expected = binary.decode_pointer(binary.u64(rec + 8))
-            if (
-                binary.fileoff_for_addr(region) is None
-                or binary.fileoff_for_addr(expected) is None
-            ):
-                continue
-            seed = binary.u64(rec + 16)
-            expected_hash = binary.u64(rec + 24)
-            if seed != 0 or expected_hash != 0:
+    for manifest in binary.find_mg_manifests():
+        for node in manifest.nodes:
+            if node.seed != 0 or node.expected_hash != 0:
                 findings.append(
-                    f"mutual-guard manifest at file+0x{off:x} node={i} "
+                    f"mutual-guard manifest at file+0x{manifest.offset:x} "
+                    f"node={node.index} "
                     "retains seed/expected_hash"
                 )
     return findings
@@ -486,16 +620,10 @@ def assert_no_postlink_oracles(path: Path) -> int:
     return 0
 
 
-def patch_selfcheck_code(path: Path) -> int:
-    binary = Binary(path)
-    manifests = binary.find_sc_manifests()
-    if not manifests:
-        print("no self-check manifests to patch", file=sys.stderr)
-        return 1
-    m = manifests[0]
-    target_off = binary.fileoff_for_addr(m.target)
+def patch_code_at(binary: Binary, target: int, label: str) -> int:
+    target_off = binary.fileoff_for_addr(target)
     if target_off is None:
-        print("manifest target is not file-backed", file=sys.stderr)
+        print(f"{label} target is not file-backed", file=sys.stderr)
         return 1
     if binary.arch == "arm64":
         # ARM64 NOP: 1f 20 03 d5
@@ -506,8 +634,33 @@ def patch_selfcheck_code(path: Path) -> int:
     else:
         print(f"unsupported architecture for code patch: {binary.arch}", file=sys.stderr)
         return 77
+    print(f"patched {label} code byte at target=0x{target:x}")
+    return 0
+
+
+def patch_selfcheck_code(path: Path) -> int:
+    binary = Binary(path)
+    manifests = binary.find_sc_manifests()
+    if not manifests:
+        print("no self-check manifests to patch", file=sys.stderr)
+        return 1
+    rc = patch_code_at(binary, manifests[0].target, "self-check")
+    if rc != 0:
+        return rc
     binary.write()
-    print(f"patched sealed code byte at manifest target=0x{m.target:x}")
+    return 0
+
+
+def patch_mutualguard_code(path: Path) -> int:
+    binary = Binary(path)
+    manifests = [m for m in binary.find_mg_manifests() if m.version == 3]
+    if not manifests or not manifests[0].nodes:
+        print("no mutual-guard manifests to patch", file=sys.stderr)
+        return 1
+    rc = patch_code_at(binary, manifests[0].nodes[0].target, "mutual-guard")
+    if rc != 0:
+        return rc
+    binary.write()
     return 0
 
 
@@ -581,6 +734,9 @@ def main(argv: list[str]) -> int:
     p_code = sub.add_parser("patch-selfcheck-code")
     p_code.add_argument("binary", type=Path)
 
+    p_mg_code = sub.add_parser("patch-mutualguard-code")
+    p_mg_code.add_argument("binary", type=Path)
+
     p_timing = sub.add_parser("patch-timing")
     p_timing.add_argument("binary", type=Path)
 
@@ -592,6 +748,8 @@ def main(argv: list[str]) -> int:
         return seal(args.binary, args.window)
     if args.cmd == "patch-selfcheck-code":
         return patch_selfcheck_code(args.binary)
+    if args.cmd == "patch-mutualguard-code":
+        return patch_mutualguard_code(args.binary)
     if args.cmd == "patch-timing":
         return patch_timing(args.binary)
     if args.cmd == "assert-no-postlink-oracles":

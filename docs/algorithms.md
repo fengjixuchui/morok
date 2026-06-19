@@ -727,27 +727,31 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
 
 ## Mutual guard graph — IR structure
 - True overlapping code-byte checkers need post-link ranges.  The IR pass emits
-  the final contract over private `morok.mg.region.*` byte regions and mutable
-  `morok.mg.expected.*` hash globals; a post-link rewriter can replace both
-  with native ranges and final expected hashes after layout is fixed.
+  private `morok.mg.region.*` byte regions, mutable `morok.mg.expected.*` hash
+  globals, and per-node `morok.mg.code.size.*` /
+  `morok.mg.native.expected.*` native-window descriptors.  Unsealed builds skip
+  the native leg; a post-link sealer writes the protected function's final code
+  window length and native expected hash after layout is fixed.
 - Each selected function receives several internal `morok.mg.node.*` helpers.
   A node hashes its own region and adjacent peer regions with volatile byte
-  loads, volatile-loads each covered region's expected hash, and also compares
-  those expected globals against baked constants.  With three or more nodes,
-  every region byte is covered by three independent node helpers; two-node
-  graphs still cover every byte twice.  The node returns a mixed diff that is
-  zero only when all covered regions and expected globals match the baked graph
-  constants.
+  loads, volatile-loads each covered region's expected hash, compares those
+  expected globals against baked constants through a non-linear mix, and, once
+  sealed, volatile-loads the protected function's native bytes.  With three or
+  more nodes, every region byte and native window is covered by three
+  independent node helpers; two-node graphs still cover every byte twice.  The
+  node returns a mixed diff that is zero only when all covered regions, expected
+  globals, and sealed native windows match the graph contract.
 - The internal `morok.mg.diff.*` aggregator calls every node and xors/mixes the
   node diffs.  Valid graphs contribute zero.  Tampering with one region or
   expected hash makes every covering node contribute nonzero data.
 - The pass also emits a retained `morok.postlink.mg.*` manifest in
   `llvm.compiler.used`.  The manifest records a non-printable magic/version,
   node count, region byte count, coverage depth, and per-node records containing
-  the region pointer, expected-hash pointer, and scrubbed seed/hash placeholders.
-  Live seeds and baked expected hashes remain only in the checker code and
-  expected globals, so the retained manifest preserves the graph contract
-  without handing a local patcher the recomputation recipe.
+  the region pointer, expected-hash pointer, protected function pointer,
+  code-size pointer, native-expected pointer, and scrubbed seed/hash
+  placeholders.  Live seeds and baked expected hashes remain only in the checker
+  code and expected globals, so the retained manifest preserves the graph
+  contract without handing a local patcher the recomputation recipe.
 - Selected scalar integer and floating-point returns are rewritten as
   `ret_value ^ graph_diff` (truncated to the return width as needed).  Floating
   returns (`half`, `bfloat`, `float`, `double`) are bitcast to an equal-width

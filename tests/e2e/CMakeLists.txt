@@ -30,6 +30,8 @@ set(_max_config "${CMAKE_CURRENT_SOURCE_DIR}/max.toml")
 set(_portable_config "${CMAKE_CURRENT_SOURCE_DIR}/portable.toml")
 set(_adversarial_driver "${CMAKE_CURRENT_SOURCE_DIR}/adversarial_patch.sh")
 set(_adversarial_config "${CMAKE_CURRENT_SOURCE_DIR}/adversarial.toml")
+set(_adversarial_mg_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/mutual_guard_adversarial.toml")
 set(_adversarial_workload
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/adversarial_integrity.c")
 set(_fco_exception_driver "${CMAKE_CURRENT_SOURCE_DIR}/fco_exception_threads.sh")
@@ -169,6 +171,22 @@ if(APPLE AND Python3_EXECUTABLE)
     LABELS "e2e;adversarial;max"
     REQUIRED_FILES
       "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_config};${_adversarial_workload}"
+    TIMEOUT 120)
+
+  add_test(NAME "e2e/adversarial_mutualguard_code_patch"
+    COMMAND bash "${_adversarial_driver}"
+            "${Python3_EXECUTABLE}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_adversarial_workload}"
+            "${_adversarial_mg_config}"
+            "mutualguard-code"
+            4242)
+  set_tests_properties("e2e/adversarial_mutualguard_code_patch" PROPERTIES
+    LABELS "e2e;adversarial;max"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_adversarial_driver};${_adversarial_mg_config};${_adversarial_workload}"
     TIMEOUT 120)
 
   add_test(NAME "e2e/adversarial_timing_probe_patch"

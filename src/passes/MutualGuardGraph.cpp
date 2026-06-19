@@ -5,10 +5,11 @@
 // morok/passes/MutualGuardGraph.cpp
 //
 // IR-stage mutual guard graph.  Final native code-region checksums need
-// post-link sizing, so this pass emits many private IR-owned checksum regions
-// plus mutable expected-hash globals that a post-link rewriter can replace.
-// Each checker validates its own region and peer expected hashes; the graph's
-// combined diff is fused into return values as data, not a trap or branch.
+// post-link sizing, so this pass emits private IR-owned checksum regions plus
+// mutable native-code window descriptors that a post-link sealer can fill. Each
+// checker validates its own region, peer expected hashes, and sealed native
+// bytes; the graph's combined diff is fused into return values as data, not a
+// trap or branch.
 
 #include "morok/passes/MutualGuardGraph.hpp"
 
@@ -45,9 +46,16 @@ using Builder = IRBuilder<NoFolder>;
 // markers in emitted binaries become cheap static-analysis anchors.
 constexpr std::uint64_t kPostlinkMagic = 0x8E21B7C4005AF10DULL;
 
+// File-backed nonzero sentinel for post-link native-code window lengths.  Zero
+// initializers can land in BSS/NOBITS and become unpatchable in the final file;
+// the runtime treats both 0 and this sentinel as "unsealed".
+constexpr std::uint32_t kUnsealedCodeSize = 0xFFFFFFFFu;
+
 struct NodeRuntime {
     GlobalVariable *region = nullptr;
     GlobalVariable *expected = nullptr;
+    GlobalVariable *code_size = nullptr;
+    GlobalVariable *native_expected = nullptr;
     Function *checker = nullptr;
     std::uint64_t expected_hash = 0;
     std::uint64_t seed = 0;
@@ -223,11 +231,58 @@ GlobalVariable *createExpected(Module &M, StringRef Suffix, std::uint32_t Index,
     return Expected;
 }
 
+GlobalVariable *createCodeSize(Module &M, StringRef Suffix,
+                               std::uint32_t Index) {
+    auto *I32 = Type::getInt32Ty(M.getContext());
+    auto *CodeSize = new GlobalVariable(
+        M, I32, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I32, kUnsealedCodeSize),
+        (Twine("morok.mg.code.size.") + Suffix + "." + Twine(Index)).str());
+    CodeSize->setAlignment(Align(4));
+    return CodeSize;
+}
+
+GlobalVariable *createNativeExpected(Module &M, StringRef Suffix,
+                                     std::uint32_t Index,
+                                     std::uint64_t Initial) {
+    auto *I64 = Type::getInt64Ty(M.getContext());
+    auto *Expected = new GlobalVariable(
+        M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I64, Initial ? Initial : 1),
+        (Twine("morok.mg.native.expected.") + Suffix + "." + Twine(Index))
+            .str());
+    Expected->setAlignment(Align(8));
+    return Expected;
+}
+
 Value *regionPtr(Builder &B, GlobalVariable *Region, Value *Idx) {
     auto *I32 = B.getInt32Ty();
     auto *ArrTy = cast<ArrayType>(Region->getValueType());
     return B.CreateInBoundsGEP(ArrTy, Region, {ConstantInt::get(I32, 0), Idx},
                                "morok.mg.region.ptr");
+}
+
+Value *codePtr(Builder &B, Function *Target, Value *Idx) {
+    auto *I64 = B.getInt64Ty();
+    Value *Base = B.CreatePtrToInt(Target, I64, "morok.mg.code.base");
+    Value *Offset = B.CreateZExt(Idx, I64, "morok.mg.code.offset");
+    Value *Addr = B.CreateAdd(Base, Offset, "morok.mg.code.addr");
+    return B.CreateIntToPtr(Addr, PointerType::getUnqual(B.getContext()),
+                            "morok.mg.code.ptr");
+}
+
+Value *nativeHashSeed(Builder &B, Value *RegionHash,
+                      std::uint32_t RegionIndex) {
+    auto *I64 = B.getInt64Ty();
+    Value *Rot = rotl64(B, RegionHash, 17u + RegionIndex * 11u,
+                        "morok.mg.code.seed.rot");
+    Value *Salt = ConstantInt::get(I64, 0xd6e8feb86659fd93ULL +
+                                            RegionIndex * 0x100000001b3ULL);
+    Value *Mul = B.CreateMul(
+        B.CreateXor(RegionHash, Salt, "morok.mg.code.seed.xor"),
+        ConstantInt::get(I64, 0x94d049bb133111ebULL + RegionIndex * 0x9e37ULL),
+        "morok.mg.code.seed.mul");
+    return B.CreateXor(Rot, Mul, "morok.mg.code.seed");
 }
 
 LoadInst *volatileExpectedLoad(Builder &B, GlobalVariable *Expected,
@@ -239,8 +294,8 @@ LoadInst *volatileExpectedLoad(Builder &B, GlobalVariable *Expected,
     return Load;
 }
 
-Value *emitCoveredRegionCheck(Module &M, Function *Fn, Builder &B,
-                              const NodeRuntime &Covered,
+Value *emitCoveredRegionCheck(Module &M, Function *Fn, Function *Target,
+                              Builder &B, const NodeRuntime &Covered,
                               std::uint32_t RegionIndex, bool Peer,
                               Value *Acc) {
     LLVMContext &Ctx = M.getContext();
@@ -252,10 +307,14 @@ Value *emitCoveredRegionCheck(Module &M, Function *Fn, Builder &B,
         static_cast<std::uint32_t>(ArrTy->getNumElements());
 
     BasicBlock *Pred = B.GetInsertBlock();
-    BasicBlock *Loop = BasicBlock::Create(Ctx, Peer ? "peer.hash" : "self.hash",
-                                          Fn);
-    BasicBlock *Exit = BasicBlock::Create(Ctx, Peer ? "peer.exit" : "self.exit",
-                                          Fn);
+    BasicBlock *Loop =
+        BasicBlock::Create(Ctx, Peer ? "peer.hash" : "self.hash", Fn);
+    BasicBlock *CodeCheck = BasicBlock::Create(
+        Ctx, Peer ? "peer.code.check" : "self.code.check", Fn);
+    BasicBlock *CodeLoop =
+        BasicBlock::Create(Ctx, Peer ? "peer.code.hash" : "self.code.hash", Fn);
+    BasicBlock *Exit =
+        BasicBlock::Create(Ctx, Peer ? "peer.exit" : "self.exit", Fn);
     B.CreateBr(Loop);
 
     Builder LB(Loop);
@@ -274,22 +333,82 @@ Value *emitCoveredRegionCheck(Module &M, Function *Fn, Builder &B,
     H->addIncoming(NextH, Loop);
     Value *Done = LB.CreateICmpEQ(NextI, ConstantInt::get(I32, Size),
                                   "morok.mg.hash.done");
-    LB.CreateCondBr(Done, Exit, Loop);
+    LB.CreateCondBr(Done, CodeCheck, Loop);
+
+    Builder CB(CodeCheck);
+    auto *CodeSizeLoad =
+        CB.CreateLoad(I32, Covered.code_size, "morok.mg.code.size.load");
+    CodeSizeLoad->setVolatile(true);
+    CodeSizeLoad->setAlignment(Align(4));
+    Value *NonZero = CB.CreateICmpNE(CodeSizeLoad, ConstantInt::get(I32, 0),
+                                     "morok.mg.code.nz");
+    Value *Sealed =
+        CB.CreateICmpNE(CodeSizeLoad, ConstantInt::get(I32, kUnsealedCodeSize),
+                        "morok.mg.code.sealed");
+    Value *HasCode = CB.CreateAnd(NonZero, Sealed, "morok.mg.code.has");
+    Value *CodeSeed = nativeHashSeed(CB, NextH, RegionIndex);
+    CB.CreateCondBr(HasCode, CodeLoop, Exit);
+
+    Builder KB(CodeLoop);
+    PHINode *CI = KB.CreatePHI(I32, 2, "morok.mg.code.i");
+    PHINode *CH = KB.CreatePHI(I64, 2, "morok.mg.code.hash");
+    CI->addIncoming(ConstantInt::get(I32, 0), CodeCheck);
+    CH->addIncoming(CodeSeed, CodeCheck);
+    auto *CodeByte =
+        KB.CreateLoad(I8, codePtr(KB, Target, CI), "morok.mg.code.byte");
+    CodeByte->setVolatile(true);
+    CodeByte->setAlignment(Align(1));
+    Value *NextCH = emitHashStep(KB, CH, CodeByte);
+    Value *NextCI =
+        KB.CreateAdd(CI, ConstantInt::get(I32, 1), "morok.mg.code.next");
+    CI->addIncoming(NextCI, CodeLoop);
+    CH->addIncoming(NextCH, CodeLoop);
+    Value *CodeDone =
+        KB.CreateICmpEQ(NextCI, CodeSizeLoad, "morok.mg.code.done");
+    KB.CreateCondBr(CodeDone, Exit, CodeLoop);
 
     Builder XB(Exit);
-    Value *OwnLoaded =
-        volatileExpectedLoad(XB, Covered.expected,
-                             Peer ? "morok.mg.peer.expected.load"
-                                  : "morok.mg.expected.load");
-    Value *RegionDiff =
-        XB.CreateXor(NextH, OwnLoaded,
-                     Peer ? "morok.mg.peer.region.diff"
-                          : "morok.mg.node.region.diff");
+    PHINode *NativeH = XB.CreatePHI(I64, 2, "morok.mg.code.final");
+    NativeH->addIncoming(ConstantInt::get(I64, 0), CodeCheck);
+    NativeH->addIncoming(NextCH, CodeLoop);
+    Value *OwnLoaded = volatileExpectedLoad(XB, Covered.expected,
+                                            Peer ? "morok.mg.peer.expected.load"
+                                                 : "morok.mg.expected.load");
+    Value *RegionDiff = XB.CreateXor(NextH, OwnLoaded,
+                                     Peer ? "morok.mg.peer.region.diff"
+                                          : "morok.mg.node.region.diff");
     Value *ExpectedDiff = XB.CreateXor(
         OwnLoaded, ConstantInt::get(I64, Covered.expected_hash),
         Peer ? "morok.mg.peer.expected.diff" : "morok.mg.expected.diff");
+    Value *ExpectedRot = rotl64(XB, ExpectedDiff, 23u + RegionIndex * 5u,
+                                Peer ? "morok.mg.peer.expected.diff.rot"
+                                     : "morok.mg.expected.diff.rot");
+    Value *ExpectedMix = XB.CreateMul(
+        XB.CreateXor(ExpectedDiff, ExpectedRot, "morok.mg.expected.diff.mix"),
+        ConstantInt::get(I64, 0xd6e8feb86659fd93ULL + RegionIndex * 0x401u),
+        Peer ? "morok.mg.peer.expected.diff.mul"
+             : "morok.mg.expected.diff.mul");
+    auto *NativeExpected =
+        XB.CreateLoad(I64, Covered.native_expected,
+                      Peer ? "morok.mg.peer.native.expected.load"
+                           : "morok.mg.native.expected.load");
+    NativeExpected->setVolatile(true);
+    NativeExpected->setAlignment(Align(8));
+    Value *NativeDiff = XB.CreateXor(NativeH, NativeExpected,
+                                     Peer ? "morok.mg.peer.native.diff"
+                                          : "morok.mg.native.diff");
+    Value *NativeRot = rotl64(XB, NativeDiff, 19u + RegionIndex * 13u,
+                              Peer ? "morok.mg.peer.native.diff.rot"
+                                   : "morok.mg.native.diff.rot");
+    Value *NativeMix = XB.CreateMul(
+        XB.CreateXor(NativeDiff, NativeRot, "morok.mg.native.diff.mix"),
+        ConstantInt::get(I64, 0xbf58476d1ce4e5b9ULL + RegionIndex * 0x211u),
+        Peer ? "morok.mg.peer.native.diff.mul" : "morok.mg.native.diff.mul");
+    NativeMix = XB.CreateSelect(HasCode, NativeMix, ConstantInt::get(I64, 0),
+                                "morok.mg.native.diff");
     Value *CoverDiff =
-        XB.CreateXor(RegionDiff, ExpectedDiff, "morok.mg.node.diff");
+        XB.CreateXor(RegionDiff, ExpectedMix, "morok.mg.node.diff");
+    CoverDiff = XB.CreateXor(CoverDiff, NativeMix, "morok.mg.node.diff");
     Value *Rot =
         rotl64(XB, CoverDiff, 11u + RegionIndex * 7u, "morok.mg.node.diff.rot");
     Value *Mix = XB.CreateMul(
@@ -301,8 +420,8 @@ Value *emitCoveredRegionCheck(Module &M, Function *Fn, Builder &B,
     return NextAcc;
 }
 
-Function *createNodeFunction(Module &M, StringRef Suffix, std::uint32_t Index,
-                             ArrayRef<NodeRuntime> Nodes) {
+Function *createNodeFunction(Module &M, Function &Target, StringRef Suffix,
+                             std::uint32_t Index, ArrayRef<NodeRuntime> Nodes) {
     LLVMContext &Ctx = M.getContext();
     auto *I64 = Type::getInt64Ty(Ctx);
     const std::uint32_t Count = static_cast<std::uint32_t>(Nodes.size());
@@ -316,8 +435,8 @@ Function *createNodeFunction(Module &M, StringRef Suffix, std::uint32_t Index,
     Builder B(Entry);
     Value *Acc = ConstantInt::get(I64, 0);
     for (std::uint32_t RegionIndex : coveredRegionIndices(Index, Count)) {
-        Acc = emitCoveredRegionCheck(M, Fn, B, Nodes[RegionIndex], RegionIndex,
-                                     RegionIndex != Index, Acc);
+        Acc = emitCoveredRegionCheck(M, Fn, &Target, B, Nodes[RegionIndex],
+                                     RegionIndex, RegionIndex != Index, Acc);
     }
     Value *Rot = rotl64(B, Acc, 9u + Index * 7u, "morok.mg.node.diff.rot");
     Value *Mul = B.CreateMul(
@@ -355,7 +474,8 @@ Function *createDiffFunction(Module &M, StringRef Suffix,
     return Fn;
 }
 
-GlobalVariable *createPostlinkManifest(Module &M, StringRef Suffix,
+GlobalVariable *createPostlinkManifest(Module &M, Function &Target,
+                                       StringRef Suffix,
                                        ArrayRef<NodeRuntime> Nodes,
                                        std::uint32_t RegionSize,
                                        std::uint32_t CoverageDepth) {
@@ -363,7 +483,8 @@ GlobalVariable *createPostlinkManifest(Module &M, StringRef Suffix,
     auto *I32 = Type::getInt32Ty(Ctx);
     auto *I64 = Type::getInt64Ty(Ctx);
     auto *PtrTy = PointerType::getUnqual(Ctx);
-    auto *NodeTy = StructType::get(Ctx, {PtrTy, PtrTy, I64, I64});
+    auto *NodeTy =
+        StructType::get(Ctx, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, I64, I64});
     SmallVector<Constant *, 16> NodeRecords;
     NodeRecords.reserve(Nodes.size());
     auto *Scrubbed = ConstantInt::get(I64, 0);
@@ -371,14 +492,14 @@ GlobalVariable *createPostlinkManifest(Module &M, StringRef Suffix,
         // The retained manifest is a layout contract, not a recompute oracle.
         // Keep live seeds and baked hashes only in the checker code/globals.
         NodeRecords.push_back(ConstantStruct::get(
-            NodeTy, {Node.region, Node.expected, Scrubbed, Scrubbed}));
+            NodeTy, {Node.region, Node.expected, &Target, Node.code_size,
+                     Node.native_expected, Scrubbed, Scrubbed}));
     }
     auto *NodesTy = ArrayType::get(NodeTy, NodeRecords.size());
-    auto *ManifestTy =
-        StructType::get(Ctx, {I64, I32, I32, I32, I32, NodesTy});
+    auto *ManifestTy = StructType::get(Ctx, {I64, I32, I32, I32, I32, NodesTy});
     auto *Init = ConstantStruct::get(
         ManifestTy,
-        {ConstantInt::get(I64, kPostlinkMagic), ConstantInt::get(I32, 2),
+        {ConstantInt::get(I64, kPostlinkMagic), ConstantInt::get(I32, 3),
          ConstantInt::get(I32, Nodes.size()), ConstantInt::get(I32, RegionSize),
          ConstantInt::get(I32, CoverageDepth),
          ConstantArray::get(NodesTy, NodeRecords)});
@@ -410,13 +531,16 @@ GraphRuntime createGraph(Function &F, const MutualGuardGraphParams &Params,
         Node.region = createRegion(
             M, Suffix, I, ArrayRef<std::uint8_t>(Bytes.data(), Bytes.size()));
         Node.expected = createExpected(M, Suffix, I, Node.expected_hash);
+        Node.code_size = createCodeSize(M, Suffix, I);
+        Node.native_expected =
+            createNativeExpected(M, Suffix, I, Rng.next() | 1ULL);
         G.nodes.push_back(Node);
     }
 
     for (std::uint32_t I = 0; I != Count; ++I)
         G.nodes[I].checker =
-            createNodeFunction(M, Suffix, I, ArrayRef<NodeRuntime>(G.nodes));
-    createPostlinkManifest(M, Suffix, ArrayRef<NodeRuntime>(G.nodes),
+            createNodeFunction(M, F, Suffix, I, ArrayRef<NodeRuntime>(G.nodes));
+    createPostlinkManifest(M, F, Suffix, ArrayRef<NodeRuntime>(G.nodes),
                            RegionSize, coverageDepth(Count));
     G.diff = createDiffFunction(M, Suffix, ArrayRef<NodeRuntime>(G.nodes));
     return G;
@@ -437,10 +561,9 @@ Value *emitPoisonedReturn(ReturnInst *RI, Function *Diff) {
     if (!ReturnTy->isIntegerTy())
         RetBits = B.CreateBitCast(RetBits, CarrierTy, "morok.mg.bits");
 
-    Value *PoisonedBits =
-        B.CreateXor(RetBits, Narrow,
-                    ReturnTy->isIntegerTy() ? "morok.mg.value"
-                                            : "morok.mg.bits.value");
+    Value *PoisonedBits = B.CreateXor(
+        RetBits, Narrow,
+        ReturnTy->isIntegerTy() ? "morok.mg.value" : "morok.mg.bits.value");
     if (ReturnTy->isIntegerTy())
         return PoisonedBits;
     return B.CreateBitCast(PoisonedBits, ReturnTy, "morok.mg.value");

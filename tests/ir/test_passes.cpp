@@ -9007,6 +9007,8 @@ entry:
 
     CHECK(countGlobals(*M, "morok.mg.region") == 3u);
     CHECK(countGlobals(*M, "morok.mg.expected") == 3u);
+    CHECK(countGlobals(*M, "morok.mg.code.size") == 3u);
+    CHECK(countGlobals(*M, "morok.mg.native.expected") == 3u);
     CHECK(countGlobals(*M, "morok.postlink.mg") == 1u);
 
     GlobalVariable *Manifest = nullptr;
@@ -9026,6 +9028,8 @@ entry:
     std::vector<Function *> nodes;
     std::vector<GlobalVariable *> regions;
     std::vector<GlobalVariable *> expected;
+    std::vector<GlobalVariable *> codeSizes;
+    std::vector<GlobalVariable *> nativeExpected;
     for (unsigned i = 0; i != 3; ++i) {
         Function *Node =
             M->getFunction("morok.mg.node.mutual." + std::to_string(i));
@@ -9035,28 +9039,50 @@ entry:
             "morok.mg.region.mutual." + std::to_string(i), true);
         GlobalVariable *Expected = M->getGlobalVariable(
             "morok.mg.expected.mutual." + std::to_string(i), true);
+        GlobalVariable *CodeSize = M->getGlobalVariable(
+            "morok.mg.code.size.mutual." + std::to_string(i), true);
+        GlobalVariable *NativeExpected = M->getGlobalVariable(
+            "morok.mg.native.expected.mutual." + std::to_string(i), true);
         REQUIRE(Region);
         REQUIRE(Expected);
+        REQUIRE(CodeSize);
+        REQUIRE(NativeExpected);
         regions.push_back(Region);
         expected.push_back(Expected);
+        codeSizes.push_back(CodeSize);
+        nativeExpected.push_back(NativeExpected);
     }
     for (GlobalVariable *Region : regions)
         CHECK(constantReferencesGlobal(Manifest->getInitializer(), Region));
     for (GlobalVariable *Expected : expected)
         CHECK(constantReferencesGlobal(Manifest->getInitializer(), Expected));
+    for (GlobalVariable *CodeSize : codeSizes)
+        CHECK(constantReferencesGlobal(Manifest->getInitializer(), CodeSize));
+    for (GlobalVariable *NativeExpected : nativeExpected)
+        CHECK(
+            constantReferencesGlobal(Manifest->getInitializer(), NativeExpected));
+    CHECK(constantReferencesGlobal(Manifest->getInitializer(), F));
 
     auto *ManifestInit = dyn_cast<ConstantStruct>(Manifest->getInitializer());
     REQUIRE(ManifestInit);
     REQUIRE(ManifestInit->getNumOperands() == 6);
+    auto *Version = dyn_cast<ConstantInt>(ManifestInit->getOperand(1));
+    REQUIRE(Version);
+    CHECK(Version->getZExtValue() == 3u);
     auto *Records = dyn_cast<ConstantArray>(ManifestInit->getOperand(5));
     REQUIRE(Records);
     REQUIRE(Records->getNumOperands() == nodes.size());
     for (unsigned I = 0; I != Records->getNumOperands(); ++I) {
         auto *Record = dyn_cast<ConstantStruct>(Records->getOperand(I));
         REQUIRE(Record);
-        REQUIRE(Record->getNumOperands() == 4);
-        auto *Seed = dyn_cast<ConstantInt>(Record->getOperand(2));
-        auto *ExpectedHash = dyn_cast<ConstantInt>(Record->getOperand(3));
+        REQUIRE(Record->getNumOperands() == 7);
+        CHECK(constantReferencesGlobal(Record, regions[I]));
+        CHECK(constantReferencesGlobal(Record, expected[I]));
+        CHECK(constantReferencesGlobal(Record, F));
+        CHECK(constantReferencesGlobal(Record, codeSizes[I]));
+        CHECK(constantReferencesGlobal(Record, nativeExpected[I]));
+        auto *Seed = dyn_cast<ConstantInt>(Record->getOperand(5));
+        auto *ExpectedHash = dyn_cast<ConstantInt>(Record->getOperand(6));
         REQUIRE(Seed);
         REQUIRE(ExpectedHash);
         CHECK(Seed->getValue().isZero());
@@ -9098,12 +9124,22 @@ entry:
     for (Function *Node : nodes) {
         unsigned regionLoads = 0;
         unsigned expectedLoads = 0;
+        unsigned codeSizeLoads = 0;
+        unsigned codeByteLoads = 0;
+        unsigned nativeExpectedLoads = 0;
         bool hasPeerMix = false;
         bool hasNodeDiff = false;
+        bool hasExpectedNonlinearMix = false;
+        bool hasNativeMix = false;
         std::vector<bool> nodeCovers(regions.size(), false);
         for (Instruction &I : instructions(*Node)) {
             hasPeerMix |= I.getName().starts_with("morok.mg.peer");
             hasNodeDiff |= I.getName().starts_with("morok.mg.node.diff");
+            hasExpectedNonlinearMix |=
+                I.getName().starts_with("morok.mg.expected.diff.mul") ||
+                I.getName().starts_with("morok.mg.peer.expected.diff.mul");
+            hasNativeMix |= I.getName().starts_with("morok.mg.native.diff") ||
+                            I.getName().starts_with("morok.mg.peer.native.diff");
             if (auto *CI = dyn_cast<CallInst>(&I))
                 if (Function *Callee = CI->getCalledFunction())
                     hasTrap |= Callee->getName() == "llvm.trap";
@@ -9116,6 +9152,18 @@ entry:
                     LI->getPointerOperand()->getName().starts_with(
                         "morok.mg.expected"))
                     ++expectedLoads;
+                if (LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.mg.code.size"))
+                    ++codeSizeLoads;
+                if (LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.mg.code.ptr"))
+                    ++codeByteLoads;
+                if (LI->isVolatile() &&
+                    LI->getPointerOperand()->getName().starts_with(
+                        "morok.mg.native.expected"))
+                    ++nativeExpectedLoads;
             }
             for (std::size_t R = 0; R != regions.size(); ++R)
                 nodeCovers[R] = nodeCovers[R] ||
@@ -9126,8 +9174,13 @@ entry:
                 ++regionCoverage[R];
         CHECK(regionLoads >= 3u);
         CHECK(expectedLoads >= 3u);
+        CHECK(codeSizeLoads >= 3u);
+        CHECK(codeByteLoads >= 3u);
+        CHECK(nativeExpectedLoads >= 3u);
         CHECK(hasPeerMix);
         CHECK(hasNodeDiff);
+        CHECK(hasExpectedNonlinearMix);
+        CHECK(hasNativeMix);
     }
     for (unsigned Coverage : regionCoverage)
         CHECK(Coverage >= 3u);
