@@ -175,6 +175,24 @@ ModuleSize measureModule(const Module &M) {
     return Size;
 }
 
+// User-code-only size: excludes morok.* generated helpers (VM interpreters,
+// anti-debug, decoys, …).  The per-function obfuscation budget is meant to bound
+// how much we GROW the user's code, not the fixed-cost helpers other passes
+// emit.  Counting the (large) VM interpreters here would let virtualization
+// alone trip the budget and skip the still-pending integrity passes — leaving a
+// binary with zero self-check coverage.
+ModuleSize measureUserModule(const Module &M) {
+    ModuleSize Size;
+    for (const Function &F : M) {
+        if (F.isDeclaration() || F.getName().starts_with("morok."))
+            continue;
+        ++Size.functions;
+        Size.blocks += F.size();
+        Size.instructions += instructionCount(F);
+    }
+    return Size;
+}
+
 bool withinModuleBudget(const ModuleSize &Size, std::uint64_t MaxInstructions,
                         std::uint64_t MaxBlocks, std::uint64_t MaxFunctions) {
     return Size.instructions <= MaxInstructions && Size.blocks <= MaxBlocks &&
@@ -362,18 +380,13 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             config_.passes.virtualization.max_instructions.value_or(64);
         p.max_registers =
             config_.passes.virtualization.max_registers.value_or(96);
-        // NOTE: VirtualizationParams::allow_internal_user_calls lets the VM lift
-        // functions that contain direct calls to defined internal helpers (the
-        // machinery is implemented and correct for straight-line call graphs —
-        // see the /tmp/vc.c proof).  It is intentionally left OFF here: enabling
-        // it broadly also lifts recursive / mutually-recursive functions and
-        // main, and routing recursion through the bytecode interpreter traps at
-        // runtime (programs_maxpreset_run: call_nested / call_tail_recursive /
-        // 04_bst exit 133).  Safe enablement needs call-graph SCC analysis to
-        // exclude every recursion cycle plus Linux CI validation, so the flag
-        // stays gated until that lands.  The decision boundary is already covered
-        // by self-checksum + return poisoning, de-switch + constenc, and
-        // nanomites, so this is defense-in-depth, not a load-bearing gap.
+        // Lift trust-boundary functions that contain only DIRECT calls to defined
+        // internal helpers (e.g. a license verdict computer), not just pure leaf
+        // math.  virtualizeModule guards this with a call-graph SCC check so a
+        // recursive / mutually-recursive function is never lifted — routing
+        // recursion through the bytecode interpreter would amplify stack frames
+        // and trap.  Indirect/import/vararg calls remain excluded.
+        p.allow_internal_user_calls = true;
         changed |= passes::virtualizeModule(M, p, rng);
     }
 
@@ -462,7 +475,10 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             if (VisitedEligibleFunctions >= kModuleEligibleFunctionVisitLimit)
                 break;
             ++VisitedEligibleFunctions;
-            if (!moduleGrowthOk(measureModule(M)))
+            // Gate on USER-code growth only: virtualization may have emitted
+            // large morok.* interpreters that must not starve the integrity
+            // passes still pending in this loop body.
+            if (!moduleGrowthOk(measureUserModule(M)))
                 break;
 
             const config::PassConfig eff =

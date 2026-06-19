@@ -33,7 +33,9 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
@@ -2212,6 +2214,26 @@ bool liftOne(Function &F, const VirtualizationParams &Params,
     return materializeProgram(*F.getParent(), *P, Rng);
 }
 
+// Functions that participate in a call-graph cycle (direct self-recursion or a
+// mutual-recursion SCC).  Virtualizing these under allow_internal_user_calls is
+// unsafe: each recursion level would re-enter the bytecode interpreter, and the
+// heavy per-frame VM state amplifies stack use until it traps (observed as
+// call_nested / call_tail_recursive / 04_bst exiting 133).  Leaf functions can
+// never be in a cycle, so this only ever excludes the call-bearing functions the
+// user-call path newly made eligible.
+SmallPtrSet<const Function *, 16> recursiveFunctions(Module &M) {
+    SmallPtrSet<const Function *, 16> Rec;
+    CallGraph CG(M);
+    for (scc_iterator<CallGraph *> It = scc_begin(&CG); !It.isAtEnd(); ++It) {
+        if (!It.hasCycle()) // singleton with no self-edge — not recursive
+            continue;
+        for (CallGraphNode *Node : *It)
+            if (Function *F = Node->getFunction())
+                Rec.insert(F);
+    }
+    return Rec;
+}
+
 } // namespace
 
 bool virtualizationWillLift(Function &F, const VirtualizationParams &Params) {
@@ -2241,11 +2263,20 @@ bool virtualizeModule(Module &M, const VirtualizationParams &Params,
         if (!F.isDeclaration() && candidateFunctionAllowed(F, Params))
             Worklist.push_back(&F);
 
+    // When user-call lifting is enabled, never lift a function that is part of a
+    // recursion cycle — recursion through the interpreter traps.  Computed once
+    // over the whole module (cheap; only needed in this mode).
+    SmallPtrSet<const Function *, 16> Recursive;
+    if (Params.allow_internal_user_calls)
+        Recursive = recursiveFunctions(M);
+
     bool Changed = false;
     std::uint32_t Lifted = 0;
     for (Function *F : Worklist) {
         if (Lifted >= Params.max_functions)
             break;
+        if (Params.allow_internal_user_calls && Recursive.contains(F))
+            continue;
         if (!Rng.chance(Params.probability))
             continue;
         if (liftOne(*F, Params, Rng)) {

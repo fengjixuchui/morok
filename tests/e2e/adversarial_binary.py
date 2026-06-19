@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import struct
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -360,6 +362,33 @@ def hash_bytes(blob: bytes, seed: int) -> int:
     return h
 
 
+def resign_macho(binary: "Binary", path: Path) -> None:
+    """Re-sign a modified Mach-O so the kernel will run it.
+
+    Sealing rewrites bytes in __DATA, which invalidates any existing code
+    signature.  On arm64 macOS the kernel SIGKILLs a binary whose signature no
+    longer matches its pages BEFORE a single instruction executes — so without
+    this step a freshly sealed binary just dies with "killed" and the runtime
+    self-check never even runs.  Ad-hoc re-sign to make it launchable again.
+    """
+    if binary.kind != "macho":
+        return
+    codesign = shutil.which("codesign")
+    if not codesign:
+        return
+    result = subprocess.run(
+        [codesign, "--force", "--sign", "-", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(
+            f"warning: codesign failed after seal ({result.stderr.strip()}); "
+            f"re-sign {path} manually or it will be killed at launch",
+            file=sys.stderr,
+        )
+
+
 def seal(path: Path, window: int) -> int:
     binary = Binary(path)
     manifests = binary.find_sc_manifests()
@@ -390,6 +419,7 @@ def seal(path: Path, window: int) -> int:
         sealed += 1
     if sealed:
         binary.write()
+        resign_macho(binary, path)
     print(f"sealed self-check manifests={sealed} binary={path}")
     return 0 if sealed else 1
 

@@ -432,7 +432,10 @@ struct k1 {
     uint32_t mark;
 };
 
-static struct k1 k2(const char *s) {
+/* Returns a packed verdict (bit0=ok, bit1=shape, bits2-3=tier) instead of a
+ * by-value struct: a scalar return is virtualizable, an aggregate return is not.
+ * The internal struct is kept so the decision logic is byte-for-byte unchanged. */
+static unsigned k2(const char *s) {
     struct k1 v = { 0u, 0u, 0u, 0u };
     unsigned char a[24];
     unsigned char b[15];
@@ -481,7 +484,7 @@ static struct k1 k2(const char *s) {
             }
         }
     }
-    return v;
+    return (v.ok & 1u) | ((v.shape & 1u) << 1) | ((v.tier & 3u) << 2);
 }
 
 static void k3(FILE *out) {
@@ -530,15 +533,15 @@ int main(int argc, char **argv) {
         e9(stdout);
         return 1;
     }
-    struct k1 verdict = k2(line);
-    if (verdict.ok) {
+    unsigned verdict = k2(line);
+    if (verdict & 1u) {
         e4(stdout);
-        p0(stdout, verdict.tier);
+        p0(stdout, (verdict >> 2) & 3u);
         e5(stdout);
         e6(stdout);
         return 0;
     }
-    if (verdict.shape) {
+    if ((verdict >> 1) & 1u) {
         e7(stdout);
         e8(stdout);
     } else {

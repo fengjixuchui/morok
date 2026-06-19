@@ -333,16 +333,22 @@ private:
         if (hasLoopCallsite(F))
             return false;
 
-        // Leaf check + size bound (pre-optimization instruction count).  A call
-        // to any user (or indirect) function makes the body un-liftable today,
-        // so such functions are left for the inliner.
+        // Size bound (pre-optimization instruction count) + call check.  The VM
+        // can lift a body whose only calls are DIRECT calls to defined internal
+        // functions (the allow_internal_user_calls path) — e.g. a license
+        // verdict/tier decision that calls internal hash helpers — so pin those
+        // too, not just pure leaves.  A call through an import declaration, an
+        // indirect call, or a vararg call is still un-liftable, so leave those
+        // bodies free for the inliner.
         std::uint64_t insts = 0;
         for (const BasicBlock &BB : F)
             for (const Instruction &I : BB) {
                 ++insts;
                 if (const auto *CB = dyn_cast<CallBase>(&I)) {
                     const Function *Callee = CB->getCalledFunction();
-                    if (!Callee || !Callee->isIntrinsic())
+                    if (Callee && Callee->isIntrinsic())
+                        continue;
+                    if (!Callee || Callee->isDeclaration() || Callee->isVarArg())
                         return false;
                 }
             }
