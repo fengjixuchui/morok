@@ -250,6 +250,13 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     renewal = "startup"
     bind_to_runtime_seal = true
     virtualize_helpers = false
+    [passes.sealed_blob]
+    enabled = true
+    max_blobs = 5
+    max_blob_bytes = 2048
+    key_sources = ["runtime_seal", "external_proof", "code_region"]
+    delivery = "eager"
+    zeroize_after_use = false
     [passes.self_checksum_constants]
     enabled = true
     probability = 83
@@ -455,6 +462,13 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.tracer_attestation.renewal == "startup");
     CHECK(r.config.passes.tracer_attestation.bind_to_runtime_seal == true);
     CHECK(r.config.passes.tracer_attestation.virtualize_helpers == false);
+    CHECK(r.config.passes.sealed_blob.enabled == true);
+    CHECK(r.config.passes.sealed_blob.max_blobs == 5u);
+    CHECK(r.config.passes.sealed_blob.max_blob_bytes == 2048u);
+    REQUIRE(r.config.passes.sealed_blob.key_sources.size() == 3);
+    CHECK(r.config.passes.sealed_blob.key_sources[2] == "code_region");
+    CHECK(r.config.passes.sealed_blob.delivery == "eager");
+    CHECK(r.config.passes.sealed_blob.zeroize_after_use == false);
     CHECK(r.config.passes.self_checksum.enabled == true);
     CHECK(r.config.passes.self_checksum.probability == 83u);
     CHECK(r.config.passes.self_checksum.max_constants == 6u);

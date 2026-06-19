@@ -44,6 +44,7 @@
 #include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/SealedBlob.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/ShamirShare.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
@@ -89,12 +90,12 @@ constexpr std::uint64_t kSensitiveFunctionBlockLimit = 220;
 // the per-function loop, so by the time they run the function has already been
 // grown by every structural/value-level pass ahead of them.  Gating them on the
 // generic growth/heavy budgets therefore made them silently skip on any
-// non-trivial function (the same body that was 400 instructions at loop entry is
-// past 2500 by the integrity stage).  They are checksum/guard transforms whose
-// cost scales with a fixed region size, not with the whole function, so they can
-// safely tolerate a much larger host than the growth-producing passes.  Give
-// them a dedicated, deliberately higher budget instead of loosening the shared
-// limits (which would also amplify split/bcf/flatten on huge functions).
+// non-trivial function (the same body that was 400 instructions at loop entry
+// is past 2500 by the integrity stage).  They are checksum/guard transforms
+// whose cost scales with a fixed region size, not with the whole function, so
+// they can safely tolerate a much larger host than the growth-producing passes.
+// Give them a dedicated, deliberately higher budget instead of loosening the
+// shared limits (which would also amplify split/bcf/flatten on huge functions).
 constexpr std::uint64_t kIntegrityFunctionInstLimit = 6000;
 constexpr std::uint64_t kIntegrityFunctionBlockLimit = 800;
 
@@ -178,11 +179,11 @@ ModuleSize measureModule(const Module &M) {
 }
 
 // User-code-only size: excludes morok.* generated helpers (VM interpreters,
-// anti-debug, decoys, …).  The per-function obfuscation budget is meant to bound
-// how much we GROW the user's code, not the fixed-cost helpers other passes
-// emit.  Counting the (large) VM interpreters here would let virtualization
-// alone trip the budget and skip the still-pending integrity passes — leaving a
-// binary with zero self-check coverage.
+// anti-debug, decoys, …).  The per-function obfuscation budget is meant to
+// bound how much we GROW the user's code, not the fixed-cost helpers other
+// passes emit.  Counting the (large) VM interpreters here would let
+// virtualization alone trip the budget and skip the still-pending integrity
+// passes — leaving a binary with zero self-check coverage.
 ModuleSize measureUserModule(const Module &M) {
     ModuleSize Size;
     for (const Function &F : M) {
@@ -219,6 +220,7 @@ bool hasSensitiveGeneratedPrefix(StringRef Name) {
            Name.starts_with("morok.tablearith.ensure") ||
            Name.starts_with("morok.dfi.hash.") ||
            Name.starts_with("morok.sc.diff.") ||
+           Name.starts_with("morok.sealed.") ||
            Name.starts_with("morok.mg.node.") ||
            Name.starts_with("morok.mg.diff.") ||
            Name.starts_with("morok.antidbg") ||
@@ -234,8 +236,7 @@ bool isSensitiveGeneratedFunction(const Function &F) {
     StringRef Name = F.getName();
     // Keep fault/page-protection choreography native; generic shell hardening
     // can disturb the exact signal and mprotect edge these probes rely on.
-    if (Name == "morok.antihook" ||
-        Name.starts_with("morok.antihook.schro") ||
+    if (Name == "morok.antihook" || Name.starts_with("morok.antihook.schro") ||
         Name.starts_with("morok.antihook.antidump"))
         return false;
     return hasSensitiveGeneratedPrefix(Name);
@@ -278,12 +279,10 @@ externalOpaqueParams(const config::ExternalOpConfig &C, bool Sensitive,
                      bool IncludeGenerated = false) {
     passes::ExternalOpaqueParams P;
     P.probability = raised(C.probability.value_or(35), 100, Sensitive);
-    P.max_blocks =
-        std::min(raised(C.max_blocks.value_or(8), 12, Sensitive),
-                 passes::kExternalOpaqueMaxBlocks);
-    P.decoy_stores =
-        std::min(raised(C.decoy_stores.value_or(2), 3, Sensitive),
-                 passes::kExternalOpaqueMaxDecoyStores);
+    P.max_blocks = std::min(raised(C.max_blocks.value_or(8), 12, Sensitive),
+                            passes::kExternalOpaqueMaxBlocks);
+    P.decoy_stores = std::min(raised(C.decoy_stores.value_or(2), 3, Sensitive),
+                              passes::kExternalOpaqueMaxDecoyStores);
     P.include_generated = IncludeGenerated;
     return P;
 }
@@ -295,6 +294,17 @@ hashSelfDecryptParams(const config::HashSelfDecryptConfig &C) {
     P.max_payloads = C.max_payloads.value_or(2);
     P.max_payload_bytes = C.max_payload_bytes.value_or(P.max_payload_bytes);
     P.context_keying = C.context_keying.value_or(true);
+    return P;
+}
+
+passes::SealedBlobParams sealedBlobParams(const config::SealedBlobConfig &C) {
+    passes::SealedBlobParams P;
+    P.max_blobs = C.max_blobs.value_or(P.max_blobs);
+    P.max_blob_bytes = C.max_blob_bytes.value_or(P.max_blob_bytes);
+    if (!C.key_sources.empty())
+        P.key_sources = C.key_sources;
+    P.delivery = C.delivery.value_or(P.delivery);
+    P.zeroize_after_use = C.zeroize_after_use.value_or(P.zeroize_after_use);
     return P;
 }
 
@@ -350,10 +360,10 @@ bool virtualizeSensitiveGeneratedFunctions(Module &M,
         return false;
 
     passes::VirtualizationParams P;
-    P.probability = raised(Config.virtualization.probability.value_or(100),
-                           100, /*Sensitive=*/true);
-    P.max_functions = raised(Config.virtualization.max_functions.value_or(1),
-                             8, /*Sensitive=*/true);
+    P.probability = raised(Config.virtualization.probability.value_or(100), 100,
+                           /*Sensitive=*/true);
+    P.max_functions = raised(Config.virtualization.max_functions.value_or(1), 8,
+                             /*Sensitive=*/true);
     P.max_instructions =
         raised(Config.virtualization.max_instructions.value_or(64), 256,
                /*Sensitive=*/true);
@@ -388,17 +398,24 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     if (InitialModuleGrowthOk &&
         config_.passes.external_secret_binding.enabled.value_or(false)) {
         passes::ExternalSecretBindingParams p;
-        p.mode = config_.passes.external_secret_binding.mode.value_or("feed_api");
+        p.mode =
+            config_.passes.external_secret_binding.mode.value_or("feed_api");
         p.identity_policy =
             config_.passes.external_secret_binding.identity_policy.value_or(
                 "ascii_lower_strip_ws");
-        p.bind_to_runtime_seal =
-            config_.passes.external_secret_binding.bind_to_runtime_seal.value_or(
-                true);
+        p.bind_to_runtime_seal = config_.passes.external_secret_binding
+                                     .bind_to_runtime_seal.value_or(true);
         p.virtualize_helpers =
             config_.passes.external_secret_binding.virtualize_helpers.value_or(
                 true);
         changed |= passes::externalSecretBindingModule(M, p, rng);
+    }
+
+    if (InitialModuleGrowthOk &&
+        config_.passes.sealed_blob.enabled.value_or(false)) {
+        passes::SealedBlobParams p =
+            sealedBlobParams(config_.passes.sealed_blob);
+        changed |= passes::sealedBlobModule(M, p, rng);
     }
 
     // VM lifting runs FIRST, before any other obfuscation touches user code.
@@ -406,9 +423,9 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // later passes rewrite those bodies in ways the bytecode cannot encode and
     // would make them ineligible — decoy-string injection plants references to
     // global string pointers (un-encodable as bytecode immediates), and the
-    // per-function loop's splitting/flattening reshapes the CFG.  Running the VM
-    // up front lets it claim the clean kernels; every later pass then layers on
-    // top of the resulting wrappers/helpers.  Hash-gated self-decrypt wraps
+    // per-function loop's splitting/flattening reshapes the CFG.  Running the
+    // VM up front lets it claim the clean kernels; every later pass then layers
+    // on top of the resulting wrappers/helpers.  Hash-gated self-decrypt wraps
     // this first wave of emitted bytecode, so it runs immediately after.  A
     // later protection-helper-only VM pass covers generated checker helpers
     // once the anti-analysis/integrity passes have emitted them.
@@ -422,12 +439,12 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             config_.passes.virtualization.max_instructions.value_or(64);
         p.max_registers =
             config_.passes.virtualization.max_registers.value_or(96);
-        // Lift trust-boundary functions that contain only DIRECT calls to defined
-        // internal helpers (e.g. a license verdict computer), not just pure leaf
-        // math.  virtualizeModule guards this with a call-graph SCC check so a
-        // recursive / mutually-recursive function is never lifted — routing
-        // recursion through the bytecode interpreter would amplify stack frames
-        // and trap.  Indirect/import/vararg calls remain excluded.
+        // Lift trust-boundary functions that contain only DIRECT calls to
+        // defined internal helpers (e.g. a license verdict computer), not just
+        // pure leaf math.  virtualizeModule guards this with a call-graph SCC
+        // check so a recursive / mutually-recursive function is never lifted —
+        // routing recursion through the bytecode interpreter would amplify
+        // stack frames and trap.  Indirect/import/vararg calls remain excluded.
         p.allow_internal_user_calls = true;
         changed |= passes::virtualizeModule(M, p, rng);
     }
@@ -540,12 +557,13 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
             // De-switch wide-magic gates FIRST, before any CFG pass consumes a
             // switch into a dispatch/jump-table form.  A license tier table
-            // (`switch (hash) { case 0xMAGIC: ... }`) otherwise leaks every case
-            // value as a cleartext compare the backend materializes; lowering it
-            // here to encrypted comparison chains leaves volatile-load constants
-            // that survive split/flatten/dispatcherless/indirectbranch.  Only
-            // wide-magic switches are touched, so dense dispatch stays intact and
-            // the integrity passes are not inflated out of budget.
+            // (`switch (hash) { case 0xMAGIC: ... }`) otherwise leaks every
+            // case value as a cleartext compare the backend materializes;
+            // lowering it here to encrypted comparison chains leaves
+            // volatile-load constants that survive
+            // split/flatten/dispatcherless/indirectbranch.  Only wide-magic
+            // switches are touched, so dense dispatch stays intact and the
+            // integrity passes are not inflated out of budget.
             if (integrityFunctionOk(F) &&
                 ir::shouldObfuscate(F, "constenc",
                                     eff.const_enc.enabled.value_or(false))) {
@@ -978,15 +996,15 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
                 changed |= passes::constantEncryptFunction(F, p, rng);
             }
 
-            // Decision-gate rescue: the generic constenc above runs on the tight
-            // growth budget and skips heavily-inlined gate functions (a license
-            // check folds h0/h1/k2 into one large body well past 2500 insts),
-            // leaving the gate `cmp reg, #0xMAGIC` in the clear for an attacker
-            // to read and NOP.  Re-run constenc here on the higher integrity
-            // budget, scoped to wide comparison magics only, so the gate
-            // immediate is encrypted even in those large functions.  Placed after
-            // the integrity passes so it never inflates them out of their own
-            // budget.
+            // Decision-gate rescue: the generic constenc above runs on the
+            // tight growth budget and skips heavily-inlined gate functions (a
+            // license check folds h0/h1/k2 into one large body well past 2500
+            // insts), leaving the gate `cmp reg, #0xMAGIC` in the clear for an
+            // attacker to read and NOP.  Re-run constenc here on the higher
+            // integrity budget, scoped to wide comparison magics only, so the
+            // gate immediate is encrypted even in those large functions. Placed
+            // after the integrity passes so it never inflates them out of their
+            // own budget.
             if (integrityFunctionOk(F) &&
                 ir::shouldObfuscate(F, "constenc",
                                     eff.const_enc.enabled.value_or(false))) {
@@ -1016,10 +1034,11 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     }
 
     // M4: bind reused leaf helpers (l1/g*/… in the validation cluster) to the
-    // anti-debug seal, so a keygen calling them directly from an injected context
-    // gets garbage.  Runs after the self-checksum loop so the seal exists and the
-    // already-poisoned helpers (m0/m1/l0 — poisonReturns already folds the
-    // seal-bearing diff into their returns) are skipped to avoid an XOR double-fold.
+    // anti-debug seal, so a keygen calling them directly from an injected
+    // context gets garbage.  Runs after the self-checksum loop so the seal
+    // exists and the already-poisoned helpers (m0/m1/l0 — poisonReturns already
+    // folds the seal-bearing diff into their returns) are skipped to avoid an
+    // XOR double-fold.
     if (InitialModuleGrowthOk)
         changed |= passes::bindLeafHelpersToSeal(M, rng);
 
@@ -1030,8 +1049,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // as native plaintext.  The existing shell-hardening pass can then add MBA
     // and opaque predicates around whatever wrapper/helper code remains.
     if (InitialModuleGrowthOk)
-        changed |= virtualizeSensitiveGeneratedFunctions(M, config_.passes,
-                                                         rng);
+        changed |=
+            virtualizeSensitiveGeneratedFunctions(M, config_.passes, rng);
 
     if (InitialModuleGrowthOk)
         changed |= hardenSensitiveGeneratedFunctions(M, config_.passes, rng);
@@ -1055,8 +1074,9 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // `morok.strdec` decryptor functions, and counting those against the
     // module-function budget would push a string-heavy-but-otherwise-small
     // module past the limit and silently drop these configured protections on
-    // the actual user code (#40).  The clone budgets below stay on measureModule
-    // because a whole-module clone really does copy the helpers too.
+    // the actual user code (#40).  The clone budgets below stay on
+    // measureModule because a whole-module clone really does copy the helpers
+    // too.
     if (InitialModuleGrowthOk &&
         config_.passes.nanomites.enabled.value_or(false) &&
         moduleGrowthOk(measureUserModule(M))) {

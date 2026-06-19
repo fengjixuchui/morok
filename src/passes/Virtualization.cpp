@@ -33,8 +33,8 @@
 #include "morok/passes/RuntimeSeal.hpp"
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SCCIterator.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/Attributes.h"
@@ -150,8 +150,8 @@ struct AllocaSpec {
 // arbitrary argument counts.
 struct CallSite {
     FunctionType *fn_ty = nullptr;
-    Value *direct = nullptr;        // non-null: direct call/inline asm target
-    std::uint8_t callee_reg = 0;    // indirect: register holding the fn pointer
+    Value *direct = nullptr;     // non-null: direct call/inline asm target
+    std::uint8_t callee_reg = 0; // indirect: register holding the fn pointer
     bool indirect = false;
     CallingConv::ID cc = CallingConv::C;
     std::vector<std::uint8_t> args; // argument registers (canonical)
@@ -200,8 +200,7 @@ bool generatedProtectionFunction(const Function &F) {
     StringRef Name = F.getName();
     // Keep fault/page-protection choreography native; VM lifting can disturb
     // the exact signal and mprotect edge these probes rely on.
-    if (Name == "morok.antihook" ||
-        Name.starts_with("morok.antihook.clean.") ||
+    if (Name == "morok.antihook" || Name.starts_with("morok.antihook.clean.") ||
         Name.starts_with("morok.antihook.elf.") ||
         Name.starts_with("morok.antihook.got.") ||
         Name.starts_with("morok.antihook.mac.") ||
@@ -212,6 +211,8 @@ bool generatedProtectionFunction(const Function &F) {
         return !F.hasFnAttribute("morok.proof.no_vm");
     if (Name.starts_with("morok.tracer."))
         return !F.hasFnAttribute("morok.tracer.no_vm");
+    if (Name.starts_with("morok.sealed.open."))
+        return true;
     // Generated protection helpers are already hardened natively by the
     // scheduler.  Lifting startup checkers into the threaded VM makes normal
     // launches pay interpreter cost before user code runs, and can perturb
@@ -520,9 +521,9 @@ bool liftableCall(const CallBase &CB, bool AllowProtectionCalls,
     const Function *Callee = CB.getCalledFunction();
     const bool DirectDefined = Callee && !Callee->isDeclaration() &&
                                !Callee->isIntrinsic() && !Callee->isVarArg();
-    // A direct call to a defined internal function is safe to lift for user code
-    // too: the handler just calls the callee with marshalled register args —
-    // no import ABI, no indirect dispatch.
+    // A direct call to a defined internal function is safe to lift for user
+    // code too: the handler just calls the callee with marshalled register args
+    // — no import ABI, no indirect dispatch.
     if (AllowDirectInternalCalls && DirectDefined)
         return true;
     if (!AllowProtectionCalls)
@@ -581,7 +582,8 @@ bool liftableInstruction(const Instruction &I, const BasicBlock &Entry,
                          const DataLayout &DL, bool AllowProtectionCalls,
                          bool AllowDirectInternalCalls = false) {
     if (isa<PHINode>(I))
-        return isScalarVmTy(I.getType()); // demoted to a stack slot of this type
+        return isScalarVmTy(
+            I.getType()); // demoted to a stack slot of this type
 
     if (const auto *AI = dyn_cast<AllocaInst>(&I)) {
         return AI->getParent() == &Entry &&
@@ -611,8 +613,7 @@ bool liftableInstruction(const Instruction &I, const BasicBlock &Entry,
         return !St->isAtomic() && isPtrAS0(St->getPointerOperandType()) &&
                accessBytes(St->getValueOperand()->getType(), DL).has_value();
     if (const auto *G = dyn_cast<GetElementPtrInst>(&I)) {
-        if (!isPtrAS0(G->getType()) ||
-            !isPtrAS0(G->getPointerOperandType()))
+        if (!isPtrAS0(G->getType()) || !isPtrAS0(G->getPointerOperandType()))
             return false;
         for (auto GTI = gep_type_begin(G), GTE = gep_type_end(G); GTI != GTE;
              ++GTI) {
@@ -1085,12 +1086,12 @@ bool Lifter::liftIntrinsic(IntrinsicInst &II) {
             auto SB = sext64(*B, W);
             if (!SA || !SB)
                 return false;
-            const VmOp P = (Id == Intrinsic::smax) ? VmOp::ICmpSGT
-                                                   : VmOp::ICmpSLT;
+            const VmOp P =
+                (Id == Intrinsic::smax) ? VmOp::ICmpSGT : VmOp::ICmpSLT;
             Cmp = emitRaw(P, *SA, *SB);
         } else {
-            const VmOp P = (Id == Intrinsic::umax) ? VmOp::ICmpUGT
-                                                   : VmOp::ICmpULT;
+            const VmOp P =
+                (Id == Intrinsic::umax) ? VmOp::ICmpUGT : VmOp::ICmpULT;
             Cmp = emitRaw(P, *A, *B);
         }
         if (!Cmp)
@@ -1199,7 +1200,8 @@ bool Lifter::liftCall(CallInst &CI) {
     CS.fn_ty = CI.getFunctionType();
     CS.cc = CI.getCallingConv();
     if (CI.isInlineAsm()) {
-        if (!AllowProtectionCalls) // inline asm is a protection-only lift target
+        if (!AllowProtectionCalls) // inline asm is a protection-only lift
+                                   // target
             return false;
         CS.direct = CI.getCalledOperand();
     } else if (Function *Callee = CI.getCalledFunction()) {
@@ -1235,7 +1237,8 @@ bool Lifter::liftCall(CallInst &CI) {
     }
     const std::uint32_t Idx = static_cast<std::uint32_t>(P_.calls.size());
     P_.calls.push_back(std::move(CS));
-    return emit({VmOp::Call, 0, 0, 0, Idx}); // imm = call index (handler select)
+    return emit(
+        {VmOp::Call, 0, 0, 0, Idx}); // imm = call index (handler select)
 }
 
 bool Lifter::liftInstruction(Instruction &I) {
@@ -1300,8 +1303,7 @@ bool Lifter::liftTerminator(Instruction &T) {
         auto Idx = static_cast<std::uint32_t>(P_.code.size());
         if (!emit({VmOp::BrCond, *Cond, 0, 0, 0}))
             return false;
-        Fixups_.push_back(
-            {Idx, BI->getSuccessor(0), BI->getSuccessor(1), 0});
+        Fixups_.push_back({Idx, BI->getSuccessor(0), BI->getSuccessor(1), 0});
         return true;
     }
     if (auto *SI = dyn_cast<SwitchInst>(&T)) {
@@ -1321,9 +1323,8 @@ bool Lifter::liftTerminator(Instruction &T) {
             auto Idx = static_cast<std::uint32_t>(P_.code.size());
             if (!emit({VmOp::BrCond, *Eq, 0, 0, 0}))
                 return false;
-            Fixups_.push_back(
-                {Idx, Case.getCaseSuccessor(), nullptr,
-                 (Idx + 1) * kInstrStride});
+            Fixups_.push_back({Idx, Case.getCaseSuccessor(), nullptr,
+                               (Idx + 1) * kInstrStride});
         }
         auto Idx = static_cast<std::uint32_t>(P_.code.size());
         if (!emit({VmOp::Jmp, 0, 0, 0, 0}))
@@ -1436,43 +1437,41 @@ std::optional<HandlerLayout> makeLayout(ir::IRRandom &Rng,
                                         std::uint32_t NumCalls) {
     HandlerLayout Layout;
     Layout.specs = {
-        {VmOp::Const, 0, "const"},  {VmOp::Ret, 0, "ret"},
-        {VmOp::Add, 0, "add.a"},    {VmOp::Add, 1, "add.b"},
-        {VmOp::Sub, 0, "sub.a"},    {VmOp::Sub, 1, "sub.b"},
-        {VmOp::Xor, 0, "xor.a"},    {VmOp::Xor, 1, "xor.b"},
-        {VmOp::And, 0, "and.a"},    {VmOp::And, 1, "and.b"},
-        {VmOp::Or, 0, "or.a"},      {VmOp::Or, 1, "or.b"},
-        {VmOp::Mul, 0, "mul.a"},    {VmOp::Mul, 1, "mul.b"},
-        {VmOp::Shl, 0, "shl.a"},    {VmOp::Shl, 1, "shl.b"},
-        {VmOp::LShr, 0, "lshr.a"},  {VmOp::LShr, 1, "lshr.b"},
-        {VmOp::AShr, 0, "ashr.a"},  {VmOp::AShr, 1, "ashr.b"},
-        {VmOp::UDiv, 0, "udiv.a"},  {VmOp::UDiv, 1, "udiv.b"},
-        {VmOp::SDiv, 0, "sdiv.a"},  {VmOp::SDiv, 1, "sdiv.b"},
-        {VmOp::URem, 0, "urem.a"},  {VmOp::URem, 1, "urem.b"},
-        {VmOp::SRem, 0, "srem.a"},  {VmOp::SRem, 1, "srem.b"},
+        {VmOp::Const, 0, "const"},      {VmOp::Ret, 0, "ret"},
+        {VmOp::Add, 0, "add.a"},        {VmOp::Add, 1, "add.b"},
+        {VmOp::Sub, 0, "sub.a"},        {VmOp::Sub, 1, "sub.b"},
+        {VmOp::Xor, 0, "xor.a"},        {VmOp::Xor, 1, "xor.b"},
+        {VmOp::And, 0, "and.a"},        {VmOp::And, 1, "and.b"},
+        {VmOp::Or, 0, "or.a"},          {VmOp::Or, 1, "or.b"},
+        {VmOp::Mul, 0, "mul.a"},        {VmOp::Mul, 1, "mul.b"},
+        {VmOp::Shl, 0, "shl.a"},        {VmOp::Shl, 1, "shl.b"},
+        {VmOp::LShr, 0, "lshr.a"},      {VmOp::LShr, 1, "lshr.b"},
+        {VmOp::AShr, 0, "ashr.a"},      {VmOp::AShr, 1, "ashr.b"},
+        {VmOp::UDiv, 0, "udiv.a"},      {VmOp::UDiv, 1, "udiv.b"},
+        {VmOp::SDiv, 0, "sdiv.a"},      {VmOp::SDiv, 1, "sdiv.b"},
+        {VmOp::URem, 0, "urem.a"},      {VmOp::URem, 1, "urem.b"},
+        {VmOp::SRem, 0, "srem.a"},      {VmOp::SRem, 1, "srem.b"},
         {VmOp::ICmpEQ, 0, "icmp.eq"},   {VmOp::ICmpNE, 0, "icmp.ne"},
         {VmOp::ICmpULT, 0, "icmp.ult"}, {VmOp::ICmpULE, 0, "icmp.ule"},
         {VmOp::ICmpUGT, 0, "icmp.ugt"}, {VmOp::ICmpUGE, 0, "icmp.uge"},
         {VmOp::ICmpSLT, 0, "icmp.slt"}, {VmOp::ICmpSLE, 0, "icmp.sle"},
         {VmOp::ICmpSGT, 0, "icmp.sgt"}, {VmOp::ICmpSGE, 0, "icmp.sge"},
-        {VmOp::Select, 0, "select"},
-        {VmOp::Jmp, 0, "jmp.a"},    {VmOp::Jmp, 1, "jmp.b"},
-        {VmOp::BrCond, 0, "br.a"},  {VmOp::BrCond, 1, "br.b"},
-        {VmOp::Sext, 0, "sext.a"},  {VmOp::Sext, 1, "sext.b"},
-        {VmOp::Load8, 0, "load8"},  {VmOp::Load16, 0, "load16"},
-        {VmOp::Load32, 0, "load32"}, {VmOp::Load64, 0, "load64"},
-        {VmOp::Store8, 0, "store8"}, {VmOp::Store16, 0, "store16"},
-        {VmOp::Store32, 0, "store32"}, {VmOp::Store64, 0, "store64"},
-        {VmOp::PtrConst, 0, "ptrconst"},
+        {VmOp::Select, 0, "select"},    {VmOp::Jmp, 0, "jmp.a"},
+        {VmOp::Jmp, 1, "jmp.b"},        {VmOp::BrCond, 0, "br.a"},
+        {VmOp::BrCond, 1, "br.b"},      {VmOp::Sext, 0, "sext.a"},
+        {VmOp::Sext, 1, "sext.b"},      {VmOp::Load8, 0, "load8"},
+        {VmOp::Load16, 0, "load16"},    {VmOp::Load32, 0, "load32"},
+        {VmOp::Load64, 0, "load64"},    {VmOp::Store8, 0, "store8"},
+        {VmOp::Store16, 0, "store16"},  {VmOp::Store32, 0, "store32"},
+        {VmOp::Store64, 0, "store64"},  {VmOp::PtrConst, 0, "ptrconst"},
     };
     shuffleSpecs(Layout.specs, Rng);
     // Each call site gets its own handler, appended in order AFTER the shuffle
     // so the call-index -> handler-id mapping is stable (encoder and builder
     // must agree).  variant carries the call index.
     for (std::uint32_t I = 0; I < NumCalls; ++I)
-        Layout.specs.push_back(
-            {VmOp::Call, static_cast<std::uint8_t>(I),
-             std::string("call.") + std::to_string(I)});
+        Layout.specs.push_back({VmOp::Call, static_cast<std::uint8_t>(I),
+                                std::string("call.") + std::to_string(I)});
     if (Layout.specs.size() > kVmTargetTableSlots)
         return std::nullopt;
     for (std::uint32_t I = 0; I < Layout.specs.size(); ++I)
@@ -1591,24 +1590,23 @@ Value *emitStreamKey(Builder &B, Value *Offset, const Encoding &Enc) {
     Value *X =
         B.CreateMul(Offset, ConstantInt::get(I32, Enc.mul), "morok.vm.key.mul");
     X = B.CreateAdd(X, ConstantInt::get(I32, Enc.add), "morok.vm.key.add");
-    // L1: fold a 0-on-clean delta from the verdict seal into the keystream.  On a
-    // clean run seal==S0 so X is unchanged and the decode matches the compile-time
-    // encode; under a tripped detector (injection/tamper) every decoded byte —
-    // opcode, operand, and immediate (all route through emitDecodeByte) — is wrong
-    // and vm.exec yields garbage.  Closes the vm.exec gap left open by M4.
-    if (GlobalVariable *Seal = runtime_seal::findChannel(
-            *B.GetInsertBlock()->getModule(),
-            runtime_seal::kAntiDebugChannel)) {
+    // L1: fold a 0-on-clean delta from the verdict seal into the keystream.  On
+    // a clean run seal==S0 so X is unchanged and the decode matches the
+    // compile-time encode; under a tripped detector (injection/tamper) every
+    // decoded byte — opcode, operand, and immediate (all route through
+    // emitDecodeByte) — is wrong and vm.exec yields garbage.  Closes the
+    // vm.exec gap left open by M4.
+    if (GlobalVariable *Seal =
+            runtime_seal::findChannel(*B.GetInsertBlock()->getModule(),
+                                      runtime_seal::kAntiDebugChannel)) {
         auto *I64 = B.getInt64Ty();
         Value *D = runtime_seal::emitDelta(
             B, Seal, runtime_seal::initialValue(Seal), "morok.vm.seal");
         const std::uint64_t Domain =
             (static_cast<std::uint64_t>(Enc.mul) << 32) ^
             (static_cast<std::uint64_t>(Enc.add) << 16) ^
-            static_cast<std::uint64_t>(Enc.xork) ^
-            0x6D6F726F6B766D31ULL;
-        Value *K64 =
-            runtime_seal::emitKdf64(B, D, Domain, "morok.vm.seal.kdf");
+            static_cast<std::uint64_t>(Enc.xork) ^ 0x6D6F726F6B766D31ULL;
+        Value *K64 = runtime_seal::emitKdf64(B, D, Domain, "morok.vm.seal.kdf");
         Value *D32 = B.CreateXor(
             B.CreateTrunc(K64, I32),
             B.CreateTrunc(B.CreateLShr(K64, ConstantInt::get(I64, 32)), I32),
@@ -1692,7 +1690,8 @@ Value *mixPoison(Builder &B, Value *Cur, Value *Data, std::uint64_t Salt,
             ? Data
             : B.CreateZExtOrTrunc(Data, I64, Twine(Name).concat(".wide"));
     Value *X = B.CreateXor(Cur, Wide, Twine(Name).concat(".data"));
-    X = B.CreateXor(X, ConstantInt::get(I64, Salt), Twine(Name).concat(".salt"));
+    X = B.CreateXor(X, ConstantInt::get(I64, Salt),
+                    Twine(Name).concat(".salt"));
     X = B.CreateMul(X, ConstantInt::get(I64, 0xD6E8FEB86659FD93ULL),
                     Twine(Name).concat(".mul"));
     Value *Rot = B.CreateOr(
@@ -1726,14 +1725,13 @@ Value *applyPoison(Builder &B, AllocaInst *PoisonSlot, Value *Input,
 }
 
 Value *safeIndex(Builder &B, AllocaInst *PoisonSlot, Value *Idx,
-                 std::uint32_t Limit, std::uint64_t Salt,
-                 const Twine &Name) {
+                 std::uint32_t Limit, std::uint64_t Salt, const Twine &Name) {
     auto *I32 = B.getInt32Ty();
     Value *LimitV = ConstantInt::get(I32, Limit);
     Value *Bad = B.CreateICmpUGE(Idx, LimitV, Twine(Name).concat(".bad"));
-    Value *Wrapped =
-        B.CreateURem(Idx, LimitV, Twine(Name).concat(".wrap"));
-    recordPoisonFlag(B, PoisonSlot, Bad, Idx, Salt, Twine(Name).concat(".poison"));
+    Value *Wrapped = B.CreateURem(Idx, LimitV, Twine(Name).concat(".wrap"));
+    recordPoisonFlag(B, PoisonSlot, Bad, Idx, Salt,
+                     Twine(Name).concat(".poison"));
     return B.CreateSelect(Bad, Wrapped, Idx, Name);
 }
 
@@ -1743,17 +1741,15 @@ Value *safePc(Builder &B, AllocaInst *PoisonSlot, Value *Pc,
     const std::uint32_t ByteSize = InstrCount * kInstrStride;
     Value *Stride = ConstantInt::get(I32, kInstrStride);
     Value *ByteSizeV = ConstantInt::get(I32, ByteSize);
-    Value *Misaligned =
-        B.CreateICmpNE(B.CreateURem(Pc, Stride, Twine(Name).concat(".rem")),
-                       ConstantInt::get(I32, 0), Twine(Name).concat(".unaligned"));
+    Value *Misaligned = B.CreateICmpNE(
+        B.CreateURem(Pc, Stride, Twine(Name).concat(".rem")),
+        ConstantInt::get(I32, 0), Twine(Name).concat(".unaligned"));
     Value *OutOfRange =
         B.CreateICmpUGE(Pc, ByteSizeV, Twine(Name).concat(".range"));
     Value *Bad = B.CreateOr(Misaligned, OutOfRange, Twine(Name).concat(".bad"));
-    Value *Instr =
-        B.CreateUDiv(Pc, Stride, Twine(Name).concat(".instr"));
-    Value *WrappedInstr =
-        B.CreateURem(Instr, ConstantInt::get(I32, InstrCount),
-                     Twine(Name).concat(".wrap"));
+    Value *Instr = B.CreateUDiv(Pc, Stride, Twine(Name).concat(".instr"));
+    Value *WrappedInstr = B.CreateURem(Instr, ConstantInt::get(I32, InstrCount),
+                                       Twine(Name).concat(".wrap"));
     Value *WrappedPc =
         B.CreateMul(WrappedInstr, Stride, Twine(Name).concat(".pc"));
     recordPoisonFlag(B, PoisonSlot, Bad, Pc, 0xAEF17502108EF2D9ULL,
@@ -1802,9 +1798,8 @@ Value *emitBinary(Builder &B, VmOp Op, std::uint8_t Variant, Value *L, Value *R,
     Value *SignedBad = B.CreateOr(
         B.CreateICmpEQ(R, ConstantInt::get(I64, 0), "morok.vm.sdiv.zero"),
         SignedOverflow, "morok.vm.sdiv.bad");
-    Value *RSignedSafe =
-        B.CreateSelect(SignedBad, ConstantInt::get(I64, 1), R,
-                       "morok.vm.sdiv.safe");
+    Value *RSignedSafe = B.CreateSelect(SignedBad, ConstantInt::get(I64, 1), R,
+                                        "morok.vm.sdiv.safe");
     Value *Out = nullptr;
     switch (Op) {
     case VmOp::Add:
@@ -1875,34 +1870,34 @@ Value *emitBinary(Builder &B, VmOp Op, std::uint8_t Variant, Value *L, Value *R,
             L, Shift, Variant == 0 ? "morok.vm.ashr" : "morok.vm.ashr.alt");
         break;
     case VmOp::UDiv:
-        recordPoisonFlag(B, PoisonSlot,
-                         B.CreateICmpEQ(R, ConstantInt::get(I64, 0),
-                                        "morok.vm.udiv.bad"),
-                         Pc, 0x9D290A9474F83A43ULL, "morok.vm.udiv.poison");
+        recordPoisonFlag(
+            B, PoisonSlot,
+            B.CreateICmpEQ(R, ConstantInt::get(I64, 0), "morok.vm.udiv.bad"),
+            Pc, 0x9D290A9474F83A43ULL, "morok.vm.udiv.poison");
         Out = B.CreateUDiv(
             L, RNonZero, Variant == 0 ? "morok.vm.udiv" : "morok.vm.udiv.alt");
         break;
     case VmOp::SDiv:
-        recordPoisonFlag(B, PoisonSlot, SignedBad, Pc,
-                         0xBE78E99AC8103477ULL, "morok.vm.sdiv.poison");
-        Out = B.CreateSDiv(
-            L, RSignedSafe,
-            Variant == 0 ? "morok.vm.sdiv" : "morok.vm.sdiv.alt");
+        recordPoisonFlag(B, PoisonSlot, SignedBad, Pc, 0xBE78E99AC8103477ULL,
+                         "morok.vm.sdiv.poison");
+        Out =
+            B.CreateSDiv(L, RSignedSafe,
+                         Variant == 0 ? "morok.vm.sdiv" : "morok.vm.sdiv.alt");
         break;
     case VmOp::URem:
-        recordPoisonFlag(B, PoisonSlot,
-                         B.CreateICmpEQ(R, ConstantInt::get(I64, 0),
-                                        "morok.vm.urem.bad"),
-                         Pc, 0x91EC3DF1D8F1C5BBULL, "morok.vm.urem.poison");
+        recordPoisonFlag(
+            B, PoisonSlot,
+            B.CreateICmpEQ(R, ConstantInt::get(I64, 0), "morok.vm.urem.bad"),
+            Pc, 0x91EC3DF1D8F1C5BBULL, "morok.vm.urem.poison");
         Out = B.CreateURem(
             L, RNonZero, Variant == 0 ? "morok.vm.urem" : "morok.vm.urem.alt");
         break;
     case VmOp::SRem:
-        recordPoisonFlag(B, PoisonSlot, SignedBad, Pc,
-                         0xE05D1B9604146815ULL, "morok.vm.srem.poison");
-        Out = B.CreateSRem(
-            L, RSignedSafe,
-            Variant == 0 ? "morok.vm.srem" : "morok.vm.srem.alt");
+        recordPoisonFlag(B, PoisonSlot, SignedBad, Pc, 0xE05D1B9604146815ULL,
+                         "morok.vm.srem.poison");
+        Out =
+            B.CreateSRem(L, RSignedSafe,
+                         Variant == 0 ? "morok.vm.srem" : "morok.vm.srem.alt");
         break;
     case VmOp::ICmpEQ:
         Out = B.CreateZExt(B.CreateICmpEQ(L, R, "morok.vm.icmp.eq"), I64,
@@ -2028,10 +2023,9 @@ Value *emitMemLoad(Builder &B, Value *Addr, unsigned Bytes) {
 void emitMemStore(Builder &B, Value *Addr, Value *Val, unsigned Bytes) {
     auto *Ptr = B.CreateIntToPtr(Addr, PointerType::getUnqual(B.getContext()),
                                  "morok.vm.mem.ptr");
-    Value *Narrow =
-        Bytes == 8 ? Val
-                   : B.CreateTrunc(Val, B.getIntNTy(Bytes * 8),
-                                   "morok.vm.mem.trunc");
+    Value *Narrow = Bytes == 8 ? Val
+                               : B.CreateTrunc(Val, B.getIntNTy(Bytes * 8),
+                                               "morok.vm.mem.trunc");
     auto *St = B.CreateStore(Narrow, Ptr);
     St->setVolatile(true);
     St->setAlignment(Align(1));
@@ -2071,9 +2065,8 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
 
     GlobalVariable *Targets =
         createTargetTable(M, Helper, Handlers, PoisonHandler, Src->getName());
-    GlobalVariable *PointerTable =
-        createPointerTable(M, ArrayRef<Constant *>(P.pointer_constants),
-                           Src->getName());
+    GlobalVariable *PointerTable = createPointerTable(
+        M, ArrayRef<Constant *>(P.pointer_constants), Src->getName());
 
     Builder EB(Entry);
     AllocaInst *Regs = EB.CreateAlloca(RegsTy, nullptr, "morok.vm.regs");
@@ -2109,10 +2102,10 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
     // helper is a separate function (the source body is deleted by the wrapper
     // rewrite), so the demoted slots must live here.
     for (const AllocaSpec &Spec : P.allocas) {
-        Value *Count =
-            Spec.num_elements == 1
-                ? nullptr
-                : static_cast<Value *>(ConstantInt::get(I64, Spec.num_elements));
+        Value *Count = Spec.num_elements == 1
+                           ? nullptr
+                           : static_cast<Value *>(
+                                 ConstantInt::get(I64, Spec.num_elements));
         auto *Slot = EB.CreateAlloca(Spec.type, Count, "morok.vm.arena");
         Slot->setAlignment(Spec.align);
         storeReg(EB, Regs, RegsTy, ConstantInt::get(I32, Spec.reg),
@@ -2121,10 +2114,9 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
     EB.CreateBr(Dispatch);
 
     Builder DB(Dispatch);
-    Value *Pc = safePc(DB, PoisonSlot,
-                       DB.CreateLoad(I32, PcSlot, "morok.vm.pc"),
-                       static_cast<std::uint32_t>(P.code.size()),
-                       "morok.vm.pc.safe");
+    Value *Pc =
+        safePc(DB, PoisonSlot, DB.CreateLoad(I32, PcSlot, "morok.vm.pc"),
+               static_cast<std::uint32_t>(P.code.size()), "morok.vm.pc.safe");
     Value *Op = DB.CreateZExt(emitDecodeByte(DB, Bytecode, Pc, 0, Enc), I32,
                               "morok.vm.op");
     auto *TargetsTy = cast<ArrayType>(Targets->getValueType());
@@ -2156,7 +2148,8 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
     };
     auto decodeReg = [&](Builder &B, Value *Pc, std::uint32_t Field,
                          std::uint64_t Salt, const Twine &Name) {
-        return safeIndex(B, PoisonSlot, emitDecodeReg(B, Bytecode, Pc, Field, Enc),
+        return safeIndex(B, PoisonSlot,
+                         emitDecodeReg(B, Bytecode, Pc, Field, Enc),
                          P.reg_count, Salt, Name);
     };
     auto safeAddress = [&](Builder &B, Value *Addr, const Twine &Name) {
@@ -2182,10 +2175,9 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
     for (std::size_t I = 0; I < Layout.specs.size(); ++I) {
         const HandlerSpec &Spec = Layout.specs[I];
         Builder B(Handlers[I]);
-        Value *CurPc = safePc(B, PoisonSlot,
-                              B.CreateLoad(I32, PcSlot, "morok.vm.pc.h"),
-                              static_cast<std::uint32_t>(P.code.size()),
-                              "morok.vm.pc.h.safe");
+        Value *CurPc = safePc(
+            B, PoisonSlot, B.CreateLoad(I32, PcSlot, "morok.vm.pc.h"),
+            static_cast<std::uint32_t>(P.code.size()), "morok.vm.pc.h.safe");
 
         switch (Spec.op) {
         case VmOp::Const: {
@@ -2211,8 +2203,7 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
             if (P.ret_kind == RetKind::Ptr)
                 B.CreateRet(B.CreateIntToPtr(Ret, RetTy, "morok.vm.ret.ptr"));
             else if (RetTy->getIntegerBitWidth() < 64)
-                B.CreateRet(
-                    B.CreateTrunc(Ret, RetTy, "morok.vm.ret.trunc"));
+                B.CreateRet(B.CreateTrunc(Ret, RetTy, "morok.vm.ret.trunc"));
             else
                 B.CreateRet(Ret);
             continue;
@@ -2224,20 +2215,20 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
                                        "morok.vm.select.cond.idx");
             Value *TrueIdx = decodeReg(B, CurPc, 3, 0xA4E3160B29D81245ULL,
                                        "morok.vm.select.true.idx");
-            Value *FalseIdx = B.CreateTrunc(
-                emitDecodeImm(B, Bytecode, CurPc, Enc), I32,
-                "morok.vm.select.false.idx");
-            FalseIdx = safeIndex(B, PoisonSlot, FalseIdx, P.reg_count,
-                                 0x34E8C1CC19A8FBA9ULL,
-                                 "morok.vm.select.false.safe");
+            Value *FalseIdx =
+                B.CreateTrunc(emitDecodeImm(B, Bytecode, CurPc, Enc), I32,
+                              "morok.vm.select.false.idx");
+            FalseIdx =
+                safeIndex(B, PoisonSlot, FalseIdx, P.reg_count,
+                          0x34E8C1CC19A8FBA9ULL, "morok.vm.select.false.safe");
             Value *Cond = loadReg(B, Regs, RegsTy, CondIdx);
             Value *TrueVal = loadReg(B, Regs, RegsTy, TrueIdx);
             Value *FalseVal = loadReg(B, Regs, RegsTy, FalseIdx);
-            Value *TakeTrue = B.CreateICmpNE(
-                Cond, ConstantInt::get(I64, 0), "morok.vm.select.cond");
-            storeReg(B, Regs, RegsTy, Dst,
-                     B.CreateSelect(TakeTrue, TrueVal, FalseVal,
-                                    "morok.vm.select"));
+            Value *TakeTrue = B.CreateICmpNE(Cond, ConstantInt::get(I64, 0),
+                                             "morok.vm.select.cond");
+            storeReg(
+                B, Regs, RegsTy, Dst,
+                B.CreateSelect(TakeTrue, TrueVal, FalseVal, "morok.vm.select"));
             advancePc(B, PcSlot, Dispatch);
             continue;
         }
@@ -2260,11 +2251,10 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
             Value *CondIdx = decodeReg(B, CurPc, 1, 0xA2D6A3B2F17E6A2BULL,
                                        "morok.vm.br.cond.idx");
             Value *Packed = emitDecodeImm(B, Bytecode, CurPc, Enc);
-            Value *Taken =
-                B.CreateTrunc(Packed, I32, "morok.vm.br.taken");
-            Value *NotTaken = B.CreateTrunc(
-                B.CreateLShr(Packed, ConstantInt::get(I64, 32)), I32,
-                "morok.vm.br.nottaken");
+            Value *Taken = B.CreateTrunc(Packed, I32, "morok.vm.br.taken");
+            Value *NotTaken =
+                B.CreateTrunc(B.CreateLShr(Packed, ConstantInt::get(I64, 32)),
+                              I32, "morok.vm.br.nottaken");
             Taken = safePc(B, PoisonSlot, Taken,
                            static_cast<std::uint32_t>(P.code.size()),
                            "morok.vm.br.taken.safe");
@@ -2286,17 +2276,17 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
         case VmOp::Sext: {
             Value *Dst = decodeReg(B, CurPc, 1, 0xDB94A7C6F31D9531ULL,
                                    "morok.vm.sext.dst");
-            Value *SextSrc = loadReg(
-                B, Regs, RegsTy,
-                decodeReg(B, CurPc, 2, 0xC9F6D08A1C77B45DULL,
-                          "morok.vm.sext.src"));
+            Value *SextSrc =
+                loadReg(B, Regs, RegsTy,
+                        decodeReg(B, CurPc, 2, 0xC9F6D08A1C77B45DULL,
+                                  "morok.vm.sext.src"));
             Value *W = emitDecodeImm(B, Bytecode, CurPc, Enc);
             Value *Sh = B.CreateAnd(
                 B.CreateSub(ConstantInt::get(I64, 64), W, "morok.vm.sext.sh"),
                 ConstantInt::get(I64, 63), "morok.vm.sext.sh.m");
-            Value *Res = B.CreateAShr(
-                B.CreateShl(SextSrc, Sh, "morok.vm.sext.shl"), Sh,
-                "morok.vm.sext.ashr");
+            Value *Res =
+                B.CreateAShr(B.CreateShl(SextSrc, Sh, "morok.vm.sext.shl"), Sh,
+                             "morok.vm.sext.ashr");
             if (Spec.variant != 0) {
                 Value *Zero = B.CreateXor(W, W, "morok.vm.sext.zero");
                 Res = B.CreateXor(Res, Zero, "morok.vm.sext.keep");
@@ -2315,16 +2305,16 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
                                                              : 8;
             Value *Dst = decodeReg(B, CurPc, 1, 0x95D401D6F7E45E11ULL,
                                    "morok.vm.load.dst");
-            Value *Addr = loadReg(
-                B, Regs, RegsTy,
-                decodeReg(B, CurPc, 2, 0x91DEB2F7D97E044FULL,
-                          "morok.vm.load.addr.idx"));
-            storeReg(B, Regs, RegsTy, Dst,
-                     applyPoison(B, PoisonSlot,
-                                 emitMemLoad(B, safeAddress(B, Addr,
-                                                            "morok.vm.load.addr"),
-                                             Bytes),
-                                 "morok.vm.load.poison"));
+            Value *Addr = loadReg(B, Regs, RegsTy,
+                                  decodeReg(B, CurPc, 2, 0x91DEB2F7D97E044FULL,
+                                            "morok.vm.load.addr.idx"));
+            storeReg(
+                B, Regs, RegsTy, Dst,
+                applyPoison(
+                    B, PoisonSlot,
+                    emitMemLoad(B, safeAddress(B, Addr, "morok.vm.load.addr"),
+                                Bytes),
+                    "morok.vm.load.poison"));
             advancePc(B, PcSlot, Dispatch);
             continue;
         }
@@ -2336,37 +2326,35 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
                                    : Spec.op == VmOp::Store16 ? 2
                                    : Spec.op == VmOp::Store32 ? 4
                                                               : 8;
-            Value *Addr = loadReg(
-                B, Regs, RegsTy,
-                decodeReg(B, CurPc, 2, 0xEC71A1B54DA2D137ULL,
-                          "morok.vm.store.addr.idx"));
-            Value *Val = loadReg(
-                B, Regs, RegsTy,
-                decodeReg(B, CurPc, 3, 0x809C7A9B7F3E6011ULL,
-                          "morok.vm.store.val.idx"));
-            emitMemStore(B, safeAddress(B, Addr, "morok.vm.store.addr"),
-                         applyPoison(B, PoisonSlot, Val,
-                                     "morok.vm.store.poison"),
-                         Bytes);
+            Value *Addr = loadReg(B, Regs, RegsTy,
+                                  decodeReg(B, CurPc, 2, 0xEC71A1B54DA2D137ULL,
+                                            "morok.vm.store.addr.idx"));
+            Value *Val = loadReg(B, Regs, RegsTy,
+                                 decodeReg(B, CurPc, 3, 0x809C7A9B7F3E6011ULL,
+                                           "morok.vm.store.val.idx"));
+            emitMemStore(
+                B, safeAddress(B, Addr, "morok.vm.store.addr"),
+                applyPoison(B, PoisonSlot, Val, "morok.vm.store.poison"),
+                Bytes);
             advancePc(B, PcSlot, Dispatch);
             continue;
         }
         case VmOp::PtrConst: {
             Value *Dst = decodeReg(B, CurPc, 1, 0x86585C8B8E1AD5A7ULL,
                                    "morok.vm.ptr.dst");
-            Value *Idx =
-                B.CreateTrunc(emitDecodeImm(B, Bytecode, CurPc, Enc), I32,
-                              "morok.vm.ptr.idx");
+            Value *Idx = B.CreateTrunc(emitDecodeImm(B, Bytecode, CurPc, Enc),
+                                       I32, "morok.vm.ptr.idx");
             Value *Ptr = ConstantPointerNull::get(PtrTy);
             if (PointerTable) {
-                auto *PtrTableTy = cast<ArrayType>(PointerTable->getValueType());
+                auto *PtrTableTy =
+                    cast<ArrayType>(PointerTable->getValueType());
                 Idx = safeIndex(
                     B, PoisonSlot, Idx,
                     static_cast<std::uint32_t>(P.pointer_constants.size()),
                     0xC9382AA877E5B7B3ULL, "morok.vm.ptr.safe");
                 Value *PtrSlot = B.CreateInBoundsGEP(
-                    PtrTableTy, PointerTable,
-                    {ConstantInt::get(I32, 0), Idx}, "morok.vm.ptr.slot");
+                    PtrTableTy, PointerTable, {ConstantInt::get(I32, 0), Idx},
+                    "morok.vm.ptr.slot");
                 Ptr = B.CreateLoad(PtrTy, PtrSlot, "morok.vm.ptr.load");
             }
             storeReg(B, Regs, RegsTy, Dst,
@@ -2381,25 +2369,23 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
             const CallSite &CS = P.calls[Spec.variant];
             SmallVector<Value *, 8> Args;
             for (std::uint32_t A = 0; A < CS.fn_ty->getNumParams(); ++A) {
-                Value *Raw = loadReg(B, Regs, RegsTy,
-                                     ConstantInt::get(I32, CS.args[A]));
+                Value *Raw =
+                    loadReg(B, Regs, RegsTy, ConstantInt::get(I32, CS.args[A]));
                 Type *PT = CS.fn_ty->getParamType(A);
                 if (PT->isPointerTy())
                     Args.push_back(
                         B.CreateIntToPtr(Raw, PT, "morok.vm.call.arg"));
                 else if (PT->getIntegerBitWidth() < 64)
-                    Args.push_back(
-                        B.CreateTrunc(Raw, PT, "morok.vm.call.arg"));
+                    Args.push_back(B.CreateTrunc(Raw, PT, "morok.vm.call.arg"));
                 else
                     Args.push_back(Raw);
             }
             Value *Callee =
-                CS.indirect
-                    ? B.CreateIntToPtr(
-                          loadReg(B, Regs, RegsTy,
-                                  ConstantInt::get(I32, CS.callee_reg)),
-                          PtrTy, "morok.vm.call.fp")
-                    : CS.direct;
+                CS.indirect ? B.CreateIntToPtr(
+                                  loadReg(B, Regs, RegsTy,
+                                          ConstantInt::get(I32, CS.callee_reg)),
+                                  PtrTy, "morok.vm.call.fp")
+                            : CS.direct;
             CallInst *Call = B.CreateCall(
                 CS.fn_ty, Callee, Args,
                 CS.fn_ty->getReturnType()->isVoidTy() ? "" : "morok.vm.call.r");
@@ -2423,19 +2409,18 @@ Function *buildHelper(Module &M, const Program &P, GlobalVariable *Bytecode,
         }
 
         // Generic binary / comparison handler.
-        Value *Dst = decodeReg(B, CurPc, 1, 0xE01551368CA6D7F5ULL,
-                               "morok.vm.bin.dst");
-        Value *LIdx = decodeReg(B, CurPc, 2, 0x8E7BE1E4322EF725ULL,
-                                "morok.vm.bin.lhs");
-        Value *RIdx = decodeReg(B, CurPc, 3, 0xDB042D265F6E21D3ULL,
-                                "morok.vm.bin.rhs");
+        Value *Dst =
+            decodeReg(B, CurPc, 1, 0xE01551368CA6D7F5ULL, "morok.vm.bin.dst");
+        Value *LIdx =
+            decodeReg(B, CurPc, 2, 0x8E7BE1E4322EF725ULL, "morok.vm.bin.lhs");
+        Value *RIdx =
+            decodeReg(B, CurPc, 3, 0xDB042D265F6E21D3ULL, "morok.vm.bin.rhs");
         Value *L = loadReg(B, Regs, RegsTy, LIdx);
         Value *R = loadReg(B, Regs, RegsTy, RIdx);
-        Value *Out =
-            applyPoison(B, PoisonSlot,
-                        emitBinary(B, Spec.op, Spec.variant, L, R, CurPc,
-                                   PoisonSlot),
-                        "morok.vm.bin.poison");
+        Value *Out = applyPoison(
+            B, PoisonSlot,
+            emitBinary(B, Spec.op, Spec.variant, L, R, CurPc, PoisonSlot),
+            "morok.vm.bin.poison");
         storeReg(B, Regs, RegsTy, Dst, Out);
         advancePc(B, PcSlot, Dispatch);
     }
@@ -2509,8 +2494,8 @@ bool hasUnresolvedIndirectCall(Module &M) {
 // call_nested / call_tail_recursive / 04_bst exiting 133).
 //
 // LLVM's CallGraph cannot resolve ordinary function-pointer callbacks.  If any
-// unresolved indirect call exists in the module, every address-taken function is
-// a possible callback target and must stay native too; otherwise A -> B ->
+// unresolved indirect call exists in the module, every address-taken function
+// is a possible callback target and must stay native too; otherwise A -> B ->
 // (*fp=A) can re-enter A's VM wrapper even though no SCC cycle is visible.
 SmallPtrSet<const Function *, 16> recursiveFunctions(Module &M) {
     SmallPtrSet<const Function *, 16> Rec;
@@ -2562,9 +2547,9 @@ bool virtualizeModule(Module &M, const VirtualizationParams &Params,
         if (!F.isDeclaration() && candidateFunctionAllowed(F, Params))
             Worklist.push_back(&F);
 
-    // When user-call lifting is enabled, never lift a function that is part of a
-    // recursion cycle — recursion through the interpreter traps.  Computed once
-    // over the whole module (cheap; only needed in this mode).
+    // When user-call lifting is enabled, never lift a function that is part of
+    // a recursion cycle — recursion through the interpreter traps.  Computed
+    // once over the whole module (cheap; only needed in this mode).
     SmallPtrSet<const Function *, 16> Recursive;
     if (Params.allow_internal_user_calls)
         Recursive = recursiveFunctions(M);

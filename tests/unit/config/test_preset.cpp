@@ -47,7 +47,8 @@ TEST_CASE("presets do not vary reserved chaos_state_machine knobs") {
 // Regression for #20: constant shares are unconditionally globalized, so the
 // globalize / globalize_prob knobs are reserved no-ops; no preset may imply
 // variation (low/mid/high/max previously set globalize and globalize_prob).
-TEST_CASE("presets do not vary the reserved constant_encryption globalize knob") {
+TEST_CASE(
+    "presets do not vary the reserved constant_encryption globalize knob") {
     for (Preset p : {Preset::Low, Preset::Mid, Preset::High, Preset::Max}) {
         const PassConfig c = presetConfig(p);
         CHECK_FALSE(c.const_enc.globalize.has_value());
@@ -295,6 +296,13 @@ TEST_CASE("high preset matches the documented table") {
     CHECK(c.tracer_attestation.renewal == "startup");
     CHECK(c.tracer_attestation.bind_to_runtime_seal == true);
     CHECK(c.tracer_attestation.virtualize_helpers == true);
+    CHECK(c.sealed_blob.enabled == true);
+    CHECK(c.sealed_blob.max_blobs == 4u);
+    CHECK(c.sealed_blob.max_blob_bytes == 65536u);
+    REQUIRE(c.sealed_blob.key_sources.size() == 3);
+    CHECK(c.sealed_blob.key_sources[0] == "runtime_seal");
+    CHECK(c.sealed_blob.delivery == "eager");
+    CHECK(c.sealed_blob.zeroize_after_use == true);
     CHECK(c.self_checksum.enabled == true);
     CHECK(c.self_checksum.probability == 20u);
     CHECK(c.self_checksum.max_constants == 4u);
@@ -403,6 +411,8 @@ TEST_CASE("max preset enables every pass at full intensity") {
     CHECK(c.hash_self_decrypt.enabled == true);
     CHECK(c.hash_self_decrypt.max_payload_bytes == 65536u);
     CHECK(c.tracer_attestation.enabled == true);
+    CHECK(c.sealed_blob.enabled == true);
+    CHECK(c.sealed_blob.max_blobs == 16u);
     CHECK(c.self_checksum.enabled == true);
     CHECK(c.data_flow_integrity.enabled == true);
     CHECK(c.mutual_guard.enabled == true);
@@ -470,6 +480,7 @@ TEST_CASE("max preset enables every pass at full intensity") {
     const PassConfig h = presetConfig(Preset::High);
     CHECK(c.bcf.probability >= h.bcf.probability);
     CHECK(c.mba.probability >= h.mba.probability);
-    CHECK(c.virtualization.max_instructions >= h.virtualization.max_instructions);
+    CHECK(c.virtualization.max_instructions >=
+          h.virtualization.max_instructions);
     CHECK(c.vec.width >= h.vec.width);
 }

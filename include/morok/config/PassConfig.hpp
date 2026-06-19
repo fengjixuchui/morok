@@ -194,6 +194,15 @@ struct TracerAttestationConfig {
     Opt<bool> virtualize_helpers;
 };
 
+struct SealedBlobConfig {
+    Opt<bool> enabled;
+    Opt<std::uint32_t> max_blobs;
+    Opt<std::uint32_t> max_blob_bytes;
+    std::vector<std::string> key_sources;
+    Opt<std::string> delivery;
+    Opt<bool> zeroize_after_use;
+};
+
 struct SelfChecksumConfig {
     Opt<bool> enabled;
     Opt<std::uint32_t> probability;
@@ -376,6 +385,7 @@ struct PassConfig {
     HashSelfDecryptConfig hash_self_decrypt;
     ExternalSecretBindingConfig external_secret_binding;
     TracerAttestationConfig tracer_attestation;
+    SealedBlobConfig sealed_blob;
     SelfChecksumConfig self_checksum;
     DataFlowIntegrityConfig data_flow_integrity;
     MutualGuardConfig mutual_guard;

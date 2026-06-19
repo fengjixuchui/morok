@@ -578,6 +578,7 @@ and private-linkage cleanup for generated `morok.*` helpers, are scheduler-only.
 | Capability | `-passes` name | TOML section | Summary |
 |---|---|---|---|
 | String encryption | `morok-strenc` | `string_encryption` | Encrypts eligible private byte-array globals with a unique per-string cipher. Safe C-string callsites are materialized into per-use stack buffers; unsupported uses get per-string constructor decryptors. |
+| Sealed blobs | `morok-sealedblob` | `sealed_blob` | Encrypts explicit `.morok.sealed` byte-array globals and rewrites supported reads through per-blob lazy accessors keyed by RuntimeSeal/external-proof material. |
 | Function-call obfuscation | `morok-fco` | `function_call_obfuscate` | Hides external calls behind per-site import indirection. Linux/macOS 64-bit paths use manual export-by-hash resolvers where supported; unsupported targets use per-site cloaked dynamic lookup. |
 | Caller-keyed dispatch | `morok-ckd` | `caller_keyed_dispatch` | Collapses surviving direct user calls through a shared dispatch hub keyed by caller context and post-link sealed integrity bytes. |
 | Function wrapper | `morok-funcwrap` | `function_wrapper` | Wraps calls after per-function transforms so callers see proxy edges. |
@@ -587,6 +588,10 @@ and private-linkage cleanup for generated `morok.*` helpers, are scheduler-only.
 String encryption intentionally excludes generated `morok.decoy.str.*` globals.
 Those decoys must remain visible to cheap triage tools such as `strings`; real
 user strings are encrypted, length-padded where safe, and materialized lazily.
+Sealed blobs are opt-in: mark a private byte-array global with section
+`.morok.sealed` or a `morok.sealed.` prefix. Supported load/no-capture call
+uses materialize into per-use stack buffers via a per-blob `morok.sealed.open.*`
+helper, then volatile-zero the temporary buffer when configured.
 
 ### Virtualization and Integrity Entanglement
 
@@ -721,6 +726,7 @@ shares where needed.
 | `hash_gated_self_decrypt` | `enabled`, `probability`, `max_payloads`, `max_payload_bytes`, `context_keying` |
 | `external_secret_binding` | `enabled`, `mode`, `public_key`, `identity_policy`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `tracer_attestation` | `enabled`, `mode`, `shares`, `renewal`, `bind_to_runtime_seal`, `virtualize_helpers` |
+| `sealed_blob` | `enabled`, `max_blobs`, `max_blob_bytes`, `key_sources`, `delivery`, `zeroize_after_use` |
 | `self_checksum_constants` | `enabled`, `probability`, `max_constants`, `region_bytes` |
 | `data_flow_integrity` | `enabled`, `probability`, `max_tables`, `region_bytes` |
 | `mutual_guard_graph` | `enabled`, `probability`, `nodes`, `region_bytes`, `max_returns` |

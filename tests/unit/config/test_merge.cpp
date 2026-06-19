@@ -136,6 +136,12 @@ TEST_CASE("merge handles every pass family") {
     src.hash_self_decrypt.max_payloads = 3u;
     src.hash_self_decrypt.max_payload_bytes = 8192u;
     src.hash_self_decrypt.context_keying = false;
+    src.sealed_blob.enabled = true;
+    src.sealed_blob.max_blobs = 5u;
+    src.sealed_blob.max_blob_bytes = 4096u;
+    src.sealed_blob.key_sources = {"runtime_seal", "external_proof"};
+    src.sealed_blob.delivery = "eager";
+    src.sealed_blob.zeroize_after_use = false;
     src.self_checksum.enabled = true;
     src.self_checksum.probability = 82u;
     src.self_checksum.max_constants = 7u;
@@ -300,6 +306,13 @@ TEST_CASE("merge handles every pass family") {
     CHECK(dst.hash_self_decrypt.max_payloads == 3u);
     CHECK(dst.hash_self_decrypt.max_payload_bytes == 8192u);
     CHECK(dst.hash_self_decrypt.context_keying == false);
+    CHECK(dst.sealed_blob.enabled == true);
+    CHECK(dst.sealed_blob.max_blobs == 5u);
+    CHECK(dst.sealed_blob.max_blob_bytes == 4096u);
+    REQUIRE(dst.sealed_blob.key_sources.size() == 2);
+    CHECK(dst.sealed_blob.key_sources[1] == "external_proof");
+    CHECK(dst.sealed_blob.delivery == "eager");
+    CHECK(dst.sealed_blob.zeroize_after_use == false);
     CHECK(dst.self_checksum.enabled == true);
     CHECK(dst.self_checksum.probability == 82u);
     CHECK(dst.self_checksum.max_constants == 7u);

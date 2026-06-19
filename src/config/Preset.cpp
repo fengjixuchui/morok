@@ -171,6 +171,11 @@ PassConfig makeLow() {
     c.tracer_attestation.renewal = "startup";
     c.tracer_attestation.bind_to_runtime_seal = true;
     c.tracer_attestation.virtualize_helpers = true;
+    c.sealed_blob.enabled = false;
+    c.sealed_blob.max_blobs = 0;
+    c.sealed_blob.max_blob_bytes = 0;
+    c.sealed_blob.delivery = "eager";
+    c.sealed_blob.zeroize_after_use = true;
 
     c.self_checksum.enabled = false;
     c.self_checksum.probability = 0;
@@ -391,6 +396,11 @@ PassConfig makeMid() {
     c.tracer_attestation.renewal = "startup";
     c.tracer_attestation.bind_to_runtime_seal = true;
     c.tracer_attestation.virtualize_helpers = true;
+    c.sealed_blob.enabled = false;
+    c.sealed_blob.max_blobs = 0;
+    c.sealed_blob.max_blob_bytes = 0;
+    c.sealed_blob.delivery = "eager";
+    c.sealed_blob.zeroize_after_use = true;
 
     c.self_checksum.enabled = false;
     c.self_checksum.probability = 0;
@@ -617,6 +627,13 @@ PassConfig makeHigh() {
     c.tracer_attestation.renewal = "startup";
     c.tracer_attestation.bind_to_runtime_seal = true;
     c.tracer_attestation.virtualize_helpers = true;
+    c.sealed_blob.enabled = true;
+    c.sealed_blob.max_blobs = 4;
+    c.sealed_blob.max_blob_bytes = 64 * 1024;
+    c.sealed_blob.key_sources = {"runtime_seal", "external_proof",
+                                 "code_region"};
+    c.sealed_blob.delivery = "eager";
+    c.sealed_blob.zeroize_after_use = true;
 
     c.self_checksum.enabled = true;
     c.self_checksum.probability = 20;
@@ -864,6 +881,13 @@ PassConfig makeMax() {
     c.tracer_attestation.renewal = "startup";
     c.tracer_attestation.bind_to_runtime_seal = true;
     c.tracer_attestation.virtualize_helpers = true;
+    c.sealed_blob.enabled = true;
+    c.sealed_blob.max_blobs = 16;
+    c.sealed_blob.max_blob_bytes = 64 * 1024;
+    c.sealed_blob.key_sources = {"runtime_seal", "external_proof",
+                                 "code_region"};
+    c.sealed_blob.delivery = "eager";
+    c.sealed_blob.zeroize_after_use = true;
 
     c.self_checksum.enabled = true;
     c.self_checksum.probability = 100;

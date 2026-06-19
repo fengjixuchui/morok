@@ -45,6 +45,7 @@
 #include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/SealedBlob.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/ShamirShare.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
@@ -71,8 +72,8 @@
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
@@ -233,8 +234,7 @@ bool isMonotonicAtomicStoreTo(const StoreInst *SI, StringRef globalPrefix) {
            SI->getPointerOperand()->getName().starts_with(globalPrefix);
 }
 
-std::size_t countMonotonicAtomicLoadsFrom(Function &F,
-                                          StringRef globalPrefix) {
+std::size_t countMonotonicAtomicLoadsFrom(Function &F, StringRef globalPrefix) {
     std::size_t n = 0;
     for (Instruction &I : instructions(F))
         if (auto *LI = dyn_cast<LoadInst>(&I))
@@ -243,8 +243,7 @@ std::size_t countMonotonicAtomicLoadsFrom(Function &F,
     return n;
 }
 
-std::size_t countMonotonicAtomicStoresTo(Function &F,
-                                         StringRef globalPrefix) {
+std::size_t countMonotonicAtomicStoresTo(Function &F, StringRef globalPrefix) {
     std::size_t n = 0;
     for (Instruction &I : instructions(F))
         if (auto *SI = dyn_cast<StoreInst>(&I))
@@ -556,8 +555,8 @@ countStoresToBaseWithOpaqueSource(Function &F, StringRef basePrefix) {
             continue;
         ++total;
         if (valueDependsOnOpaqueBarrier(SI->getValueOperand()))
-        if (valueDependsOnOpaqueBarrier(SI->getValueOperand()))
-            ++opaque;
+            if (valueDependsOnOpaqueBarrier(SI->getValueOperand()))
+                ++opaque;
     }
     return {total, opaque};
 }
@@ -703,8 +702,8 @@ bool hasPlainNarrowICmp(Function &F) {
         if (!CI)
             continue;
         auto *Ty = dyn_cast<IntegerType>(CI->getOperand(0)->getType());
-        if (Ty && Ty == CI->getOperand(1)->getType() &&
-            Ty->getBitWidth() > 0 && Ty->getBitWidth() <= 8)
+        if (Ty && Ty == CI->getOperand(1)->getType() && Ty->getBitWidth() > 0 &&
+            Ty->getBitWidth() <= 8)
             return true;
     }
     return false;
@@ -816,8 +815,8 @@ Function *makeExternalCallFunction(Module &M, GlobalVariable *Text) {
     auto *PutsTy = FunctionType::get(I32, {Ptr}, false);
     Function *Puts =
         Function::Create(PutsTy, GlobalValue::ExternalLinkage, "puts", M);
-    Puts->addParamAttr(
-        0, Attribute::getWithCaptureInfo(Ctx, CaptureInfo::none()));
+    Puts->addParamAttr(0,
+                       Attribute::getWithCaptureInfo(Ctx, CaptureInfo::none()));
 
     auto *FT = FunctionType::get(I32, false);
     auto *F =
@@ -999,7 +998,8 @@ TEST_CASE("MorokPass demotes generated symbols to private linkage") {
     morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
 
     // Generated helpers exist (e.g. morok.strdec) but must carry private
-    // linkage, so their descriptive names never reach the binary's symbol table.
+    // linkage, so their descriptive names never reach the binary's symbol
+    // table.
     std::size_t morokSyms = 0;
     for (Function &F : *M) {
         if (!F.getName().starts_with("morok."))
@@ -1325,7 +1325,8 @@ entry:
     for (GlobalVariable &GV : M->globals()) {
         if (GV.getName().starts_with("morok.decoy.str.")) {
             CHECK(constantReferencesGlobal(LinkerUsed->getInitializer(), &GV));
-            CHECK(constantReferencesGlobal(CompilerUsed->getInitializer(), &GV));
+            CHECK(
+                constantReferencesGlobal(CompilerUsed->getInitializer(), &GV));
             continue;
         }
         if (!GV.getName().starts_with("morok.dbglog.state."))
@@ -1348,7 +1349,8 @@ entry:
 // corrupts the prologue, an available_externally body must stay ODR-identical,
 // and a call that writes memory contradicts a memory(none)/memory(read)
 // attribute.  Those functions must be left untouched; ordinary ones instrument.
-TEST_CASE("decoyStringsModule skips naked/available-externally/readonly funcs") {
+TEST_CASE(
+    "decoyStringsModule skips naked/available-externally/readonly funcs") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 target triple = "x86_64-unknown-linux-gnu"
@@ -1448,7 +1450,8 @@ TEST_CASE("substituteFunction handles constant shifts and stays valid") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("substituteFunction handles one-bit arithmetic without poison shifts") {
+TEST_CASE(
+    "substituteFunction handles one-bit arithmetic without poison shifts") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 define i1 @sub_bool(i1 %a, i1 %b) {
@@ -1747,8 +1750,7 @@ entry:
             if (SI->getName().starts_with("morok.optamp.select") &&
                 SI->getType()->isIntegerTy(1))
                 ++signedSelects;
-        hasSignedInverse |=
-            I.getName().starts_with("morok.optamp.cmp.inverse");
+        hasSignedInverse |= I.getName().starts_with("morok.optamp.cmp.inverse");
     }
     CHECK(signedSelects == 4u);
     CHECK(hasSignedInverse);
@@ -1928,7 +1930,8 @@ entry:
     CHECK_FALSE(verifyModule(*M2, &errs()));
 }
 
-TEST_CASE("subThresholdPersistFunction preserves floating ops through bit carriers") {
+TEST_CASE(
+    "subThresholdPersistFunction preserves floating ops through bit carriers") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 define float @threshold_float(float %a, float %b) {
@@ -2110,8 +2113,9 @@ reject:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(8201);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::deSwitchGateConstantsFunction(*F, {/*prob=*/100,
-                                                            /*k=*/2, 1},
+    CHECK(morok::passes::deSwitchGateConstantsFunction(*F,
+                                                       {/*prob=*/100,
+                                                        /*k=*/2, 1},
                                                        rng));
     // The switch is fully lowered and the rebuilt successor PHIs are
     // well-formed (no stale OrigBB entry, correct entry count per real edge).
@@ -2184,7 +2188,8 @@ entry:
 }
 )ir"; // 305419896 = 0x12345678 ; -1412567278 as i32 = 0xabcdef12
 
-    // skip_value: 0x12345678 is exempted; 0xabcdef12 is still encrypted at p=100.
+    // skip_value: 0x12345678 is exempted; 0xabcdef12 is still encrypted at
+    // p=100.
     {
         LLVMContext ctx;
         auto M = parse(ctx, ir);
@@ -2197,12 +2202,13 @@ entry:
         p.share_count = 4;
         p.skip_value = {"12345678"};
         CHECK(morok::passes::constantEncryptFunction(*F, p, rng));
-        CHECK(hasConstInt(*F, 0x12345678u));      // skipped -> still a literal
+        CHECK(hasConstInt(*F, 0x12345678u));       // skipped -> still a literal
         CHECK_FALSE(hasConstInt(*F, 0xABCDEF12u)); // encrypted
         CHECK_FALSE(verifyModule(*M, &errs()));
     }
 
-    // force_value: 0xabcdef12 is forced even at p=0; 0x12345678 stays a literal.
+    // force_value: 0xabcdef12 is forced even at p=0; 0x12345678 stays a
+    // literal.
     {
         LLVMContext ctx;
         auto M = parse(ctx, ir);
@@ -2215,7 +2221,7 @@ entry:
         p.share_count = 4;
         p.force_value = {"abcdef12"};
         CHECK(morok::passes::constantEncryptFunction(*F, p, rng));
-        CHECK(hasConstInt(*F, 0x12345678u));      // p=0, not forced -> literal
+        CHECK(hasConstInt(*F, 0x12345678u));       // p=0, not forced -> literal
         CHECK_FALSE(hasConstInt(*F, 0xABCDEF12u)); // forced -> encrypted
         CHECK_FALSE(verifyModule(*M, &errs()));
     }
@@ -2350,8 +2356,8 @@ entry:
         if (auto *BC = dyn_cast<BitCastInst>(&I))
             if (BC->getName().starts_with("morok.share.fp"))
                 ++fpBitcasts;
-        if (isa<BinaryOperator>(I) || isa<FCmpInst>(I) ||
-            isa<ReturnInst>(I) || isa<StoreInst>(I) || isa<CallInst>(I)) {
+        if (isa<BinaryOperator>(I) || isa<FCmpInst>(I) || isa<ReturnInst>(I) ||
+            isa<StoreInst>(I) || isa<CallInst>(I)) {
             for (Use &Op : I.operands())
                 CHECK_FALSE(isa<ConstantFP>(Op.get()));
         }
@@ -2654,16 +2660,16 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5350);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *BoolF,
-        {/*probability=*/100, /*threshold=*/3, /*shares=*/5,
-         /*max_secrets=*/1},
-        rng));
-    CHECK(morok::passes::shamirShareFunction(
-        *I12F,
-        {/*probability=*/100, /*threshold=*/3, /*shares=*/5,
-         /*max_secrets=*/1},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*BoolF,
+                                             {/*probability=*/100,
+                                              /*threshold=*/3, /*shares=*/5,
+                                              /*max_secrets=*/1},
+                                             rng));
+    CHECK(morok::passes::shamirShareFunction(*I12F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/3, /*shares=*/5,
+                                              /*max_secrets=*/1},
+                                             rng));
 
     CHECK(M->getFunction("morok.gf8mul") != nullptr);
     CHECK(countGlobals(*M, "morok.shamir.share") == 9u);
@@ -2698,11 +2704,11 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5351);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/2},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/2},
+                                             rng));
 
     SelectInst *Sel = nullptr;
     for (Instruction &I : instructions(*F))
@@ -2731,11 +2737,11 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5352);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/2},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/2},
+                                             rng));
 
     CastInst *Cast = nullptr;
     ReturnInst *Ret = nullptr;
@@ -2771,11 +2777,11 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5353);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/2},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/2},
+                                             rng));
 
     CallInst *Call = nullptr;
     for (Instruction &I : instructions(*F))
@@ -2811,19 +2817,19 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5358);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/5},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/5},
+                                             rng));
 
     std::size_t fpBitcasts = 0;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
             if (BC->getName().starts_with("morok.shamir.value.fp"))
                 ++fpBitcasts;
-        if (isa<BinaryOperator>(I) || isa<FCmpInst>(I) ||
-            isa<ReturnInst>(I) || isa<StoreInst>(I) || isa<CallInst>(I)) {
+        if (isa<BinaryOperator>(I) || isa<FCmpInst>(I) || isa<ReturnInst>(I) ||
+            isa<StoreInst>(I) || isa<CallInst>(I)) {
             for (Use &Op : I.operands())
                 CHECK_FALSE(isa<ConstantFP>(Op.get()));
         }
@@ -2852,11 +2858,11 @@ join:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5359);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/2},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/2},
+                                             rng));
 
     PHINode *Phi = nullptr;
     bool hasSplitEdge = false;
@@ -2889,11 +2895,11 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5354);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/1},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/1},
+                                             rng));
 
     StoreInst *Store = nullptr;
     for (Instruction &I : instructions(*F))
@@ -2925,11 +2931,11 @@ right:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5355);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/1},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/1},
+                                             rng));
 
     auto *BI = dyn_cast<BranchInst>(F->getEntryBlock().getTerminator());
     REQUIRE(BI);
@@ -2963,11 +2969,11 @@ default:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5356);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/1},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/1},
+                                             rng));
 
     auto *SW = dyn_cast<SwitchInst>(F->getEntryBlock().getTerminator());
     REQUIRE(SW);
@@ -2998,11 +3004,11 @@ join:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0x5357);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::shamirShareFunction(
-        *F,
-        {/*probability=*/100, /*threshold=*/2, /*shares=*/3,
-         /*max_secrets=*/2},
-        rng));
+    CHECK(morok::passes::shamirShareFunction(*F,
+                                             {/*probability=*/100,
+                                              /*threshold=*/2, /*shares=*/3,
+                                              /*max_secrets=*/2},
+                                             rng));
 
     PHINode *Phi = nullptr;
     bool hasSplitEdge = false;
@@ -3250,11 +3256,10 @@ alt:
     bool hasFrame = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpTerm |= BC->getName().starts_with(
-                             "morok.stackdelta.term.fp") &&
-                         (BC->getSrcTy()->isFloatTy() ||
-                          BC->getSrcTy()->isDoubleTy()) &&
-                         BC->getDestTy()->isIntegerTy();
+            hasFpTerm |=
+                BC->getName().starts_with("morok.stackdelta.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
         hasMix |= I.getName().starts_with("morok.stackdelta.mix.term");
         if (auto *AI = dyn_cast<AllocaInst>(&I))
             hasFrame |= AI->getName().starts_with("morok.stackdelta.frame");
@@ -3552,11 +3557,9 @@ entry:
     auto engine = morok::core::Xoshiro256pp::fromSeed(38);
     morok::ir::IRRandom rng(engine);
     CHECK(morok::passes::pointerLaunderFunction(
-        *BoolF, {/*pointer_probability=*/0, /*integer_probability=*/100},
-        rng));
+        *BoolF, {/*pointer_probability=*/0, /*integer_probability=*/100}, rng));
     CHECK(morok::passes::pointerLaunderFunction(
-        *I12F, {/*pointer_probability=*/0, /*integer_probability=*/100},
-        rng));
+        *I12F, {/*pointer_probability=*/0, /*integer_probability=*/100}, rng));
 
     bool boolWide = false;
     bool boolTrunc = false;
@@ -3762,14 +3765,14 @@ entry:
             hasIntAlt |= RI->getReturnValue()->getType()->isIntegerTy(32);
         for (Instruction &I : BB) {
             if (auto *BC = dyn_cast<BitCastInst>(&I)) {
-                hasFloatBits |= BC->getName().starts_with(
-                                    "morok.decoy.alt.fpbits") &&
-                                BC->getSrcTy()->isFloatTy() &&
-                                BC->getDestTy()->isIntegerTy(32);
-                hasDoubleBits |= BC->getName().starts_with(
-                                     "morok.decoy.alt.fpbits") &&
-                                 BC->getSrcTy()->isDoubleTy() &&
-                                 BC->getDestTy()->isIntegerTy(64);
+                hasFloatBits |=
+                    BC->getName().starts_with("morok.decoy.alt.fpbits") &&
+                    BC->getSrcTy()->isFloatTy() &&
+                    BC->getDestTy()->isIntegerTy(32);
+                hasDoubleBits |=
+                    BC->getName().starts_with("morok.decoy.alt.fpbits") &&
+                    BC->getSrcTy()->isDoubleTy() &&
+                    BC->getDestTy()->isIntegerTy(64);
             }
         }
     }
@@ -4207,12 +4210,11 @@ merge:
         hasFpValue |= I.getName().starts_with("morok.phi.value") &&
                       I.getType()->isDoubleTy();
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasBitCarrier |=
-                BC->getName().starts_with("morok.phi") &&
-                ((BC->getSrcTy()->isDoubleTy() &&
-                  BC->getDestTy()->isIntegerTy(64)) ||
-                 (BC->getSrcTy()->isIntegerTy(64) &&
-                  BC->getDestTy()->isDoubleTy()));
+            hasBitCarrier |= BC->getName().starts_with("morok.phi") &&
+                             ((BC->getSrcTy()->isDoubleTy() &&
+                               BC->getDestTy()->isIntegerTy(64)) ||
+                              (BC->getSrcTy()->isIntegerTy(64) &&
+                               BC->getDestTy()->isDoubleTy()));
         if (auto *RI = dyn_cast<ReturnInst>(&I))
             retUsesTangle =
                 RI->getReturnValue()->getName().starts_with("morok.phi.value");
@@ -4634,7 +4636,8 @@ merge:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("externalOpaquePredicatesFunction bounds oversized decoy parameters") {
+TEST_CASE(
+    "externalOpaquePredicatesFunction bounds oversized decoy parameters") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("extop-bounds", ctx);
     Function *F = makeBranchChainFunction(
@@ -4672,9 +4675,9 @@ TEST_CASE("externalOpaquePredicatesFunction bounds oversized decoy parameters") 
 TEST_CASE("MorokPass clamps external opaque oversized config knobs") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("extop-scheduler-bounds", ctx);
-    Function *F = makeBranchChainFunction(
-        *M, morok::passes::kExternalOpaqueMaxBlocks + 8,
-        "extop_scheduler_bounds");
+    Function *F =
+        makeBranchChainFunction(*M, morok::passes::kExternalOpaqueMaxBlocks + 8,
+                                "extop_scheduler_bounds");
     REQUIRE(F);
 
     morok::config::Config cfg;
@@ -4950,10 +4953,10 @@ done:
     bool hasTokenMix = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpTerm |= BC->getName().starts_with("entfla.term.fp") &&
-                         (BC->getSrcTy()->isFloatTy() ||
-                          BC->getSrcTy()->isDoubleTy()) &&
-                         BC->getDestTy()->isIntegerTy();
+            hasFpTerm |=
+                BC->getName().starts_with("entfla.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
         hasTokenMix |= I.getName().starts_with("entfla.token.mix");
     }
 
@@ -5107,10 +5110,10 @@ done:
     bool hasHashInput = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpTerm |= BC->getName().starts_with("nistate.term.fp") &&
-                         (BC->getSrcTy()->isFloatTy() ||
-                          BC->getSrcTy()->isDoubleTy()) &&
-                         BC->getDestTy()->isIntegerTy();
+            hasFpTerm |=
+                BC->getName().starts_with("nistate.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
         hasTokenMix |= I.getName().starts_with("nistate.token.mix");
         hasHashInput |= I.getName().starts_with("nistate.hash.input");
     }
@@ -5227,10 +5230,10 @@ alt:
     bool hasPredicate = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpTerm |= BC->getName().starts_with("morok.stateop.term.fp") &&
-                         (BC->getSrcTy()->isFloatTy() ||
-                          BC->getSrcTy()->isDoubleTy()) &&
-                         BC->getDestTy()->isIntegerTy();
+            hasFpTerm |=
+                BC->getName().starts_with("morok.stateop.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
         hasTokenMix |= I.getName().starts_with("morok.stateop.token.mix");
         hasPredicate |= I.getName().starts_with("morok.stateop.pred");
     }
@@ -5303,10 +5306,10 @@ done:
     bool hasWrappedStore = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpTerm |= BC->getName().starts_with("morok.ifsm.term.fp") &&
-                         (BC->getSrcTy()->isFloatTy() ||
-                          BC->getSrcTy()->isDoubleTy()) &&
-                         BC->getDestTy()->isIntegerTy();
+            hasFpTerm |=
+                BC->getName().starts_with("morok.ifsm.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
         hasTokenMix |= I.getName().starts_with("morok.ifsm.token.mix");
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
             auto *CI = dyn_cast<CallInst>(SI->getValueOperand());
@@ -5515,13 +5518,12 @@ entry:
     bool hasShuffle = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *VT = dyn_cast<FixedVectorType>(I.getType()))
-            hasFloatVector |= VT->getElementType()->isFloatTy() &&
-                              VT->getNumElements() == 4u;
+            hasFloatVector |=
+                VT->getElementType()->isFloatTy() && VT->getNumElements() == 4u;
         if (auto *BO = dyn_cast<BinaryOperator>(&I))
-            hasVectorFAddOrFMul |=
-                (BO->getOpcode() == Instruction::FAdd ||
-                 BO->getOpcode() == Instruction::FMul) &&
-                BO->getType()->isVectorTy();
+            hasVectorFAddOrFMul |= (BO->getOpcode() == Instruction::FAdd ||
+                                    BO->getOpcode() == Instruction::FMul) &&
+                                   BO->getType()->isVectorTy();
         if (auto *Cmp = dyn_cast<FCmpInst>(&I))
             hasVectorFCmp |= Cmp->getType()->isVectorTy();
         if (auto *Sel = dyn_cast<SelectInst>(&I))
@@ -5579,7 +5581,7 @@ entry:
                 scalarDivOrRem = true;
         }
     }
-    CHECK(liftedFAdd);          // pass fired on the safe op
+    CHECK(liftedFAdd);           // pass fired on the safe op
     CHECK_FALSE(vectorDivOrRem); // fdiv/frem never executed across junk lanes
     CHECK(scalarDivOrRem);       // they remain as the original scalar ops
     CHECK_FALSE(verifyModule(*M, &errs()));
@@ -5916,8 +5918,7 @@ entry:
         if (!GV.getName().starts_with("morok.tablearith.table"))
             continue;
         auto *ArrTy = dyn_cast<ArrayType>(GV.getValueType());
-        hasI16Table |=
-            ArrTy && ArrTy->getElementType()->isIntegerTy(16);
+        hasI16Table |= ArrTy && ArrTy->getElementType()->isIntegerTy(16);
     }
     CHECK(hasI16Table);
 
@@ -6151,8 +6152,7 @@ entry:
             hasTableLoad |= LI->isVolatile() &&
                             LI->getPointerOperand()->getName().starts_with(
                                 "morok.dfi.cell");
-        hasEntangledIndex |=
-            I.getName().starts_with("morok.dfi.idx.entangled");
+        hasEntangledIndex |= I.getName().starts_with("morok.dfi.idx.entangled");
         hasDecodedValue |= I.getName().starts_with("morok.dfi.value");
     }
 
@@ -6221,10 +6221,9 @@ entry:
     bool hasDecoyDiff = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *LI = dyn_cast<LoadInst>(&I)) {
-            hasDecoyStateLoad |=
-                LI->isVolatile() &&
-                LI->getPointerOperand()->getName().starts_with(
-                    "morok.decoy.state");
+            hasDecoyStateLoad |= LI->isVolatile() &&
+                                 LI->getPointerOperand()->getName().starts_with(
+                                     "morok.decoy.state");
         }
         hasDecoyDiff |= I.getName().starts_with("morok.dfi.decoy.diff");
     }
@@ -6234,12 +6233,12 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-// Regression for #53: the decoy-state load was emitted only if morok.decoy.state
-// already existed at transform time, so a function whose DFI ran before any
-// decoy created that global was left unpoisoned — the tamper-to-DFI
-// entanglement was order/RNG dependent.  With decoy_state set, DFI now
-// get-or-creates the global so the load is always emitted, no pre-existing
-// global required.
+// Regression for #53: the decoy-state load was emitted only if
+// morok.decoy.state already existed at transform time, so a function whose DFI
+// ran before any decoy created that global was left unpoisoned — the
+// tamper-to-DFI entanglement was order/RNG dependent.  With decoy_state set,
+// DFI now get-or-creates the global so the load is always emitted, no
+// pre-existing global required.
 TEST_CASE("dataFlowIntegrityFunction emits decoy state regardless of order") {
     const char *ir = R"ir(
 define i8 @dfi_order(i8 %a, i8 %b) {
@@ -6338,9 +6337,9 @@ entry:
 
 // Regression for #33: wide (i9..i16) const-indexed arithmetic uses i16 table
 // cells, and emitLookup() loads them with Align(2).  The table global must be
-// at least 2-byte aligned for that to be a valid promise; the old fixed Align(1)
-// under-aligned the global (UB: a trap on strict-alignment targets, or a
-// codegen miscompile elsewhere).
+// at least 2-byte aligned for that to be a valid promise; the old fixed
+// Align(1) under-aligned the global (UB: a trap on strict-alignment targets, or
+// a codegen miscompile elsewhere).
 TEST_CASE("dataFlowIntegrityFunction aligns i16 tables to their element size") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -6433,8 +6432,7 @@ entry:
     morok::ir::IRRandom rng(engine);
 
     CHECK(morok::passes::dataFlowIntegrityFunction(
-        *F, {/*probability=*/100, /*max_tables=*/4, /*region_bytes=*/32},
-        rng));
+        *F, {/*probability=*/100, /*max_tables=*/4, /*region_bytes=*/32}, rng));
 
     CHECK(countGlobals(*M, "morok.dfi.table") == 4u);
     CHECK(countGlobals(*M, "morok.dfi.region") == 1u);
@@ -6525,8 +6523,7 @@ base:
     morok::ir::IRRandom rng(engine);
 
     CHECK_FALSE(morok::passes::dataFlowIntegrityFunction(
-        *F, {/*probability=*/100, /*max_tables=*/4, /*region_bytes=*/16},
-        rng));
+        *F, {/*probability=*/100, /*max_tables=*/4, /*region_bytes=*/16}, rng));
     CHECK(M->getFunction("morok.dfi.hash.rec") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
@@ -6768,9 +6765,9 @@ TEST_CASE("uniformPrimitiveLowerFunction caps branch lowering") {
 
 // Regression for #58: the VM emits pointer load/store at a fixed 8-byte width,
 // so on a non-64-bit-pointer target a virtualized `load ptr` would read/write
-// past the (e.g. 4-byte) pointer object — leaking or corrupting adjacent memory.
-// Pointer memory ops must only be lifted when the target's AS0 pointer is
-// genuinely 8 bytes; otherwise the op stays as normal typed IR.
+// past the (e.g. 4-byte) pointer object — leaking or corrupting adjacent
+// memory. Pointer memory ops must only be lifted when the target's AS0 pointer
+// is genuinely 8 bytes; otherwise the op stays as normal typed IR.
 TEST_CASE("virtualizeModule skips pointer memory ops on 32-bit targets") {
     auto fixture = [](const char *dl) {
         return std::string("target datalayout = \"") + dl + "\"\n" + R"ir(
@@ -7021,9 +7018,9 @@ entry:
     auto engine = morok::core::Xoshiro256pp::fromSeed(15103);
     morok::ir::IRRandom rng(engine);
     morok::passes::VirtualizationParams P{/*probability=*/100,
-                                           /*max_functions=*/4,
-                                           /*max_instructions=*/64,
-                                           /*max_registers=*/64};
+                                          /*max_functions=*/4,
+                                          /*max_instructions=*/64,
+                                          /*max_registers=*/64};
     P.include_protection_helpers = true;
     P.protection_helpers_only = true;
     CHECK_FALSE(morok::passes::virtualizeModule(*M, P, rng));
@@ -7055,9 +7052,9 @@ entry:
     auto engine = morok::core::Xoshiro256pp::fromSeed(95104);
     morok::ir::IRRandom rng(engine);
     morok::passes::VirtualizationParams P{/*probability=*/100,
-                                           /*max_functions=*/4,
-                                           /*max_instructions=*/64,
-                                           /*max_registers=*/64};
+                                          /*max_functions=*/4,
+                                          /*max_instructions=*/64,
+                                          /*max_registers=*/64};
     P.include_protection_helpers = true;
     P.protection_helpers_only = true;
     CHECK(morok::passes::virtualizeModule(*M, P, rng));
@@ -7100,6 +7097,37 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("virtualizeModule lifts sealed blob helpers in protection-helper mode") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+define private i64 @morok.sealed.open.7(i64 %x) {
+entry:
+  %a = xor i64 %x, 81985529216486895
+  %b = mul i64 %a, 11400714819323198485
+  %c = xor i64 %b, 1085102592571150095
+  ret i64 %c
+}
+)ir");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(95107);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::VirtualizationParams P{/*probability=*/100,
+                                           /*max_functions=*/4,
+                                           /*max_instructions=*/64,
+                                           /*max_registers=*/64};
+    P.include_protection_helpers = true;
+    P.protection_helpers_only = true;
+    CHECK(morok::passes::virtualizeModule(*M, P, rng));
+
+    Function *Open = M->getFunction("morok.sealed.open.7");
+    REQUIRE(Open != nullptr);
+    CHECK(M->getFunction("morok.vm.morok.sealed.open.7.exec") != nullptr);
+    CHECK(countCallsTo(*Open, "morok.vm.morok.sealed.open.7.exec") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule keeps heavy anti-hook scanners native") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -7121,9 +7149,9 @@ entry:
     auto engine = morok::core::Xoshiro256pp::fromSeed(15104);
     morok::ir::IRRandom rng(engine);
     morok::passes::VirtualizationParams P{/*probability=*/100,
-                                           /*max_functions=*/4,
-                                           /*max_instructions=*/64,
-                                           /*max_registers=*/64};
+                                          /*max_functions=*/4,
+                                          /*max_instructions=*/64,
+                                          /*max_registers=*/64};
     P.include_protection_helpers = true;
     P.protection_helpers_only = true;
     CHECK_FALSE(morok::passes::virtualizeModule(*M, P, rng));
@@ -7132,13 +7160,13 @@ entry:
     CHECK(M->getFunction("morok.vm.morok.antihook.dbi.smc.target.exec") ==
           nullptr);
     CHECK(countGlobals(*M, "morok.vm.bytecode.morok.antihook.elf.rx") == 0u);
-    CHECK(countGlobals(*M,
-                       "morok.vm.bytecode.morok.antihook.dbi.smc.target") ==
+    CHECK(countGlobals(*M, "morok.vm.bytecode.morok.antihook.dbi.smc.target") ==
           0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("virtualizeModule lifts integer comparisons, zext, and select idioms") {
+TEST_CASE(
+    "virtualizeModule lifts integer comparisons, zext, and select idioms") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 define i32 @vm_cmp(i32 %a, i32 %b) {
@@ -7183,7 +7211,8 @@ entry:
     bool hasSelectHandler = false;
     bool hasIndirectDispatch = false;
     for (BasicBlock &BB : *Helper) {
-        hasSignedCompareHandler |= BB.getName().starts_with("morok.vm.h.icmp.slt");
+        hasSignedCompareHandler |=
+            BB.getName().starts_with("morok.vm.h.icmp.slt");
         hasEqCompareHandler |= BB.getName().starts_with("morok.vm.h.icmp.eq");
         hasSelectHandler |= BB.getName().starts_with("morok.vm.h.select");
         for (Instruction &I : BB)
@@ -7799,7 +7828,8 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("virtualizeModule skips address-taken callbacks when indirect calls exist") {
+TEST_CASE("virtualizeModule skips address-taken callbacks when indirect calls "
+          "exist") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 @cb = internal global ptr @callback_entry, align 8
@@ -7834,9 +7864,9 @@ entry:
     auto engine = morok::core::Xoshiro256pp::fromSeed(333);
     morok::ir::IRRandom rng(engine);
     morok::passes::VirtualizationParams P{/*probability=*/100,
-                                           /*max_functions=*/4,
-                                           /*max_instructions=*/96,
-                                           /*max_registers=*/96};
+                                          /*max_functions=*/4,
+                                          /*max_instructions=*/96,
+                                          /*max_registers=*/96};
     P.allow_internal_user_calls = true;
 
     CHECK(morok::passes::virtualizeModule(*M, P, rng));
@@ -8111,10 +8141,9 @@ entry:
                     "morok.sdb.context.slot");
             storesPayload |= SI->getPointerOperand()->getName().starts_with(
                 "morok.sdb.payload.ptr");
-            ensureStagesOuter |=
-                SI->isVolatile() &&
-                SI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.move.scratch.ptr");
+            ensureStagesOuter |= SI->isVolatile() &&
+                                 SI->getPointerOperand()->getName().starts_with(
+                                     "morok.sdb.move.scratch.ptr");
         }
     }
     for (BasicBlock &BB : *Ensure) {
@@ -8163,9 +8192,8 @@ entry:
                      (BI->getSuccessor(0)->getName() == "fail" &&
                       BI->getSuccessor(1)->getName() == "ready"));
             if (BB.getName() == "fail")
-                failBranchesToExit =
-                    BI->isUnconditional() &&
-                    BI->getSuccessor(0)->getName() == "exit";
+                failBranchesToExit = BI->isUnconditional() &&
+                                     BI->getSuccessor(0)->getName() == "exit";
         }
     }
     for (Instruction &I : instructions(*Seal)) {
@@ -8190,10 +8218,9 @@ entry:
                 LI->isAtomic() &&
                 LI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.ready");
-            sealLoadsMoveRot |=
-                LI->isVolatile() &&
-                LI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.move.rot.");
+            sealLoadsMoveRot |= LI->isVolatile() &&
+                                LI->getPointerOperand()->getName().starts_with(
+                                    "morok.sdb.move.rot.");
             sealLoadsMoveEpoch |=
                 LI->isVolatile() &&
                 LI->getPointerOperand()->getName().starts_with(
@@ -8205,10 +8232,9 @@ entry:
                     "morok.sdb.ready"))
                 if (auto *CI = dyn_cast<ConstantInt>(SI->getValueOperand()))
                     hasReadyClear |= CI->isZero();
-            sealStoresBound |=
-                SI->isVolatile() &&
-                SI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.bound.");
+            sealStoresBound |= SI->isVolatile() &&
+                               SI->getPointerOperand()->getName().starts_with(
+                                   "morok.sdb.bound.");
             sealStoresBoundHash |=
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
@@ -8217,18 +8243,16 @@ entry:
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.bound.keymask.");
-            sealStoresMoveRot |=
-                SI->isVolatile() &&
-                SI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.move.rot.");
+            sealStoresMoveRot |= SI->isVolatile() &&
+                                 SI->getPointerOperand()->getName().starts_with(
+                                     "morok.sdb.move.rot.");
             sealStoresMoveEpoch |=
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.move.epoch.");
-            sealStoresPayload |=
-                SI->isVolatile() &&
-                SI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.payload.ptr");
+            sealStoresPayload |= SI->isVolatile() &&
+                                 SI->getPointerOperand()->getName().starts_with(
+                                     "morok.sdb.payload.ptr");
         }
     }
     for (BasicBlock &BB : *Seal) {
@@ -8271,9 +8295,9 @@ entry:
     CHECK(keyUsesEnv);
     CHECK(hasCycleProbe);
     CHECK(hasCpuidProbe);
-    // No RDTSCP: it #UDs on x86 CPUs/VMs that lack the feature and its result was
-    // folded to a guaranteed 0, so it was removed (#64); CPUID + readcyclecounter
-    // still provide the environment/timestamp mix.
+    // No RDTSCP: it #UDs on x86 CPUs/VMs that lack the feature and its result
+    // was folded to a guaranteed 0, so it was removed (#64); CPUID +
+    // readcyclecounter still provide the environment/timestamp mix.
     CHECK_FALSE(hasRdtscpProbe);
     CHECK(hasVolumeProbe);
     CHECK(hasVolatileBoundLoad);
@@ -8315,7 +8339,8 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("hashGatedSelfDecryptModule rescans late VM bytecode without rewrapping") {
+TEST_CASE(
+    "hashGatedSelfDecryptModule rescans late VM bytecode without rewrapping") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 @morok.vm.bytecode.first = private constant [8 x i8] c"ABCDEFGH"
@@ -8350,13 +8375,12 @@ entry:
 
     auto *I8 = Type::getInt8Ty(ctx);
     auto *I32 = Type::getInt32Ty(ctx);
-    std::vector<std::uint8_t> LateBytes{'l', 'a', 't', 'e',
-                                        '-', 'v', 'm', '1'};
+    std::vector<std::uint8_t> LateBytes{'l', 'a', 't', 'e', '-', 'v', 'm', '1'};
     auto *LateTy = ArrayType::get(I8, LateBytes.size());
     auto *LateInit = ConstantDataArray::get(ctx, LateBytes);
-    auto *LateBytecode = new GlobalVariable(
-        *M, LateTy, /*isConstant=*/true, GlobalValue::PrivateLinkage, LateInit,
-        "morok.vm.bytecode.late");
+    auto *LateBytecode = new GlobalVariable(*M, LateTy, /*isConstant=*/true,
+                                            GlobalValue::PrivateLinkage,
+                                            LateInit, "morok.vm.bytecode.late");
     LateBytecode->setAlignment(Align(1));
 
     auto *LateFnTy = FunctionType::get(I32, {I32}, false);
@@ -8403,8 +8427,9 @@ entry:
     morok::ir::IRRandom rng(engine);
 
     CHECK_FALSE(morok::passes::hashGatedSelfDecryptModule(
-        *M, {/*probability=*/100, /*max_payloads=*/1,
-             /*max_payload_bytes=*/16, /*context_keying=*/true},
+        *M,
+        {/*probability=*/100, /*max_payloads=*/1,
+         /*max_payload_bytes=*/16, /*context_keying=*/true},
         rng));
 
     GlobalVariable *Bytecode =
@@ -8431,8 +8456,9 @@ entry:
     morok::ir::IRRandom rng(engine);
 
     CHECK(morok::passes::hashGatedSelfDecryptModule(
-        *M, {/*probability=*/100, /*max_payloads=*/1,
-             /*max_payload_bytes=*/16, /*context_keying=*/true},
+        *M,
+        {/*probability=*/100, /*max_payloads=*/1,
+         /*max_payload_bytes=*/16, /*context_keying=*/true},
         rng));
 
     Function *Ensure = M->getFunction("morok.sdb.ensure.edge");
@@ -8498,8 +8524,8 @@ entry:
     bool feedLoadsProofByte = false;
     for (Instruction &I : instructions(*Feed))
         if (auto *LI = dyn_cast<LoadInst>(&I))
-            feedLoadsProofByte |= LI->isVolatile() &&
-                                  LI->getName() == "morok.proof.feed.byte";
+            feedLoadsProofByte |=
+                LI->isVolatile() && LI->getName() == "morok.proof.feed.byte";
     CHECK(feedLoadsProofByte);
     CHECK(countNamedInstructions(*Finish, "morok.proof.finish.contribution") ==
           1u);
@@ -8577,6 +8603,75 @@ entry:
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) == nullptr);
     CHECK(M->getFunction("morok.tracer.attest") == nullptr);
     CHECK(M->getFunction("morok.tracer.share") == nullptr);
+
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+
+TEST_CASE("sealedBlobModule encrypts explicit byte blobs and rewrites loads") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+@secret_blob = private constant [6 x i8] c"magic\00", section ".morok.sealed"
+
+define i8 @read_secret() {
+entry:
+  %v = load i8, ptr getelementptr inbounds ([6 x i8], ptr @secret_blob, i64 0, i64 1), align 1
+  ret i8 %v
+}
+)ir");
+    REQUIRE(M);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(95201);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::SealedBlobParams params;
+    params.max_blobs = 2;
+    params.max_blob_bytes = 32;
+    params.key_sources = {"runtime_seal", "external_proof", "code_region"};
+    CHECK(morok::passes::sealedBlobModule(*M, params, rng));
+
+    CHECK_FALSE(hasReadableByteString(*M, "magic"));
+    GlobalVariable *Cipher =
+        M->getGlobalVariable("morok.sealed.cipher.0", true);
+    REQUIRE(Cipher != nullptr);
+    CHECK(Cipher->isConstant());
+    CHECK(Cipher->getSection() == ".morok.sealed");
+    REQUIRE(Cipher->hasInitializer());
+
+    Function *Open = M->getFunction("morok.sealed.open.0");
+    REQUIRE(Open != nullptr);
+    CHECK(Open->hasFnAttribute(Attribute::NoInline));
+    CHECK(countNamedInstructions(*Open, "morok.sealed.cipher.byte") >= 1u);
+    CHECK(countNamedInstructions(*Open, "morok.sealed.addr.zero") >= 1u);
+
+    Function *Reader = M->getFunction("read_secret");
+    REQUIRE(Reader != nullptr);
+    CHECK(countCallsTo(*Reader, "morok.sealed.open.0") == 1u);
+    CHECK(countNamedInstructions(*Reader, "morok.sealed.local") == 1u);
+    bool sawVolatileWipe = false;
+    for (Instruction &I : instructions(*Reader))
+        if (auto *CB = dyn_cast<CallBase>(&I))
+            if (Function *Callee = CB->getCalledFunction())
+                sawVolatileWipe |= Callee->getName().starts_with("llvm.memset");
+    CHECK(sawVolatileWipe);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("sealedBlobModule skips escaping marked blobs without encrypting") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+@secret_blob = private constant [7 x i8] c"escape\00", section ".morok.sealed"
+@holder = private global ptr @secret_blob
+)ir");
+    REQUIRE(M);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(95202);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::SealedBlobParams params;
+    CHECK_FALSE(morok::passes::sealedBlobModule(*M, params, rng));
+    CHECK(hasReadableByteString(*M, "escape"));
+    CHECK(M->getFunction("morok.sealed.open.0") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -8898,8 +8993,9 @@ TEST_CASE("shamirShareFunction skips Windows funclet-EH functions") {
     morok::ir::IRRandom rng(engine);
 
     CHECK_FALSE(morok::passes::shamirShareFunction(
-        *F, {/*probability=*/100, /*threshold=*/3, /*shares=*/5,
-             /*max_secrets=*/8},
+        *F,
+        {/*probability=*/100, /*threshold=*/3, /*shares=*/5,
+         /*max_secrets=*/8},
         rng));
     CHECK(M->getFunction("morok.gf8mul") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
@@ -9253,7 +9349,8 @@ join:
     REQUIRE(Phi);
     for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
         CHECK_FALSE(isa<ConstantInt>(Phi->getIncomingValue(I)));
-        CHECK(Phi->getIncomingValue(I)->getName().starts_with("morok.sc.const"));
+        CHECK(
+            Phi->getIncomingValue(I)->getName().starts_with("morok.sc.const"));
     }
     CHECK(hasSplitEdge);
     CHECK(countGlobals(*M, "morok.sc.region") == 1u);
@@ -9264,7 +9361,8 @@ join:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("selfChecksumConstantsFunction fuses floating PHI incoming literals") {
+TEST_CASE(
+    "selfChecksumConstantsFunction fuses floating PHI incoming literals") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 define float @selfcheck_fp_phi(i1 %flag) {
@@ -9297,9 +9395,8 @@ join:
     REQUIRE(Phi);
     for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
         CHECK_FALSE(isa<ConstantFP>(Phi->getIncomingValue(I)));
-        CHECK(Phi->getIncomingValue(I)
-                  ->getName()
-                  .starts_with("morok.sc.const"));
+        CHECK(
+            Phi->getIncomingValue(I)->getName().starts_with("morok.sc.const"));
     }
     CHECK(hasSplitEdge);
     CHECK(countGlobals(*M, "morok.sc.mask") == 2u);
@@ -9469,8 +9566,8 @@ entry:
     for (GlobalVariable *CodeSize : codeSizes)
         CHECK(constantReferencesGlobal(Manifest->getInitializer(), CodeSize));
     for (GlobalVariable *NativeExpected : nativeExpected)
-        CHECK(
-            constantReferencesGlobal(Manifest->getInitializer(), NativeExpected));
+        CHECK(constantReferencesGlobal(Manifest->getInitializer(),
+                                       NativeExpected));
     CHECK(constantReferencesGlobal(Manifest->getInitializer(), F));
 
     auto *ManifestInit = dyn_cast<ConstantStruct>(Manifest->getInitializer());
@@ -9548,8 +9645,9 @@ entry:
             hasExpectedNonlinearMix |=
                 I.getName().starts_with("morok.mg.expected.diff.mul") ||
                 I.getName().starts_with("morok.mg.peer.expected.diff.mul");
-            hasNativeMix |= I.getName().starts_with("morok.mg.native.diff") ||
-                            I.getName().starts_with("morok.mg.peer.native.diff");
+            hasNativeMix |=
+                I.getName().starts_with("morok.mg.native.diff") ||
+                I.getName().starts_with("morok.mg.peer.native.diff");
             if (auto *CI = dyn_cast<CallInst>(&I))
                 if (Function *Callee = CI->getCalledFunction())
                     hasTrap |= Callee->getName() == "llvm.trap";
@@ -9576,8 +9674,8 @@ entry:
                     ++nativeExpectedLoads;
             }
             for (std::size_t R = 0; R != regions.size(); ++R)
-                nodeCovers[R] = nodeCovers[R] ||
-                                instructionReferencesGlobal(I, regions[R]);
+                nodeCovers[R] =
+                    nodeCovers[R] || instructionReferencesGlobal(I, regions[R]);
         }
         for (std::size_t R = 0; R != nodeCovers.size(); ++R)
             if (nodeCovers[R])
@@ -9974,10 +10072,10 @@ else:
         hasGate |= I.getName().starts_with("morok.mq.gate");
         hasInputBit |= I.getName().starts_with("morok.mq.input.bit");
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpBitcast |= BC->getName().starts_with("morok.mq.arg.fp") &&
-                            (BC->getSrcTy()->isFloatTy() ||
-                             BC->getSrcTy()->isDoubleTy()) &&
-                            BC->getDestTy()->isIntegerTy();
+            hasFpBitcast |=
+                BC->getName().starts_with("morok.mq.arg.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
     }
 
     CHECK(hasGate);
@@ -10374,10 +10472,10 @@ alt:
     bool hasIndirect = false;
     for (Instruction &I : instructions(*F)) {
         if (auto *BC = dyn_cast<BitCastInst>(&I))
-            hasFpTerm |= BC->getName().starts_with("morok.dlf.term.fp") &&
-                         (BC->getSrcTy()->isFloatTy() ||
-                          BC->getSrcTy()->isDoubleTy()) &&
-                         BC->getDestTy()->isIntegerTy();
+            hasFpTerm |=
+                BC->getName().starts_with("morok.dlf.term.fp") &&
+                (BC->getSrcTy()->isFloatTy() || BC->getSrcTy()->isDoubleTy()) &&
+                BC->getDestTy()->isIntegerTy();
         hasTokenMix |= I.getName().starts_with("morok.dlf.token.mix");
         hasIndirect |= isa<IndirectBrInst>(&I);
     }
@@ -10510,7 +10608,8 @@ join:
                 if (auto *Asm = dyn_cast<InlineAsm>(CB->getCalledOperand())) {
                     StringRef S = Asm->getAsmString();
                     // The x86_64 hop recovers the target RIP-relatively (no
-                    // stack-writing callq/popq that would clobber the red zone).
+                    // stack-writing callq/popq that would clobber the red
+                    // zone).
                     hasAntiDisasmHop |= S.contains("leaq 1f(%rip), %rax") &&
                                         S.contains("jmpq *%rax") &&
                                         !S.contains("callq");
@@ -10544,8 +10643,7 @@ join:
         if (auto *CB = dyn_cast<CallBase>(&I)) {
             if (auto *Asm = dyn_cast<InlineAsm>(CB->getCalledOperand())) {
                 StringRef S = Asm->getAsmString();
-                hasAsmBait |=
-                    S.contains(".byte 0xf3,0x0f,0x1e,0xfa");
+                hasAsmBait |= S.contains(".byte 0xf3,0x0f,0x1e,0xfa");
                 hasAsmDesyncBait |=
                     S.contains(".byte 0xe9,0x44,0x33,0x22,0x11") &&
                     S.contains(".byte 0x0f,0x85") &&
@@ -10747,8 +10845,8 @@ TEST_CASE("indirectBranchFunction skips oversized switches") {
         if (I.getName().starts_with("morok.indbr.case"))
             ++caseCmp;
     }
-    CHECK(switchCount == 1u);     // switch left intact
-    CHECK(caseCmp == 0u);         // no per-case ICmp explosion
+    CHECK(switchCount == 1u); // switch left intact
+    CHECK(caseCmp == 0u);     // no per-case ICmp explosion
     CHECK(countGlobals(*M, "morok.ibtable") == 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
@@ -10948,10 +11046,10 @@ entry:
 
 // Regression for #76: the carrier register (r14 on x86_64) is only callee-saved
 // under the C calling convention.  x86_regcallcc passes later integer arguments
-// in r14, so rewriting such a call would let argument setup overwrite the loaded
-// jump target after the carrier asm — `jmp *%r14` would then jump to an argument
-// value (attacker-influenced input becomes the instruction pointer).  Only plain
-// C-convention calls may be rewritten.
+// in r14, so rewriting such a call would let argument setup overwrite the
+// loaded jump target after the carrier asm — `jmp *%r14` would then jump to an
+// argument value (attacker-influenced input becomes the instruction pointer).
+// Only plain C-convention calls may be rewritten.
 TEST_CASE("callerKeyedDispatchModule skips non-C calling conventions") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -10988,8 +11086,8 @@ entry:
     CHECK(morok::passes::callerKeyedDispatchModule(*M, params, rng));
 
     // The plain C-convention call is routed through the dispatcher; the
-    // x86_regcallcc call (which may use r14 for an argument) is left as a direct
-    // call, so its argument can never become the jump target.
+    // x86_regcallcc call (which may use r14 for an argument) is left as a
+    // direct call, so its argument can never become the jump target.
     CHECK(countCallsTo(*Caller, "plain") == 0u);
     CHECK(countCallsTo(*Caller, "reg") == 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
@@ -11405,8 +11503,7 @@ entry:
         for (Instruction &I : instructions(F))
             if (auto *CI = dyn_cast<CallInst>(&I))
                 if (Function *Callee = CI->getCalledFunction())
-                    if (Callee->getName().starts_with(
-                            "morok.afm.outline.icmp"))
+                    if (Callee->getName().starts_with("morok.afm.outline.icmp"))
                         ++implIcmpOutlineCalls;
     }
 
@@ -11457,9 +11554,8 @@ entry:
                 CHECK(A.getType()->isFloatTy());
             for (Instruction &I : instructions(F))
                 if (auto *BC = dyn_cast<BitCastInst>(&I))
-                    helperHasBitCarrier |=
-                        BC->getSrcTy()->isFloatTy() ||
-                        BC->getDestTy()->isFloatTy();
+                    helperHasBitCarrier |= BC->getSrcTy()->isFloatTy() ||
+                                           BC->getDestTy()->isFloatTy();
         }
 
         if (!F.getName().starts_with("morok.afm.impl"))
@@ -11527,8 +11623,7 @@ entry:
         for (Instruction &I : instructions(F))
             if (auto *CI = dyn_cast<CallInst>(&I))
                 if (Function *Callee = CI->getCalledFunction())
-                    if (Callee->getName().starts_with(
-                            "morok.afm.outline.fcmp"))
+                    if (Callee->getName().starts_with("morok.afm.outline.fcmp"))
                         ++implFcmpOutlineCalls;
     }
 
@@ -11954,11 +12049,12 @@ entry:
 }
 
 // Regression for #48: the dispatch recognizer is heuristic and also matches
-// ordinary callback/ops tables, whose pointer is not a known _ZTV address point.
-// Unknown vptrs are fatal only when the vptr storage was armed by a runtime
-// store of a harvested _ZTV address point.  A callback table with no such store
-// may still match the structural load/gep/load/call shape, but it remains
-// unarmed, so verifier loop exhaustion falls through instead of trapping.
+// ordinary callback/ops tables, whose pointer is not a known _ZTV address
+// point. Unknown vptrs are fatal only when the vptr storage was armed by a
+// runtime store of a harvested _ZTV address point.  A callback table with no
+// such store may still match the structural load/gep/load/call shape, but it
+// remains unarmed, so verifier loop exhaustion falls through instead of
+// trapping.
 TEST_CASE("vtableIntegrityModule leaves unarmed dispatch tables non-fatal") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -12064,14 +12160,13 @@ TEST_CASE("stringEncryptModule materializes used strings on the stack") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("stack-strings", ctx);
     M->setTargetTriple(Triple("x86_64-unknown-linux-gnu"));
-    GlobalVariable *Text =
-        makePrivateString(*M, "msg.str", "callsite-secret");
+    GlobalVariable *Text = makePrivateString(*M, "msg.str", "callsite-secret");
     Function *Caller = makeExternalCallFunction(*M, Text);
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(305);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     GlobalVariable *Msg = M->getGlobalVariable("msg.str", true);
     REQUIRE(Msg);
@@ -12085,8 +12180,7 @@ TEST_CASE("stringEncryptModule materializes used strings on the stack") {
     for (Function &F : *M)
         if (F.getName().starts_with("morok.strsite")) {
             stackHelperHasBarrier |= hasInlineAsmCall(F);
-            stackHelperHasMixer |=
-                countNamedAllocas(F, "morok.str.mix") >= 1u;
+            stackHelperHasMixer |= countNamedAllocas(F, "morok.str.mix") >= 1u;
         }
     CHECK(stackHelperHasBarrier);
     CHECK(stackHelperHasMixer);
@@ -12102,9 +12196,9 @@ TEST_CASE("stringEncryptModule materializes used strings on the stack") {
 }
 
 // Regression for #43: per-use stack materialization replaced every operand with
-// its own buffer, so check(secret, secret) became check(buf1, buf2) — breaking a
-// callee that compares argument pointer identity.  All operands of one call that
-// reference the same global must now share a single buffer.
+// its own buffer, so check(secret, secret) became check(buf1, buf2) — breaking
+// a callee that compares argument pointer identity.  All operands of one call
+// that reference the same global must now share a single buffer.
 TEST_CASE("stringEncryptModule preserves pointer identity within a call") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -12121,8 +12215,8 @@ entry:
     REQUIRE(M);
     auto engine = morok::core::Xoshiro256pp::fromSeed(4301);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     Function *F = M->getFunction("use_twice");
     REQUIRE(F);
@@ -12140,9 +12234,10 @@ entry:
 }
 
 // Regression for #43: the stack buffer alloca was inserted before the use site,
-// so a use in a loop allocated a fresh buffer every iteration (never freed until
-// return) — attacker-controlled loop counts exhaust the stack.  The alloca is
-// now hoisted to the entry block (allocated once per call activation).
+// so a use in a loop allocated a fresh buffer every iteration (never freed
+// until return) — attacker-controlled loop counts exhaust the stack.  The
+// alloca is now hoisted to the entry block (allocated once per call
+// activation).
 TEST_CASE("stringEncryptModule hoists stack string buffers out of loops") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -12166,8 +12261,8 @@ exit:
     REQUIRE(M);
     auto engine = morok::core::Xoshiro256pp::fromSeed(4302);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     Function *F = M->getFunction("loop");
     REQUIRE(F);
@@ -12206,7 +12301,8 @@ TEST_CASE("stringEncryptModule honors force_content when probability is zero") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("stringEncryptModule honors skip_content before probability and force") {
+TEST_CASE(
+    "stringEncryptModule honors skip_content before probability and force") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("skip-strings", ctx);
     makePrivateString(*M, "skipped.str", "keep-clear");
@@ -12226,7 +12322,8 @@ TEST_CASE("stringEncryptModule honors skip_content before probability and force"
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("stringEncryptModule uses stack decrypt loops for long callsite strings") {
+TEST_CASE(
+    "stringEncryptModule uses stack decrypt loops for long callsite strings") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("stack-long-strings", ctx);
     const std::string LargeText(256, 'z');
@@ -12235,8 +12332,8 @@ TEST_CASE("stringEncryptModule uses stack decrypt loops for long callsite string
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(306);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     CHECK(countFunctions(*M, "morok.strdec") == 0u);
     CHECK(countFunctions(*M, "morok.strsite") >= 1u);
@@ -12247,10 +12344,10 @@ TEST_CASE("stringEncryptModule uses stack decrypt loops for long callsite string
     for (Function &F : *M)
         if (F.getName().starts_with("morok.strsite"))
             for (BasicBlock &BB : F) {
-                sawStackLoop |= BB.getName().starts_with("morok.str.stack.loop");
+                sawStackLoop |=
+                    BB.getName().starts_with("morok.str.stack.loop");
                 for (Instruction &I : BB)
-                    sawStackPhi |=
-                        I.getName().starts_with("morok.str.stack.i");
+                    sawStackPhi |= I.getName().starts_with("morok.str.stack.i");
                 sawStackMixer |=
                     countNamedAllocas(F, "morok.str.stack.mix") >= 1u;
             }
@@ -12271,8 +12368,8 @@ TEST_CASE("stringEncryptModule falls back to per-string decryptors") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(307);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     // Length-hiding may replace the globals with padded ones; re-fetch by name.
     GlobalVariable *Small = M->getGlobalVariable("small.str", true);
@@ -12321,7 +12418,8 @@ TEST_CASE("stringEncryptModule falls back to per-string decryptors") {
 // pass cannot inject a first-use call before every read and must fall back to a
 // global constructor.  That decryptor must run before ordinary user ctors such
 // as priority-150 startup hooks, or they can observe ciphertext.
-TEST_CASE("stringEncryptModule schedules fallback decryptors before user ctors") {
+TEST_CASE(
+    "stringEncryptModule schedules fallback decryptors before user ctors") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 target datalayout = "e-p:64:64"
@@ -12345,8 +12443,8 @@ entry:
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(3801);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     CHECK_FALSE(hasReadableByteString(*M, "early-secret"));
     CHECK(countFunctions(*M, "morok.strdec") == 1u);
@@ -12356,8 +12454,7 @@ entry:
     REQUIRE(decryptorPriorities.size() == 1u);
     CHECK(decryptorPriorities[0] == 0u);
 
-    std::vector<unsigned> userPriorities =
-        ctorPrioritiesFor(*M, "user_ctor");
+    std::vector<unsigned> userPriorities = ctorPrioritiesFor(*M, "user_ctor");
     REQUIRE(userPriorities.size() == 1u);
     CHECK(userPriorities[0] == 150u);
     CHECK(decryptorPriorities[0] < userPriorities[0]);
@@ -12383,8 +12480,8 @@ TEST_CASE("cloakSeed rejects a malformed pre-existing seed global") {
         REQUIRE(Seed);
         GlobalVariable *Second = morok::ir::cloakSeed(*M, rng);
         CHECK(Second == Seed);
-        // The seed cloakSeed hands back must be a usable i64 ConstantInt global,
-        // never the malformed squatter.
+        // The seed cloakSeed hands back must be a usable i64 ConstantInt
+        // global, never the malformed squatter.
         CHECK(Seed->getValueType()->isIntegerTy(64));
         REQUIRE(Seed->hasInitializer());
         CHECK(isa<ConstantInt>(Seed->getInitializer()));
@@ -12392,8 +12489,8 @@ TEST_CASE("cloakSeed rejects a malformed pre-existing seed global") {
 
         // End-to-end: emitting a cloaked symbol must not abort and must verify.
         auto *FT = FunctionType::get(Type::getVoidTy(ctx), false);
-        auto *F = Function::Create(FT, GlobalValue::ExternalLinkage, "use_cloak",
-                                   M.get());
+        auto *F = Function::Create(FT, GlobalValue::ExternalLinkage,
+                                   "use_cloak", M.get());
         IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
         Value *Name = morok::ir::emitCloakedSymbol(B, *M, "dlopen", rng);
         CHECK(Name != nullptr);
@@ -12428,8 +12525,8 @@ TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     REQUIRE(M);
     auto engine = morok::core::Xoshiro256pp::fromSeed(3901);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     // Address space preserved across the padded replacement.
     GlobalVariable *As1 = M->getGlobalVariable("s_as1", true);
@@ -12454,7 +12551,8 @@ TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("stringEncryptModule leaves generated decoy strings as plaintext bait") {
+TEST_CASE(
+    "stringEncryptModule leaves generated decoy strings as plaintext bait") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("decoy-strings", ctx);
     M->setTargetTriple(Triple("x86_64-unknown-linux-gnu"));
@@ -12485,8 +12583,8 @@ TEST_CASE("stringEncryptModule avoids byte-sub decryptor signature") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(309);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     bool sawAddDecodePath = false;
     bool sawI8Sub = false;
@@ -12516,8 +12614,8 @@ TEST_CASE("stringEncryptModule gives each string its own cipher") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(77);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(
-        *M, morok::passes::StrEncParams{}, rng));
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
 
     GlobalVariable *A = M->getGlobalVariable("a.str", true);
     GlobalVariable *B = M->getGlobalVariable("b.str", true);
@@ -12533,7 +12631,8 @@ TEST_CASE("stringEncryptModule gives each string its own cipher") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("functionCallObfuscateModule redirects a Linux external call via hash resolver") {
+TEST_CASE("functionCallObfuscateModule redirects a Linux external call via "
+          "hash resolver") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 declare i32 @puts(ptr)
@@ -12557,9 +12656,9 @@ define i32 @caller() {
         hasIfuncReturn |= BB.getName() == "ret.ifunc";
         for (Instruction &I : BB) {
             auto *CI = dyn_cast<CallInst>(&I);
-            hasIfuncCall |= CI && CI->getCalledFunction() == nullptr &&
-                            CI->getName().starts_with(
-                                "morok.fco.elf.ifunc.target");
+            hasIfuncCall |=
+                CI && CI->getCalledFunction() == nullptr &&
+                CI->getName().starts_with("morok.fco.elf.ifunc.target");
         }
     }
     CHECK(hasIfuncReturn);
@@ -12634,7 +12733,8 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("functionCallObfuscateModule redirects an external invoke via dlsym") {
+TEST_CASE(
+    "functionCallObfuscateModule redirects an external invoke via dlsym") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 declare i32 @may_throw()
@@ -12687,7 +12787,8 @@ lpad:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("functionCallObfuscateModule hoists cloaked symbol slots out of loops") {
+TEST_CASE(
+    "functionCallObfuscateModule hoists cloaked symbol slots out of loops") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 declare i32 @puts(ptr)
@@ -12775,8 +12876,8 @@ define i32 @caller() {
             if (CDA->getElementType()->isIntegerTy(8))
                 CHECK(CDA->getRawDataValues().find("puts") == StringRef::npos);
     }
-    // Linux/manual resolution uses only a per-site hash: no API-name cloak global
-    // or shared dlsym string path is needed for the target symbol.
+    // Linux/manual resolution uses only a per-site hash: no API-name cloak
+    // global or shared dlsym string path is needed for the target symbol.
     CHECK(countGlobals(*M, "morok.cloak.c") == 0u);
 
     // The first miss publishes only a pending hash/out/continuation request
@@ -12809,9 +12910,10 @@ define i32 @caller() {
         if (auto *CI = dyn_cast<CallInst>(&I)) {
             if (Function *Cee = CI->getCalledFunction()) {
                 (void)Cee;
-            } else if (auto *Asm = dyn_cast<InlineAsm>(CI->getCalledOperand())) {
-                hasFaultAsm |= Asm->getAsmString().contains(
-                    "movq %rax, (%rax)");
+            } else if (auto *Asm =
+                           dyn_cast<InlineAsm>(CI->getCalledOperand())) {
+                hasFaultAsm |=
+                    Asm->getAsmString().contains("movq %rax, (%rax)");
             } else if (auto *I2P =
                            dyn_cast<IntToPtrInst>(CI->getCalledOperand())) {
                 indirectUsesCachedPointer =
@@ -12840,7 +12942,8 @@ define i32 @caller() {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("functionCallObfuscateModule uses Mach-O hash resolver for asm names") {
+TEST_CASE(
+    "functionCallObfuscateModule uses Mach-O hash resolver for asm names") {
     LLVMContext ctx;
     // macOS libc symbols carry a `\01`-escaped asm name (`\01_fwrite`); dlsym
     // needs the plain C name "fwrite", else it returns null and the redirected
@@ -12994,8 +13097,7 @@ entry:
     CHECK(M->getFunction("clock_gettime") != nullptr);
     CHECK(M->getFunction("nanosleep") != nullptr);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
-    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
-          1u);
+    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rel.offset") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rel.info") >= 1u);
@@ -13005,30 +13107,24 @@ entry:
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.protect.ok") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rx") >= 1u);
-    CHECK(countNamedInstructions(*Rx, "morok.antihook.got.self.seg.hit") >=
-          1u);
+    CHECK(countNamedInstructions(*Rx, "morok.antihook.got.self.seg.hit") >= 1u);
     CHECK(countNamedInstructions(*Rx, "morok.antihook.got.map.seg.hit") == 0u);
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.rx") >= 1u);
     CHECK(hasInlineAsmCall(*Diverge));
     CHECK(hasInlineAsmCall(*Sandbox));
     CHECK(countNamedInstructions(*Diverge,
-                                 "morok.antihook.diverge.getpid.direct") >=
-          1u);
-    CHECK(countNamedInstructions(*Diverge,
-                                 "morok.antihook.diverge.getppid.wrapper") >=
-          1u);
+                                 "morok.antihook.diverge.getpid.direct") >= 1u);
+    CHECK(countNamedInstructions(
+              *Diverge, "morok.antihook.diverge.getppid.wrapper") >= 1u);
     CHECK(countNamedInstructions(
               *Sandbox, "morok.antihook.sandbox.cpuid.hypervisor") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
-                                 "morok.antihook.sandbox.cpuid.vendor") >=
-          1u);
+                                 "morok.antihook.sandbox.cpuid.vendor") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
-                                 "morok.antihook.sandbox.vmware.vendor") >=
-          1u);
-    CHECK(countNamedInstructions(*Sandbox,
-                                 "morok.antihook.sandbox.vmware.backdoor") >=
-          1u);
+                                 "morok.antihook.sandbox.vmware.vendor") >= 1u);
+    CHECK(countNamedInstructions(
+              *Sandbox, "morok.antihook.sandbox.vmware.backdoor") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
                                  "morok.antihook.sandbox.sidt.base") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
@@ -13051,47 +13147,42 @@ entry:
                 ++smcGateStores;
     CHECK(smcGateStores >= 1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.rwx.ok") >= 1u);
-    CHECK(countNamedInstructions(*Smc,
-                                 "morok.antihook.dbi.smc.mprotect.rwx") >=
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.mmap") >= 1u);
     CHECK(countNamedInstructions(*Schro,
-                                 "morok.antihook.schro.sigaction.segv") >=
-          1u);
+                                 "morok.antihook.schro.sigaction.segv") >= 1u);
     CHECK(countNamedInstructions(*Schro,
                                  "morok.antihook.schro.mprotect.none") >= 1u);
-    CHECK(countNamedInstructions(*Schro,
-                                 "morok.antihook.schro.fault.byte") >= 1u);
+    CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.fault.byte") >=
+          1u);
     CHECK(countNamedInstructions(*Schro,
                                  "morok.antihook.schro.mprotect.rearm") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
-                                 "morok.antihook.schro.fault.in.page") >=
-          1u);
+                                 "morok.antihook.schro.fault.in.page") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.rip.allowed") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.reader") >= 1u);
-    CHECK(countNamedInstructions(*AntiDump,
-                                 "morok.antidump.elf.mprotect.rw") >= 1u);
+    CHECK(countNamedInstructions(*AntiDump, "morok.antidump.elf.mprotect.rw") >=
+          1u);
     CHECK(countNamedInstructions(*AntiDump, "morok.antidump.elf.magic") >= 1u);
     CHECK(countNamedInstructions(*AntiDump, "morok.antidump.elf.shoff") >= 1u);
-    CHECK(countNamedInstructions(*AntiDump,
-                                 "morok.antidump.guard.elf.mprotect.none") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *AntiDump, "morok.antidump.guard.elf.mprotect.none") >= 1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antihook.dynamic.present") >=
           1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antihook.hooked") >= 1u);
-    CHECK(countNamedInstructions(*Ctor, "morok.corroborate.score.final") >=
-          1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.corroborate.score.final") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.confirmed") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.aggressive") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
           1u);
-    CHECK(countNamedInstructions(*Ctor,
-                                 "morok.corroborate.antidump.changed") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.corroborate.antidump.changed") >=
+          1u);
     CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
@@ -13223,44 +13314,37 @@ entry:
     CHECK(M->getFunction("getpid") != nullptr);
     CHECK(M->getFunction("getppid") != nullptr);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
-    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >=
-          1u);
+    CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3") >= 1u);
-    CHECK(countNamedInstructions(*Fixups,
-                                 "morok.antihook.fixup.section.got") >= 1u);
+    CHECK(countNamedInstructions(*Fixups, "morok.antihook.fixup.section.got") >=
+          1u);
     CHECK(countNamedInstructions(*Fixups,
                                  "morok.antihook.fixup.section.lazy") >= 1u);
     CHECK(countNamedInstructions(*Fixups, "morok.antihook.fixup.text") >= 1u);
-    CHECK(countNamedInstructions(*Text, "morok.antihook.macho.text.hit") >=
-          1u);
+    CHECK(countNamedInstructions(*Text, "morok.antihook.macho.text.hit") >= 1u);
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.mprotect") >= 1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.text") >= 1u);
     CHECK(hasInlineAsmCall(*Diverge));
     CHECK(countNamedInstructions(*Diverge,
-                                 "morok.antihook.diverge.getpid.direct") >=
-          1u);
-    CHECK(countNamedInstructions(*Diverge,
-                                 "morok.antihook.diverge.getppid.wrapper") >=
-          1u);
+                                 "morok.antihook.diverge.getpid.direct") >= 1u);
+    CHECK(countNamedInstructions(
+              *Diverge, "morok.antihook.diverge.getppid.wrapper") >= 1u);
     CHECK(countNamedInstructions(
               *Sandbox, "morok.antihook.sandbox.cpuid.hypervisor") >= 1u);
-    CHECK(countNamedInstructions(*Sandbox,
-                                 "morok.antihook.sandbox.vmware.backdoor") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Sandbox, "morok.antihook.sandbox.vmware.backdoor") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
                                  "morok.antihook.sandbox.sidt.base") >= 1u);
-    CHECK(countNamedInstructions(*Smc,
-                                 "morok.antihook.dbi.smc.mprotect.rwx") >=
+    CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.mmap") >= 1u);
     CHECK(countNamedInstructions(*Schro,
-                                 "morok.antihook.schro.sigaction.segv") >=
-          1u);
+                                 "morok.antihook.schro.sigaction.segv") >= 1u);
     CHECK(countNamedInstructions(*Schro,
                                  "morok.antihook.schro.mprotect.none") >= 1u);
-    CHECK(countNamedInstructions(*Schro,
-                                 "morok.antihook.schro.fault.byte") >= 1u);
+    CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.fault.byte") >=
+          1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.mcontext") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
@@ -13269,12 +13353,12 @@ entry:
                                  "morok.antidump.macho.mprotect.rw") >= 1u);
     CHECK(countNamedInstructions(*AntiDump,
                                  "morok.antidump.macho.section.name") >= 1u);
-    CHECK(countNamedInstructions(*AntiDump,
-                                 "morok.antidump.guard.macho.mprotect.none") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *AntiDump, "morok.antidump.guard.macho.mprotect.none") >= 1u);
     // Regression for #68: the writable range must cover the whole load-command
     // area (mach_header_64 + sizeofcmds), page-rounded, not just the header
-    // page, or poisoning a section name on a later __TEXT page faults (SIGSEGV).
+    // page, or poisoning a section name on a later __TEXT page faults
+    // (SIGSEGV).
     CHECK(countNamedInstructions(*AntiDump,
                                  "morok.antidump.macho.sizeofcmds") >= 1u);
     CHECK(countNamedInstructions(*AntiDump, "morok.antidump.macho.protlen") >=
@@ -13286,8 +13370,8 @@ entry:
                          "morok.antihook.wxorx.darwin"));
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
           1u);
-    CHECK(countNamedInstructions(*Ctor,
-                                 "morok.corroborate.antidump.changed") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.corroborate.antidump.changed") >=
+          1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
     checkSealEnforcement(*M, *Work);
@@ -13354,14 +13438,12 @@ entry:
     CHECK(hasInlineAsmCall(*Sandbox));
     CHECK(countNamedInstructions(
               *Sandbox, "morok.antihook.sandbox.cpuid.hypervisor") >= 1u);
-    CHECK(countNamedInstructions(*Sandbox,
-                                 "morok.antihook.sandbox.vmware.backdoor") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Sandbox, "morok.antihook.sandbox.vmware.backdoor") >= 1u);
     CHECK(countNamedInstructions(*Sandbox,
                                  "morok.antihook.sandbox.sidt.base") >= 1u);
-    CHECK(countNamedInstructions(*Smc,
-                                 "morok.antihook.dbi.smc.virtualprotect.rwx") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Smc, "morok.antihook.dbi.smc.virtualprotect.rwx") >= 1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
@@ -13410,23 +13492,22 @@ entry:
     Function *AntiDump = M->getFunction("morok.antihook.antidump.macho");
     REQUIRE(AntiDump != nullptr);
     checkSealEnforcement(*M, *Ctor);
-    CHECK(countNamedInstructions(*Ctor,
-                                 "morok.antihook.prologue.arm64.hit") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.antihook.prologue.arm64.hit") >=
+          1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
           1u);
     CHECK(countNamedInstructions(*Schro,
-                                 "morok.antihook.schro.sigaction.segv") >=
+                                 "morok.antihook.schro.sigaction.segv") >= 1u);
+    CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.fault.byte") >=
           1u);
-    CHECK(countNamedInstructions(*Schro,
-                                 "morok.antihook.schro.fault.byte") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.mcontext") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.rip.allowed") >= 1u);
     CHECK(countNamedInstructions(*AntiDump,
                                  "morok.antidump.macho.section.name") >= 1u);
-    CHECK(countNamedInstructions(*Ctor,
-                                 "morok.corroborate.antidump.changed") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.corroborate.antidump.changed") >=
+          1u);
     CHECK(M->getFunction("morok.antihook.diverge.posix") == nullptr);
     CHECK(M->getFunction("dlsym") == nullptr);
     CHECK(M->getFunction("open") != nullptr);
@@ -13492,63 +13573,58 @@ entry:
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.status")));
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.stat4")));
     CHECK(hasInlineAsmCall(*Watch));
-    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.readlink") >=
-          1u);
-    CHECK(hasNamedIcmpWithConstant(*Memfd,
-                                   "morok.antidbg.memfd.prefix.enough", 7u));
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.readlink") >= 1u);
+    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.enough",
+                                   7u));
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.prefix.ch") ==
           7u);
-    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
-                                   '/'));
-    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
-                                   'm'));
-    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
-                                   'e'));
-    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
-                                   'f'));
-    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
-                                   'd'));
-    CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq",
-                                   ':'));
+    CHECK(
+        hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq", '/'));
+    CHECK(
+        hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq", 'm'));
+    CHECK(
+        hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq", 'e'));
+    CHECK(
+        hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq", 'f'));
+    CHECK(
+        hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq", 'd'));
+    CHECK(
+        hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.eq", ':'));
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.idx") == 0u);
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.range") ==
           0u);
-    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.next") == 0u);
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.scan.next") ==
+          0u);
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.create") >= 1u);
-    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.execveat") >=
-          1u);
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.execveat") >= 1u);
     CHECK(countNamedInstructions(*Memfd,
                                  "morok.antidbg.memfd.execveat.retry") >= 1u);
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.dup3") >= 1u);
-    CHECK(countNamedInstructions(*Memfd,
-                                 "morok.antidbg.memfd.execve.procfd") >= 1u);
+    CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.execve.procfd") >=
+          1u);
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.write") >= 1u);
-    CHECK(countNamedInstructions(*Watch,
-                                 "morok.antidbg.buddy.pid.valid") >= 1u);
-    CHECK(countNamedInstructions(*Watch,
-                                 "morok.antidbg.buddy.missing") >= 1u);
+    CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.pid.valid") >=
+          1u);
+    CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.missing") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.kill") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.wait") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.keep") >= 1u);
-    CHECK(countNamedInstructions(*Watch,
-                                 "morok.antidbg.watch.ptrace.active.load") >=
-          1u);
-    CHECK(countNamedInstructions(*Watch,
-                                 "morok.antidbg.buddy.ptrace.active.load") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Watch, "morok.antidbg.watch.ptrace.active.load") >= 1u);
+    CHECK(countNamedInstructions(
+              *Watch, "morok.antidbg.buddy.ptrace.active.load") >= 1u);
     CHECK(hasInlineAsmCall(*Scrub));
     CHECK(countNamedInstructions(*Scrub, "morok.antidbg.dr.seize") >= 1u);
     CHECK(countNamedInstructions(*Scrub, "morok.antidbg.dr.interrupt") >= 1u);
     CHECK(countNamedInstructions(*Scrub, "morok.antidbg.dr.poke") == 8u);
     CHECK(countNamedInstructions(*Scrub, "morok.negative.dr.notzero") >= 1u);
     CHECK(countNamedInstructions(*Scrub, "morok.antidbg.buddy.peek") == 4u);
-    CHECK(countNamedInstructions(*Scrub,
-                                 "morok.antidbg.buddy.mirror.bad") >= 1u);
+    CHECK(countNamedInstructions(*Scrub, "morok.antidbg.buddy.mirror.bad") >=
+          1u);
     CHECK(countNamedInstructions(*Sentinel, "morok.antidbg.dr.keep") >= 1u);
-    CHECK(countNamedInstructions(*Sentinel,
-                                 "morok.antidbg.buddy.scrub") >= 1u);
-    CHECK(countNamedInstructions(*Sentinel,
-                                 "morok.antidbg.buddy.ppid.live") >= 1u);
+    CHECK(countNamedInstructions(*Sentinel, "morok.antidbg.buddy.scrub") >= 1u);
+    CHECK(countNamedInstructions(*Sentinel, "morok.antidbg.buddy.ppid.live") >=
+          1u);
     CHECK(countNamedInstructions(*ProbeWatch, "morok.watchdog.cadence") >= 1u);
     CHECK(countNamedInstructions(*ProbeWatch,
                                  "morok.watchdog.heartbeat.beat") >= 1u);
@@ -13572,24 +13648,22 @@ entry:
     CHECK(countMonotonicAtomicStoresTo(*HeartbeatWatch,
                                        "morok.watchdog.crypto") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.fork") >= 1u);
-    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.pid.valid") >=
-          1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.pid.valid") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.ptracer.ok") >=
           1u);
-    CHECK(countNamedInstructions(*AntiDbg,
-                                 "morok.antidbg.dr.child.dumpable") >= 1u);
-    CHECK(countNamedInstructions(*AntiDbg,
-                                 "morok.antidbg.dr.child.ptracer") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.child.dumpable") >=
+          1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.child.ptracer") >=
+          1u);
     CHECK(countNamedInstructions(*AntiDbg,
                                  "morok.antidbg.dr.child.no_new_privs") >= 1u);
-    CHECK(countNamedInstructions(*AntiDbg,
-                                 "morok.antidbg.ptrace.init.active.load") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.active.load") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.ptrace.init") >= 1u);
-    CHECK(maxStaticAllocaArrayElements(
-              *AntiDbg, "morok.antidbg.seccomp.filters") == 17u);
-    CHECK(countNamedInstructions(*AntiDbg,
-                                 "morok.antidbg.seccomp.tsync") >= 1u);
+    CHECK(maxStaticAllocaArrayElements(*AntiDbg,
+                                       "morok.antidbg.seccomp.filters") == 17u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.seccomp.tsync") >=
+          1u);
     CHECK(functionHasConstantInt(*AntiDbg, 317u));       // seccomp syscall
     CHECK(functionHasConstantInt(*AntiDbg, 0xC000003E)); // AUDIT_ARCH_X86_64
     CHECK(functionHasConstantInt(*AntiDbg, 0x40000000)); // __X32_SYSCALL_BIT
@@ -13641,8 +13715,8 @@ define i32 @main() { ret i32 0 }
 
     Function *Ctor = M->getFunction("morok.antidbg");
     REQUIRE(Ctor != nullptr);
-    CHECK(maxStaticAllocaArrayElements(
-              *Ctor, "morok.antidbg.seccomp.filters") == 17u);
+    CHECK(maxStaticAllocaArrayElements(*Ctor,
+                                       "morok.antidbg.seccomp.filters") == 17u);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.seccomp.tsync") >= 1u);
     CHECK(functionHasConstantInt(*Ctor, 277u));       // seccomp syscall
     CHECK(functionHasConstantInt(*Ctor, 0xC00000B7)); // AUDIT_ARCH_AARCH64
@@ -13821,10 +13895,9 @@ define i32 @main() {
 }
 )ir");
     auto *I64 = Type::getInt64Ty(ctx);
-    auto *Seal = new GlobalVariable(*M, I64, /*isConstant=*/false,
-                                    GlobalValue::PrivateLinkage,
-                                    ConstantInt::get(I64, 0x1234),
-                                    "morok.seal.root.anti_debug");
+    auto *Seal = new GlobalVariable(
+        *M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I64, 0x1234), "morok.seal.root.anti_debug");
     Seal->setAlignment(Align(8));
     auto engine = morok::core::Xoshiro256pp::fromSeed(7);
     morok::ir::IRRandom rng(engine);
@@ -13839,7 +13912,8 @@ define i32 @main() {
                     return true;
         return false;
     };
-    // helper is called by a virtualized exec -> in the validation cluster -> bound.
+    // helper is called by a virtualized exec -> in the validation cluster ->
+    // bound.
     CHECK(usesSealIn("helper"));
     // outside is only called by main -> not in the cluster -> left alone.
     CHECK_FALSE(usesSealIn("outside"));
@@ -13871,7 +13945,8 @@ entry:
     CHECK(M->getGlobalVariable("morok.antidbg.state", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.watchdog.heartbeat", true) != nullptr);
     // The verdict-bound anti-debug seal (M1): detectors fold into it and the
-    // self-checksum diff consumes it, so detection actually corrupts the verdict.
+    // self-checksum diff consumes it, so detection actually corrupts the
+    // verdict.
     auto *Seal = M->getGlobalVariable("morok.seal.root.anti_debug", true);
     REQUIRE(Seal != nullptr);
     std::size_t sealStores = 0;
@@ -13898,8 +13973,9 @@ entry:
     CHECK(sealSelectStores == sealStores);
     CHECK(sealCleanKeepsCurrent == sealStores);
     CHECK(sealDirectXorStores == 0u);
-    // On arm64 the trace checks are emitted as direct `svc` (no imported stub to
-    // DYLD-interpose), so ptrace/sysctl/csops must NOT appear as imports (M2).
+    // On arm64 the trace checks are emitted as direct `svc` (no imported stub
+    // to DYLD-interpose), so ptrace/sysctl/csops must NOT appear as imports
+    // (M2).
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("sysctl") == nullptr);
     CHECK(M->getFunction("csops") == nullptr);
@@ -13916,7 +13992,8 @@ entry:
                        "morok.svc.fallback") >= 1u);
     CHECK(countCallsTo(*M->getFunction("morok.antidbg.probe"),
                        "morok.svc.fallback") >= 1u);
-    // M3: the loaded-image census enumerates dyld images to flag foreign dylibs.
+    // M3: the loaded-image census enumerates dyld images to flag foreign
+    // dylibs.
     CHECK(M->getFunction("_dyld_get_image_name") != nullptr);
     CHECK(M->getFunction("_dyld_image_count") != nullptr);
     CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
@@ -13991,8 +14068,7 @@ define i32 @main() { ret i32 0 }
     CHECK(hasInlineAsmCall(*Peb));
     CHECK(hasInlineAsmCall(*Direct));
     CHECK(hasInlineAsmCall(*Indirect));
-    CHECK(countNamedInstructions(*Probe, "morok.win.foundation.teb.peb") >=
-          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.foundation.teb.peb") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.foundation.headers.ok") >=
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.foundation.veh.handle") >=
@@ -14006,8 +14082,7 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.current.limit") >=
           1u);
     CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.prologue") >= 1u);
-    CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.ssn.accept") >=
-          1u);
+    CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.ssn.accept") >= 1u);
     CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.gadget.accept") >=
           1u);
     CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.complete") >= 1u);
@@ -14015,8 +14090,8 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.tartarus") >= 1u);
     CHECK(countNamedInstructions(*Scan,
                                  "morok.win.sys.scan.neighbor.enabled") >= 1u);
-    CHECK(countNamedInstructions(*Scan,
-                                 "morok.win.sys.scan.neighbor.gadget") >= 1u);
+    CHECK(countNamedInstructions(*Scan, "morok.win.sys.scan.neighbor.gadget") >=
+          1u);
     CallInst *FoundationScan = nullptr;
     for (Instruction &I : instructions(*Probe))
         if (auto *CI = dyn_cast<CallInst>(&I))
@@ -14075,18 +14150,17 @@ define i32 @main() { ret i32 0 }
     checkSealEnforcement(*M, *Probe);
     CHECK(hasInlineAsmCall(*Peb));
     CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.peb") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.pebheap.being.debugged") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.pebheap.nt.global.flag") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.pebheap.process.heap") >= 1u);
-    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.heap.flags") >=
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.being.debugged") >=
           1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.nt.global.flag") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.process.heap") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.heap.flags") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.pebheap.heap.force.flags") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.pebheap.heap.composite") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.heap.composite") >=
+          1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -14131,21 +14205,20 @@ define i32 @main() { ret i32 0 }
                                  "morok.win.dbgobj.debug.flags.status") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.dbgobj.object.types.status") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.dbgobj.object.type.hash") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.dbgobj.object.debug.count.final") >=
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.object.type.hash") >=
           1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.dbgobj.object.debug.count.final") >= 1u);
     CHECK(namedInstructionUsesConstant(
         *Probe, "morok.win.dbgobj.object.fixed.next", 0x68));
     CHECK_FALSE(namedInstructionUsesConstant(
         *Probe, "morok.win.dbgobj.object.fixed.next", 0x60));
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.dbgobj.object.entry.end") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.object.entry.end") >=
+          1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.dbgobj.object.name.valid") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.dbgobj.object.name.safe") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.object.name.safe") >=
+          1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.dbgobj.object.name.end.ok") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
@@ -14181,23 +14254,20 @@ define i32 @main() { ret i32 0 }
     CHECK(hasInlineAsmCall(*Peb));
     CHECK(countNamedInstructions(*Probe, "morok.win.thide.ntgetnextthread") >=
           1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.thide.ntsetinformationthread") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.thide.ntqueryinformationthread") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.thide.ntsetinformationthread") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.thide.ntqueryinformationthread") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.thide.ntclose.ready") >=
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.thide.getnext.status") >=
           1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.thide.close.prev.available") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.thide.close.prev.needed") >= 1u);
-    CHECK(countNamedInstructions(*Probe, "morok.win.thide.set.status") >= 1u);
-    CHECK(countNamedInstructions(*Probe, "morok.win.thide.query.status") >=
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.close.prev.needed") >=
           1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.set.status") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.thide.query.status") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.thide.hidden") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.thide.fail.final") >= 1u);
     BasicBlock *ClosePrev = nullptr;
@@ -14249,35 +14319,28 @@ define i32 @main() { ret i32 0 }
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.ntprotect") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.kernelbase") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.attach.kernelbase.exitprocess") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.attach.kernel32.exitprocess") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.attach.kernelbase.closehandle") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.attach.kernel32.closehandle") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe, "morok.win.attach.exitprocess") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe, "morok.win.attach.closehandle") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.attach.kernelbase.exitprocess") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.attach.kernel32.exitprocess") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.attach.kernelbase.closehandle") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.attach.kernel32.closehandle") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.exitprocess") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.closehandle") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.attach.patch.remote.status") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.patch.ret.status") >=
           1u);
-    CHECK(countNamedInstructions(*Invalid, "morok.win.attach.ntclose.invalid") >=
-          1u);
+    CHECK(countNamedInstructions(*Invalid,
+                                 "morok.win.attach.ntclose.invalid") >= 1u);
     CHECK(countNamedInstructions(*Invalid,
                                  "morok.win.attach.closehandle.invalid") >= 1u);
     CHECK(countNamedInstructions(*PatchRet,
                                  "morok.win.attach.patch.ret.protect") >= 1u);
-    CHECK(countNamedInstructions(*PatchRemote,
-                                 "morok.win.attach.patch.remote.protect") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *PatchRemote, "morok.win.attach.patch.remote.protect") >= 1u);
     CHECK(countNamedInstructions(*Resolve, "morok.win.pe.export.size") >= 1u);
     CHECK(countNamedInstructions(*Resolve, "morok.win.pe.export.nonempty") >=
           1u);
@@ -14318,11 +14381,9 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Probe, "morok.win.kdbg.system.kd.status") >=
           1u);
     CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.kdbg.system.modules.status") >=
-          1u);
+                                 "morok.win.kdbg.system.modules.status") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.kdbg.parent.pid") >= 1u);
-    CHECK(countNamedInstructions(*Probe, "morok.win.kdbg.window.windbg") >=
-          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.kdbg.window.windbg") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -14367,8 +14428,8 @@ define i32 @main() { ret i32 0 }
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.syscalls.ntclose.pack") >=
           1u);
-    for (StringRef PackName : {"morok.win.syscalls.ntqsi.pack",
-                               "morok.win.syscalls.ntclose.pack"}) {
+    for (StringRef PackName :
+         {"morok.win.syscalls.ntqsi.pack", "morok.win.syscalls.ntclose.pack"}) {
         CallInst *PackCall = nullptr;
         for (Instruction &I : instructions(*Probe))
             if (auto *CI = dyn_cast<CallInst>(&I))
@@ -14383,12 +14444,12 @@ define i32 @main() { ret i32 0 }
     }
     CHECK(countNamedInstructions(*Probe, "morok.win.syscalls.ntqsi.direct") >=
           1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.syscalls.ntqsi.indirect") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.syscalls.ntqsi.diverged") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.syscalls.ntclose.direct") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.syscalls.ntqsi.indirect") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.syscalls.ntqsi.diverged") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.syscalls.ntclose.direct") >=
+          1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.syscalls.ntclose.indirect") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
@@ -14437,16 +14498,15 @@ define i32 @main() { ret i32 0 }
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.unhook.kernel32.status") >=
           1u);
+    CHECK(countNamedInstructions(
+              *Helper, "morok.win.unhook.ntopensection.status") >= 1u);
     CHECK(countNamedInstructions(*Helper,
-                                 "morok.win.unhook.ntopensection.status") >=
-          1u);
-    CHECK(countNamedInstructions(*Helper, "morok.win.unhook.ntmapview.status") >=
-          1u);
+                                 "morok.win.unhook.ntmapview.status") >= 1u);
     CHECK(countNamedInstructions(*Helper, "morok.win.unhook.live.text") >= 1u);
     CHECK(countNamedInstructions(*Helper, "morok.win.unhook.mapped.text") >=
           1u);
-    CHECK(countNamedInstructions(*Helper, "morok.win.unhook.ntprotect.status") >=
-          1u);
+    CHECK(countNamedInstructions(*Helper,
+                                 "morok.win.unhook.ntprotect.status") >= 1u);
     CHECK(countNamedInstructions(*Helper, "morok.win.unhook.copy.qword") >= 1u);
     CHECK(countNamedInstructions(*Helper, "morok.win.unhook.copy.byte") >= 1u);
     CHECK(countNamedInstructions(*Helper,
@@ -14548,12 +14608,10 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.kernelbase") >=
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.kernel32") >= 1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.mitigate.setpolicy.kernelbase") >=
-          1u);
-    CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.mitigate.setpolicy.kernel32") >=
-          1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.mitigate.setpolicy.kernelbase") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.mitigate.setpolicy.kernel32") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.mitigate.dynamic.result") >=
           1u);
     CHECK(countNamedInstructions(*Probe,
@@ -14676,7 +14734,8 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
-TEST_CASE("trapOracleModule preserves Darwin SIGTRAP dispositions with sigaction") {
+TEST_CASE(
+    "trapOracleModule preserves Darwin SIGTRAP dispositions with sigaction") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
 target triple = "arm64-apple-macosx13.0.0"
@@ -14954,10 +15013,8 @@ define i32 @main() { ret i32 0 }
         REQUIRE(Tsc);
         CHECK(hasInlineAsmCall(*Tsc));
     }
-    CHECK(countNamedInstructions(*Oracle, "morok.microcanary.train.idx") >=
-          1u);
-    CHECK(countNamedInstructions(*Oracle, "morok.microcanary.spec.byte") >=
-          1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.microcanary.train.idx") >= 1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.microcanary.spec.byte") >= 1u);
     CHECK(countNamedInstructions(*Oracle, "morok.microcanary.measure.byte") >=
           1u);
     CHECK_FALSE(verifyModule(*M, &errs()));

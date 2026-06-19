@@ -41,6 +41,7 @@ add_library(morok_passes STATIC
   UniformPrimitiveLowering.cpp
   Virtualization.cpp
   HashGatedSelfDecrypt.cpp
+  SealedBlob.cpp
   SelfChecksumConstants.cpp
   ShamirShare.cpp
   MutualGuardGraph.cpp

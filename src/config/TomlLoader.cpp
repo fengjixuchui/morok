@@ -28,9 +28,8 @@ using Node = toml::node_view<const toml::node>;
 
 Opt<std::uint32_t> readU32(const Node &v) {
     if (auto i = v.value<std::int64_t>()) {
-        if (*i < 0 ||
-            *i > static_cast<std::int64_t>(
-                     std::numeric_limits<std::uint32_t>::max()))
+        if (*i < 0 || *i > static_cast<std::int64_t>(
+                               std::numeric_limits<std::uint32_t>::max()))
             return std::nullopt;
         return static_cast<std::uint32_t>(*i);
     }
@@ -239,6 +238,15 @@ void parseTracerAttestation(const toml::table &t,
     c.renewal = readString(t["renewal"]);
     c.bind_to_runtime_seal = readBool(t["bind_to_runtime_seal"]);
     c.virtualize_helpers = readBool(t["virtualize_helpers"]);
+}
+
+void parseSealedBlob(const toml::table &t, SealedBlobConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.max_blobs = readU32(t["max_blobs"]);
+    c.max_blob_bytes = readU32(t["max_blob_bytes"]);
+    readStrArr(t["key_sources"], c.key_sources);
+    c.delivery = readString(t["delivery"]);
+    c.zeroize_after_use = readBool(t["zeroize_after_use"]);
 }
 
 void parseSelfChecksum(const toml::table &t, SelfChecksumConfig &c) {
@@ -450,6 +458,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseExternalSecretBinding(*t, pc.external_secret_binding);
     if (auto *t = p["tracer_attestation"].as_table())
         parseTracerAttestation(*t, pc.tracer_attestation);
+    if (auto *t = p["sealed_blob"].as_table())
+        parseSealedBlob(*t, pc.sealed_blob);
     if (auto *t = p["self_checksum_constants"].as_table())
         parseSelfChecksum(*t, pc.self_checksum);
     if (auto *t = p["data_flow_integrity"].as_table())

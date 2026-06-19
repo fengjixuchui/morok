@@ -48,6 +48,7 @@
 #include "morok/passes/PerBuildPolymorphism.hpp"
 #include "morok/passes/PhiTangling.hpp"
 #include "morok/passes/PointerLaundering.hpp"
+#include "morok/passes/SealedBlob.hpp"
 #include "morok/passes/SelfChecksumConstants.hpp"
 #include "morok/passes/ShamirShare.hpp"
 #include "morok/passes/SplitBasicBlocks.hpp"
@@ -62,14 +63,14 @@
 #include "morok/passes/TypePunning.hpp"
 #include "morok/passes/UniformPrimitiveLowering.hpp"
 #include "morok/passes/VTableIntegrity.hpp"
-#include "morok/passes/Virtualization.hpp"
 #include "morok/passes/VectorObfuscation.hpp"
+#include "morok/passes/Virtualization.hpp"
 #include "morok/pipeline/Scheduler.hpp"
 
 #include "morok/ir/Annotations.hpp"
 
-#include "llvm/Demangle/Demangle.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -164,9 +165,8 @@ class EarlyOptimizerAmplificationPass
 public:
     explicit EarlyOptimizerAmplificationPass(morok::config::Config config)
         : config_(std::move(config)),
-          engine_(morok::core::Xoshiro256pp::fromSeed(config_.seed == 0
-                                                          ? 0x1337
-                                                          : config_.seed)) {}
+          engine_(morok::core::Xoshiro256pp::fromSeed(
+              config_.seed == 0 ? 0x1337 : config_.seed)) {}
 
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
         if (F.isDeclaration() || F.getName().starts_with("morok."))
@@ -181,9 +181,8 @@ public:
             [](std::string_view s) -> std::string {
             return llvm::demangle(std::string(s));
         };
-        const morok::config::PassConfig eff =
-            morok::config::resolve(config_, M->getSourceFileName(),
-                                   F.getName(), demangle);
+        const morok::config::PassConfig eff = morok::config::resolve(
+            config_, M->getSourceFileName(), F.getName(), demangle);
 
         // Yield VM-bound functions to the virtualizer untouched: amplification
         // would bloat them past the lifter's instruction budget (it runs later,
@@ -307,7 +306,8 @@ private:
     // A plausible VM lift target: a small, leaf, local-linkage function whose
     // signature is scalar (integer/pointer/void).  The virtualizer applies the
     // precise eligibility check later; this only has to avoid pinning functions
-    // that obviously can never lift (so the inliner stays free to flatten them).
+    // that obviously can never lift (so the inliner stays free to flatten
+    // them).
     static bool isCandidate(const Function &F) {
         if (F.isDeclaration() || F.isVarArg() || !F.hasLocalLinkage())
             return false;
@@ -317,8 +317,7 @@ private:
             F.hasFnAttribute(Attribute::AlwaysInline) ||
             F.hasFnAttribute(Attribute::InlineHint) ||
             F.hasFnAttribute(Attribute::Naked) ||
-            F.hasFnAttribute(Attribute::OptimizeNone) ||
-            F.hasPersonalityFn())
+            F.hasFnAttribute(Attribute::OptimizeNone) || F.hasPersonalityFn())
             return false;
 
         Type *Ret = F.getReturnType();
@@ -350,7 +349,8 @@ private:
                     const Function *Callee = CB->getCalledFunction();
                     if (Callee && Callee->isIntrinsic())
                         continue;
-                    if (!Callee || Callee->isDeclaration() || Callee->isVarArg())
+                    if (!Callee || Callee->isDeclaration() ||
+                        Callee->isVarArg())
                         return false;
                 }
             }
@@ -365,328 +365,331 @@ private:
 namespace morok::pipeline {
 
 PassPluginLibraryInfo getPluginInfo() {
-    return {LLVM_PLUGIN_API_VERSION, "Morok", LLVM_VERSION_STRING,
-            [](PassBuilder &PB) {
-                // Module pipeline: -passes=morok
-                PB.registerPipelineParsingCallback(
-                    [](StringRef name, ModulePassManager &MPM,
-                       ArrayRef<PassBuilder::PipelineElement>) {
-                        if (name == "morok") {
-                            MPM.addPass(MorokPass(loadConfig()));
-                            return true;
-                        }
-                        if (name == "morok-strenc") {
-                            MPM.addPass(passes::StringEncryptionPass());
-                            return true;
-                        }
-                        if (name == "morok-funcwrap") {
-                            MPM.addPass(passes::FunctionWrapperPass());
-                            return true;
-                        }
-                        if (name == "morok-fco") {
-                            MPM.addPass(passes::FunctionCallObfuscatePass());
-                            return true;
-                        }
-                        if (name == "morok-ckd") {
-                            MPM.addPass(passes::CallerKeyedDispatchPass());
-                            return true;
-                        }
-                        if (name == "morok-afm") {
-                            MPM.addPass(
-                                passes::AdversarialFunctionMergingPass());
-                            return true;
-                        }
-                        if (name == "morok-selftune") {
-                            MPM.addPass(passes::AdversarialSelfTuningPass());
-                            return true;
-                        }
-                        if (name == "morok-polymorph") {
-                            MPM.addPass(passes::PerBuildPolymorphismPass());
-                            return true;
-                        }
-                        if (name == "morok-ifsm") {
-                            MPM.addPass(passes::InterproceduralFsmPass());
-                            return true;
-                        }
-                        if (name == "morok-vm") {
-                            MPM.addPass(passes::VirtualizationPass());
-                            return true;
-                        }
-                        if (name == "morok-selfdecrypt") {
-                            MPM.addPass(passes::HashGatedSelfDecryptPass());
-                            return true;
-                        }
-                        if (name == "morok-proofbind") {
-                            MPM.addPass(passes::ExternalSecretBindingPass());
-                            return true;
-                        }
-                        if (name == "morok-tracer") {
-                            MPM.addPass(passes::TracerAttestationPass());
-                            return true;
-                        }
-                        if (name == "morok-antidbg") {
-                            MPM.addPass(passes::AntiDebuggingPass());
-                            return true;
-                        }
-                        if (name == "morok-antihook") {
-                            MPM.addPass(passes::AntiHookingPass());
-                            return true;
-                        }
-                        if (name == "morok-antiacd") {
-                            MPM.addPass(passes::AntiClassDumpPass());
-                            return true;
-                        }
-                        if (name == "morok-winpe") {
-                            MPM.addPass(passes::WindowsPEFoundationPass());
-                            return true;
-                        }
-                        if (name == "morok-winpeb") {
-                            MPM.addPass(passes::WindowsPebHeapDebugPass());
-                            return true;
-                        }
-                        if (name == "morok-windbgobj") {
-                            MPM.addPass(passes::WindowsDebugObjectPass());
-                            return true;
-                        }
-                        if (name == "morok-winthide") {
-                            MPM.addPass(passes::WindowsThreadHidePass());
-                            return true;
-                        }
-                        if (name == "morok-winattach") {
-                            MPM.addPass(passes::WindowsAntiAttachPass());
-                            return true;
-                        }
-                        if (name == "morok-winkdbg") {
-                            MPM.addPass(passes::WindowsKernelDebuggerPass());
-                            return true;
-                        }
-                        if (name == "morok-winsys") {
-                            MPM.addPass(passes::WindowsSyscallsPass());
-                            return true;
-                        }
-                        if (name == "morok-winunhook") {
-                            MPM.addPass(passes::WindowsUnhookPass());
-                            return true;
-                        }
-                        if (name == "morok-winveh") {
-                            MPM.addPass(passes::WindowsVehAuditPass());
-                            return true;
-                        }
-                        if (name == "morok-winmitigate") {
-                            MPM.addPass(passes::WindowsProcessMitigationsPass());
-                            return true;
-                        }
-                        if (name == "morok-timing") {
-                            MPM.addPass(passes::TimingOraclePass());
-                            return true;
-                        }
-                        if (name == "morok-trap") {
-                            MPM.addPass(passes::TrapOraclePass());
-                            return true;
-                        }
-                        if (name == "morok-pftlb") {
-                            MPM.addPass(passes::PageFaultTlbOraclePass());
-                            return true;
-                        }
-                        if (name == "morok-cachetime") {
-                            MPM.addPass(passes::CacheTimingOraclePass());
-                            return true;
-                        }
-                        if (name == "morok-microcanary") {
-                            MPM.addPass(
-                                passes::MicroarchitecturalCanaryPass());
-                            return true;
-                        }
-                        if (name == "morok-nanomites") {
-                            MPM.addPass(passes::NanomitesPass());
-                            return true;
-                        }
-                        if (name == "morok-decoystr") {
-                            MPM.addPass(passes::DecoyStringsPass());
-                            return true;
-                        }
-                        if (name == "morok-vtable") {
-                            MPM.addPass(passes::VTableIntegrityPass());
-                            return true;
-                        }
-                        return false;
-                    });
 
-                // Function pipelines: -passes=morok-substitution / morok-mba
-                PB.registerPipelineParsingCallback(
-                    [](StringRef name, FunctionPassManager &FPM,
-                       ArrayRef<PassBuilder::PipelineElement>) {
-                        if (name == "morok-substitution") {
-                            FPM.addPass(passes::SubstitutionPass());
-                            return true;
-                        }
-                        if (name == "morok-mba") {
-                            FPM.addPass(passes::MbaPass());
-                            return true;
-                        }
-                        if (name == "morok-optamp") {
-                            FPM.addPass(passes::OptimizerAmplificationPass());
-                            return true;
-                        }
-                        if (name == "morok-threshold") {
-                            FPM.addPass(passes::SubThresholdPersistencePass());
-                            return true;
-                        }
-                        if (name == "morok-constenc") {
-                            FPM.addPass(passes::ConstantEncryptionPass());
-                            return true;
-                        }
-                        if (name == "morok-selfcheck") {
-                            FPM.addPass(passes::SelfChecksumConstantsPass());
-                            return true;
-                        }
-                        if (name == "morok-mutualguard") {
-                            FPM.addPass(passes::MutualGuardGraphPass());
-                            return true;
-                        }
-                        if (name == "morok-shamir") {
-                            FPM.addPass(passes::ShamirSharePass());
-                            return true;
-                        }
-                        if (name == "morok-split") {
-                            FPM.addPass(passes::SplitBasicBlocksPass());
-                            return true;
-                        }
-                        if (name == "morok-stackcoalesce") {
-                            FPM.addPass(passes::StackCoalescingPass());
-                            return true;
-                        }
-                        if (name == "morok-stackdelta") {
-                            FPM.addPass(passes::StackDeltaGamesPass());
-                            return true;
-                        }
-                        if (name == "morok-ptrlaunder") {
-                            FPM.addPass(passes::PointerLaunderingPass());
-                            return true;
-                        }
-                        if (name == "morok-typepun") {
-                            FPM.addPass(passes::TypePunningPass());
-                            return true;
-                        }
-                        if (name == "morok-phitangle") {
-                            FPM.addPass(passes::PhiTanglingPass());
-                            return true;
-                        }
-                        if (name == "morok-aliasop") {
-                            FPM.addPass(passes::AliasOpaquePredicatesPass());
-                            return true;
-                        }
-                        if (name == "morok-extop") {
-                            FPM.addPass(
-                                passes::ExternalOpaquePredicatesPass());
-                            return true;
-                        }
-                        if (name == "morok-decoy") {
-                            FPM.addPass(passes::CoherentDecoysPass());
-                            return true;
-                        }
-                        if (name == "morok-bcf") {
-                            FPM.addPass(passes::BogusControlFlowPass());
-                            return true;
-                        }
-                        if (name == "morok-flatten") {
-                            FPM.addPass(passes::FlatteningPass());
-                            return true;
-                        }
-                        if (name == "morok-entfla") {
-                            FPM.addPass(passes::DataEntangledFlatteningPass());
-                            return true;
-                        }
-                        if (name == "morok-nistate") {
-                            FPM.addPass(passes::NonInvertibleStatePass());
-                            return true;
-                        }
-                        if (name == "morok-stateop") {
-                            FPM.addPass(passes::StateOpaquePredicatesPass());
-                            return true;
-                        }
-                        if (name == "morok-csm") {
-                            FPM.addPass(passes::ChaosStateMachinePass());
-                            return true;
-                        }
-                        if (name == "morok-tfa") {
-                            passes::CsmParams p;
-                            p.generator = passes::CsmGenerator::TFunction;
-                            FPM.addPass(passes::ChaosStateMachinePass(p));
-                            return true;
-                        }
-                        if (name == "morok-vec") {
-                            FPM.addPass(passes::VectorObfuscationPass());
-                            return true;
-                        }
-                        if (name == "morok-tablearith") {
-                            FPM.addPass(passes::ArithmeticTablesPass());
-                            return true;
-                        }
-                        if (name == "morok-dfi") {
-                            FPM.addPass(passes::DataFlowIntegrityPass());
-                            return true;
-                        }
-                        if (name == "morok-uniform") {
-                            FPM.addPass(passes::UniformPrimitiveLoweringPass());
-                            return true;
-                        }
-                        if (name == "morok-pathexplode") {
-                            FPM.addPass(passes::PathExplosionPass());
-                            return true;
-                        }
-                        if (name == "morok-mq") {
-                            FPM.addPass(passes::MqGatePass());
-                            return true;
-                        }
-                        if (name == "morok-tracekey") {
-                            FPM.addPass(passes::TraceKeyingPass());
-                            return true;
-                        }
-                        if (name == "morok-microstress") {
-                            FPM.addPass(passes::MicrocodeStressPass());
-                            return true;
-                        }
-                        if (name == "morok-dispatchless") {
-                            FPM.addPass(passes::DispatcherlessRoutingPass());
-                            return true;
-                        }
-                        if (name == "morok-indbr") {
-                            FPM.addPass(passes::IndirectBranchPass());
-                            return true;
-                        }
-                        return false;
-                    });
+    return {
+        LLVM_PLUGIN_API_VERSION, "Morok", LLVM_VERSION_STRING,
+        [](PassBuilder &PB) {
+            // Module pipeline: -passes=morok
+            PB.registerPipelineParsingCallback(
+                [](StringRef name, ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                    if (name == "morok") {
+                        MPM.addPass(MorokPass(loadConfig()));
+                        return true;
 
-                // Auto-injection for `clang -fpass-plugin=... -mllvm -morok`.
-                PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM,
-                                                      OptimizationLevel,
-                                                      ThinOrFullLTOPhase) {
-                    if (morokAutoInjectEnabled()) {
-                        auto cfg = loadConfig();
-                        cfg.passes.opt_amplify.enabled = false;
-                        MPM.addPass(MorokPass(cfg));
                     }
+                    if (name == "morok-strenc") {
+                        MPM.addPass(passes::StringEncryptionPass());
+                        return true;
+                    }
+                    if (name == "morok-funcwrap") {
+                        MPM.addPass(passes::FunctionWrapperPass());
+                        return true;
+                    }
+                    if (name == "morok-fco") {
+                        MPM.addPass(passes::FunctionCallObfuscatePass());
+                        return true;
+                    }
+                    if (name == "morok-ckd") {
+                        MPM.addPass(passes::CallerKeyedDispatchPass());
+                        return true;
+                    }
+                    if (name == "morok-afm") {
+                        MPM.addPass(passes::AdversarialFunctionMergingPass());
+                        return true;
+                    }
+                    if (name == "morok-selftune") {
+                        MPM.addPass(passes::AdversarialSelfTuningPass());
+                        return true;
+                    }
+                    if (name == "morok-polymorph") {
+                        MPM.addPass(passes::PerBuildPolymorphismPass());
+                        return true;
+                    }
+                    if (name == "morok-ifsm") {
+                        MPM.addPass(passes::InterproceduralFsmPass());
+                        return true;
+                    }
+                    if (name == "morok-vm") {
+                        MPM.addPass(passes::VirtualizationPass());
+                        return true;
+                    }
+                    if (name == "morok-selfdecrypt") {
+                        MPM.addPass(passes::HashGatedSelfDecryptPass());
+                        return true;
+                    }
+                    if (name == "morok-proofbind") {
+                        MPM.addPass(passes::ExternalSecretBindingPass());
+                        return true;
+                    }
+                    if (name == "morok-tracer") {
+                        MPM.addPass(passes::TracerAttestationPass());
+                        return true;
+                    }
+                    if (name == "morok-sealedblob") {
+                        MPM.addPass(passes::SealedBlobPass());
+                        return true;
+                    }
+                    if (name == "morok-antidbg") {
+                        MPM.addPass(passes::AntiDebuggingPass());
+                        return true;
+                    }
+                    if (name == "morok-antihook") {
+                        MPM.addPass(passes::AntiHookingPass());
+                        return true;
+                    }
+                    if (name == "morok-antiacd") {
+                        MPM.addPass(passes::AntiClassDumpPass());
+                        return true;
+                    }
+                    if (name == "morok-winpe") {
+                        MPM.addPass(passes::WindowsPEFoundationPass());
+                        return true;
+                    }
+                    if (name == "morok-winpeb") {
+                        MPM.addPass(passes::WindowsPebHeapDebugPass());
+                        return true;
+                    }
+                    if (name == "morok-windbgobj") {
+                        MPM.addPass(passes::WindowsDebugObjectPass());
+                        return true;
+                    }
+                    if (name == "morok-winthide") {
+                        MPM.addPass(passes::WindowsThreadHidePass());
+                        return true;
+                    }
+                    if (name == "morok-winattach") {
+                        MPM.addPass(passes::WindowsAntiAttachPass());
+                        return true;
+                    }
+                    if (name == "morok-winkdbg") {
+                        MPM.addPass(passes::WindowsKernelDebuggerPass());
+                        return true;
+                    }
+                    if (name == "morok-winsys") {
+                        MPM.addPass(passes::WindowsSyscallsPass());
+                        return true;
+                    }
+                    if (name == "morok-winunhook") {
+                        MPM.addPass(passes::WindowsUnhookPass());
+                        return true;
+                    }
+                    if (name == "morok-winveh") {
+                        MPM.addPass(passes::WindowsVehAuditPass());
+                        return true;
+                    }
+                    if (name == "morok-winmitigate") {
+                        MPM.addPass(passes::WindowsProcessMitigationsPass());
+                        return true;
+                    }
+                    if (name == "morok-timing") {
+                        MPM.addPass(passes::TimingOraclePass());
+                        return true;
+                    }
+                    if (name == "morok-trap") {
+                        MPM.addPass(passes::TrapOraclePass());
+                        return true;
+                    }
+                    if (name == "morok-pftlb") {
+                        MPM.addPass(passes::PageFaultTlbOraclePass());
+                        return true;
+                    }
+                    if (name == "morok-cachetime") {
+                        MPM.addPass(passes::CacheTimingOraclePass());
+                        return true;
+                    }
+                    if (name == "morok-microcanary") {
+                        MPM.addPass(passes::MicroarchitecturalCanaryPass());
+                        return true;
+                    }
+                    if (name == "morok-nanomites") {
+                        MPM.addPass(passes::NanomitesPass());
+                        return true;
+                    }
+                    if (name == "morok-decoystr") {
+                        MPM.addPass(passes::DecoyStringsPass());
+                        return true;
+                    }
+                    if (name == "morok-vtable") {
+                        MPM.addPass(passes::VTableIntegrityPass());
+                        return true;
+                    }
+                    return false;
                 });
 
-                PB.registerVectorizerStartEPCallback(
-                    [](FunctionPassManager &FPM, OptimizationLevel) {
-                        if (morokAutoInjectEnabled())
-                            FPM.addPass(
-                                EarlyOptimizerAmplificationPass(loadConfig()));
+            // Function pipelines: -passes=morok-substitution / morok-mba
+            PB.registerPipelineParsingCallback(
+                [](StringRef name, FunctionPassManager &FPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                    if (name == "morok-substitution") {
+                        FPM.addPass(passes::SubstitutionPass());
+                        return true;
+                    }
+                    if (name == "morok-mba") {
+                        FPM.addPass(passes::MbaPass());
+                        return true;
+                    }
+                    if (name == "morok-optamp") {
+                        FPM.addPass(passes::OptimizerAmplificationPass());
+                        return true;
+                    }
+                    if (name == "morok-threshold") {
+                        FPM.addPass(passes::SubThresholdPersistencePass());
+                        return true;
+                    }
+                    if (name == "morok-constenc") {
+                        FPM.addPass(passes::ConstantEncryptionPass());
+                        return true;
+                    }
+                    if (name == "morok-selfcheck") {
+                        FPM.addPass(passes::SelfChecksumConstantsPass());
+                        return true;
+                    }
+                    if (name == "morok-mutualguard") {
+                        FPM.addPass(passes::MutualGuardGraphPass());
+                        return true;
+                    }
+                    if (name == "morok-shamir") {
+                        FPM.addPass(passes::ShamirSharePass());
+                        return true;
+                    }
+                    if (name == "morok-split") {
+                        FPM.addPass(passes::SplitBasicBlocksPass());
+                        return true;
+                    }
+                    if (name == "morok-stackcoalesce") {
+                        FPM.addPass(passes::StackCoalescingPass());
+                        return true;
+                    }
+                    if (name == "morok-stackdelta") {
+                        FPM.addPass(passes::StackDeltaGamesPass());
+                        return true;
+                    }
+                    if (name == "morok-ptrlaunder") {
+                        FPM.addPass(passes::PointerLaunderingPass());
+                        return true;
+                    }
+                    if (name == "morok-typepun") {
+                        FPM.addPass(passes::TypePunningPass());
+                        return true;
+                    }
+                    if (name == "morok-phitangle") {
+                        FPM.addPass(passes::PhiTanglingPass());
+                        return true;
+                    }
+                    if (name == "morok-aliasop") {
+                        FPM.addPass(passes::AliasOpaquePredicatesPass());
+                        return true;
+                    }
+                    if (name == "morok-extop") {
+                        FPM.addPass(passes::ExternalOpaquePredicatesPass());
+                        return true;
+                    }
+                    if (name == "morok-decoy") {
+                        FPM.addPass(passes::CoherentDecoysPass());
+                        return true;
+                    }
+                    if (name == "morok-bcf") {
+                        FPM.addPass(passes::BogusControlFlowPass());
+                        return true;
+                    }
+                    if (name == "morok-flatten") {
+                        FPM.addPass(passes::FlatteningPass());
+                        return true;
+                    }
+                    if (name == "morok-entfla") {
+                        FPM.addPass(passes::DataEntangledFlatteningPass());
+                        return true;
+                    }
+                    if (name == "morok-nistate") {
+                        FPM.addPass(passes::NonInvertibleStatePass());
+                        return true;
+                    }
+                    if (name == "morok-stateop") {
+                        FPM.addPass(passes::StateOpaquePredicatesPass());
+                        return true;
+                    }
+                    if (name == "morok-csm") {
+                        FPM.addPass(passes::ChaosStateMachinePass());
+                        return true;
+                    }
+                    if (name == "morok-tfa") {
+                        passes::CsmParams p;
+                        p.generator = passes::CsmGenerator::TFunction;
+                        FPM.addPass(passes::ChaosStateMachinePass(p));
+                        return true;
+                    }
+                    if (name == "morok-vec") {
+                        FPM.addPass(passes::VectorObfuscationPass());
+                        return true;
+                    }
+                    if (name == "morok-tablearith") {
+                        FPM.addPass(passes::ArithmeticTablesPass());
+                        return true;
+                    }
+                    if (name == "morok-dfi") {
+                        FPM.addPass(passes::DataFlowIntegrityPass());
+                        return true;
+                    }
+                    if (name == "morok-uniform") {
+                        FPM.addPass(passes::UniformPrimitiveLoweringPass());
+                        return true;
+                    }
+                    if (name == "morok-pathexplode") {
+                        FPM.addPass(passes::PathExplosionPass());
+                        return true;
+                    }
+                    if (name == "morok-mq") {
+                        FPM.addPass(passes::MqGatePass());
+                        return true;
+                    }
+                    if (name == "morok-tracekey") {
+                        FPM.addPass(passes::TraceKeyingPass());
+                        return true;
+                    }
+                    if (name == "morok-microstress") {
+                        FPM.addPass(passes::MicrocodeStressPass());
+                        return true;
+                    }
+                    if (name == "morok-dispatchless") {
+                        FPM.addPass(passes::DispatcherlessRoutingPass());
+                        return true;
+                    }
+                    if (name == "morok-indbr") {
+                        FPM.addPass(passes::IndirectBranchPass());
+                        return true;
+                    }
+                    return false;
                 });
 
-                // Pre-inline: pin VM-liftable leaf helpers with noinline so they
-                // survive the inliner and are still standalone functions when the
-                // virtualizer runs at OptimizerLast.  Gated on -morok + an
-                // enabled virtualization config, so it is a no-op otherwise.
-                PB.registerPipelineEarlySimplificationEPCallback(
-                    [](ModulePassManager &MPM, OptimizationLevel,
-                       ThinOrFullLTOPhase) {
-                        if (EnableMorok)
-                            MPM.addPass(VmCandidatePreserverPass(loadConfig()));
-                    });
-            }};
+            // Auto-injection for `clang -fpass-plugin=... -mllvm -morok`.
+            PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM,
+                                                  OptimizationLevel,
+                                                  ThinOrFullLTOPhase) {
+                if (morokAutoInjectEnabled()) {
+                    auto cfg = loadConfig();
+                    cfg.passes.opt_amplify.enabled = false;
+                    MPM.addPass(MorokPass(cfg));
+                }
+            });
+
+            PB.registerVectorizerStartEPCallback([](FunctionPassManager &FPM,
+                                                    OptimizationLevel) {
+                if (morokAutoInjectEnabled())
+                    FPM.addPass(EarlyOptimizerAmplificationPass(loadConfig()));
+            });
+
+            // Pre-inline: pin VM-liftable leaf helpers with noinline so they
+            // survive the inliner and are still standalone functions when the
+            // virtualizer runs at OptimizerLast.  Gated on -morok + an
+            // enabled virtualization config, so it is a no-op otherwise.
+            PB.registerPipelineEarlySimplificationEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel,
+                   ThinOrFullLTOPhase) {
+                    if (EnableMorok)
+                        MPM.addPass(VmCandidatePreserverPass(loadConfig()));
+                });
+        }};
 }
 
 } // namespace morok::pipeline

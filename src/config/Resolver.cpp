@@ -169,7 +169,8 @@ void merge(PassConfig &dst, const PassConfig &src) {
     // External proof/license binding
     mergeOpt(dst.external_secret_binding.enabled,
              src.external_secret_binding.enabled);
-    mergeOpt(dst.external_secret_binding.mode, src.external_secret_binding.mode);
+    mergeOpt(dst.external_secret_binding.mode,
+             src.external_secret_binding.mode);
     mergeOpt(dst.external_secret_binding.public_key,
              src.external_secret_binding.public_key);
     mergeOpt(dst.external_secret_binding.identity_policy,
@@ -187,6 +188,14 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.tracer_attestation.bind_to_runtime_seal);
     mergeOpt(dst.tracer_attestation.virtualize_helpers,
              src.tracer_attestation.virtualize_helpers);
+    // General sealed byte blobs
+    mergeOpt(dst.sealed_blob.enabled, src.sealed_blob.enabled);
+    mergeOpt(dst.sealed_blob.max_blobs, src.sealed_blob.max_blobs);
+    mergeOpt(dst.sealed_blob.max_blob_bytes, src.sealed_blob.max_blob_bytes);
+    mergeVec(dst.sealed_blob.key_sources, src.sealed_blob.key_sources);
+    mergeOpt(dst.sealed_blob.delivery, src.sealed_blob.delivery);
+    mergeOpt(dst.sealed_blob.zeroize_after_use,
+             src.sealed_blob.zeroize_after_use);
     // Self-checksum-fused constants
     mergeOpt(dst.self_checksum.enabled, src.self_checksum.enabled);
     mergeOpt(dst.self_checksum.probability, src.self_checksum.probability);
@@ -332,7 +341,8 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.windows_pe_foundation.enabled);
     mergeOpt(dst.windows_peb_heap_debug.enabled,
              src.windows_peb_heap_debug.enabled);
-    mergeOpt(dst.windows_debug_object.enabled, src.windows_debug_object.enabled);
+    mergeOpt(dst.windows_debug_object.enabled,
+             src.windows_debug_object.enabled);
     mergeOpt(dst.windows_thread_hide.enabled, src.windows_thread_hide.enabled);
     mergeOpt(dst.windows_anti_attach.enabled, src.windows_anti_attach.enabled);
     mergeOpt(dst.windows_kernel_debugger.enabled,
