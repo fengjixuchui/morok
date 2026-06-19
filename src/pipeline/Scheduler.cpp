@@ -282,6 +282,16 @@ externalOpaqueParams(const config::ExternalOpConfig &C, bool Sensitive,
     return P;
 }
 
+passes::HashGatedSelfDecryptParams
+hashSelfDecryptParams(const config::HashSelfDecryptConfig &C) {
+    passes::HashGatedSelfDecryptParams P;
+    P.probability = C.probability.value_or(100);
+    P.max_payloads = C.max_payloads.value_or(2);
+    P.max_payload_bytes = C.max_payload_bytes.value_or(P.max_payload_bytes);
+    P.context_keying = C.context_keying.value_or(true);
+    return P;
+}
+
 bool passEnabledOrImplicitSensitive(config::Opt<bool> Enabled, bool Sensitive) {
     if (Enabled.has_value())
         return *Enabled;
@@ -402,16 +412,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
     if (InitialModuleGrowthOk &&
         config_.passes.hash_self_decrypt.enabled.value_or(false)) {
-        passes::HashGatedSelfDecryptParams p;
-        p.probability =
-            config_.passes.hash_self_decrypt.probability.value_or(100);
-        p.max_payloads =
-            config_.passes.hash_self_decrypt.max_payloads.value_or(2);
-        p.max_payload_bytes =
-            config_.passes.hash_self_decrypt.max_payload_bytes.value_or(
-                p.max_payload_bytes);
-        p.context_keying =
-            config_.passes.hash_self_decrypt.context_keying.value_or(true);
+        passes::HashGatedSelfDecryptParams p =
+            hashSelfDecryptParams(config_.passes.hash_self_decrypt);
         changed |= passes::hashGatedSelfDecryptModule(M, p, rng);
     }
 
@@ -997,6 +999,17 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
 
     if (InitialModuleGrowthOk)
         changed |= hardenSensitiveGeneratedFunctions(M, config_.passes, rng);
+
+    // Re-scan after the late generated-helper stage.  Already wrapped user VM
+    // bytecode is mutable and skipped by HashGatedSelfDecrypt, while any new
+    // helper bytecode emitted late is still a constant morok.vm.bytecode.*
+    // payload and receives the same lazy ensure/seal boundary.
+    if (InitialModuleGrowthOk &&
+        config_.passes.hash_self_decrypt.enabled.value_or(false)) {
+        passes::HashGatedSelfDecryptParams p =
+            hashSelfDecryptParams(config_.passes.hash_self_decrypt);
+        changed |= passes::hashGatedSelfDecryptModule(M, p, rng);
+    }
 
     // Nanomites consume the branch shape that survives all per-function CFG
     // passes.  Keep them late so their trap sites are not restructured away.

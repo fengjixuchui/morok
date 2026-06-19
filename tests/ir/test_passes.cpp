@@ -8017,6 +8017,80 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("hashGatedSelfDecryptModule rescans late VM bytecode without rewrapping") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+@morok.vm.bytecode.first = private constant [8 x i8] c"ABCDEFGH"
+
+define i32 @morok.vm.first.exec(i32 %x) {
+entry:
+  %y = add i32 %x, 1
+  ret i32 %y
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(175);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::HashGatedSelfDecryptParams params;
+    params.probability = 100;
+    params.max_payloads = 4;
+    params.max_payload_bytes = 64;
+
+    CHECK(morok::passes::hashGatedSelfDecryptModule(*M, params, rng));
+
+    GlobalVariable *FirstBytecode =
+        M->getGlobalVariable("morok.vm.bytecode.first", true);
+    REQUIRE(FirstBytecode);
+    CHECK_FALSE(FirstBytecode->isConstant());
+    Function *FirstHelper = M->getFunction("morok.vm.first.exec");
+    REQUIRE(FirstHelper);
+    Function *FirstEnsure = M->getFunction("morok.sdb.ensure.first");
+    REQUIRE(FirstEnsure);
+    Function *FirstSeal = M->getFunction("morok.sdb.seal.first");
+    REQUIRE(FirstSeal);
+    CHECK(countCallsTo(*FirstHelper, "morok.sdb.ensure.first") == 1u);
+    CHECK(countCallsTo(*FirstHelper, "morok.sdb.seal.first") == 1u);
+
+    auto *I8 = Type::getInt8Ty(ctx);
+    auto *I32 = Type::getInt32Ty(ctx);
+    std::vector<std::uint8_t> LateBytes{'l', 'a', 't', 'e',
+                                        '-', 'v', 'm', '1'};
+    auto *LateTy = ArrayType::get(I8, LateBytes.size());
+    auto *LateInit = ConstantDataArray::get(ctx, LateBytes);
+    auto *LateBytecode = new GlobalVariable(
+        *M, LateTy, /*isConstant=*/true, GlobalValue::PrivateLinkage, LateInit,
+        "morok.vm.bytecode.late");
+    LateBytecode->setAlignment(Align(1));
+
+    auto *LateFnTy = FunctionType::get(I32, {I32}, false);
+    Function *LateHelper = Function::Create(
+        LateFnTy, GlobalValue::InternalLinkage, "morok.vm.late.exec", M.get());
+    BasicBlock *Entry = BasicBlock::Create(ctx, "entry", LateHelper);
+    IRBuilder<> B(Entry);
+    Argument *Arg = &*LateHelper->arg_begin();
+    Value *Out = B.CreateXor(Arg, ConstantInt::get(I32, 7), "late.mix");
+    B.CreateRet(Out);
+
+    CHECK(morok::passes::hashGatedSelfDecryptModule(*M, params, rng));
+
+    CHECK_FALSE(FirstBytecode->isConstant());
+    CHECK(M->getFunction("morok.sdb.ensure.first") == FirstEnsure);
+    CHECK(M->getFunction("morok.sdb.seal.first") == FirstSeal);
+    CHECK(countCallsTo(*FirstHelper, "morok.sdb.ensure.first") == 1u);
+    CHECK(countCallsTo(*FirstHelper, "morok.sdb.seal.first") == 1u);
+
+    CHECK_FALSE(LateBytecode->isConstant());
+    Function *LateEnsure = M->getFunction("morok.sdb.ensure.late");
+    REQUIRE(LateEnsure);
+    Function *LateSeal = M->getFunction("morok.sdb.seal.late");
+    REQUIRE(LateSeal);
+    CHECK(countCallsTo(*LateHelper, "morok.sdb.ensure.late") == 1u);
+    CHECK(countCallsTo(*LateHelper, "morok.sdb.seal.late") == 1u);
+    CHECK(countGlobals(*M, "morok.sdb.ready.first") == 1u);
+    CHECK(countGlobals(*M, "morok.sdb.ready.late") == 1u);
+    CHECK(countGlobals(*M, "morok.sdb.ready.") == 2u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("hashGatedSelfDecryptModule skips oversized bytecode payloads") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
