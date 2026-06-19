@@ -338,8 +338,20 @@ Value *emitRuntimeOpaqueZero(IRBuilderBase &B, Module &M, std::uint64_t salt,
 // unknown, so the keystream never folds back to readable text.
 GlobalVariable *cloakSeed(Module &M, IRRandom &rng) {
     if (GlobalVariable *Existing =
-            M.getGlobalVariable("morok.cloak.seed", /*AllowInternal=*/true))
-        return Existing;
+            M.getGlobalVariable("morok.cloak.seed", /*AllowInternal=*/true)) {
+        // Only reuse a global shaped like the seed we emit: an i64 with a
+        // ConstantInt initializer.  A foreign @morok.cloak.seed squatting the
+        // name (an external decl with no initializer, a wrong-typed global, or a
+        // non-ConstantInt initializer) must not be reused: emitCloakedSymbol
+        // reads its initializer and the runtime loads it as i64, so reusing it
+        // would crash/UB the compiler on untrusted IR or a future name clash.
+        if (Existing->getValueType()->isIntegerTy(64) &&
+            Existing->hasInitializer() &&
+            isa<ConstantInt>(Existing->getInitializer()))
+            return Existing;
+        // Fall through and create our own; GlobalVariable auto-renames on the
+        // name collision, and each cloak site then gets a self-consistent seed.
+    }
     auto *I64 = Type::getInt64Ty(M.getContext());
     auto *GV = new GlobalVariable(
         M, I64, /*isConstant=*/false, GlobalValue::PrivateLinkage,

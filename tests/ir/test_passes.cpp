@@ -10,6 +10,7 @@
 #include "morok/core/Xoshiro256.hpp"
 #include "morok/ir/Annotations.hpp"
 #include "morok/ir/IRRandom.hpp"
+#include "morok/ir/SymbolCloak.hpp"
 #include "morok/passes/AdversarialFunctionMerging.hpp"
 #include "morok/passes/AdversarialSelfTuning.hpp"
 #include "morok/passes/AliasOpaquePredicates.hpp"
@@ -10605,6 +10606,50 @@ TEST_CASE("stringEncryptModule falls back to per-string decryptors") {
     CHECK(sawStaticAnalysisBarrier);
     CHECK(sawDecryptorMixer);
     CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+// Regression for #37: cloakSeed() reused any global named @morok.cloak.seed,
+// then emitCloakedSymbol cast<ConstantInt> its initializer and the runtime
+// loaded it as i64.  A foreign/user-defined seed (external decl, wrong type, or
+// non-ConstantInt initializer) would crash/UB the compiler.  cloakSeed must
+// only reuse a valid i64 ConstantInt-initialized global and otherwise create a
+// fresh one.
+TEST_CASE("cloakSeed rejects a malformed pre-existing seed global") {
+    auto check = [](const char *ir) {
+        LLVMContext ctx;
+        auto M = parse(ctx, ir);
+        REQUIRE(M);
+        auto engine = morok::core::Xoshiro256pp::fromSeed(3701);
+        morok::ir::IRRandom rng(engine);
+
+        GlobalVariable *Seed = morok::ir::cloakSeed(*M, rng);
+        REQUIRE(Seed);
+        // The seed cloakSeed hands back must be a usable i64 ConstantInt global,
+        // never the malformed squatter.
+        CHECK(Seed->getValueType()->isIntegerTy(64));
+        REQUIRE(Seed->hasInitializer());
+        CHECK(isa<ConstantInt>(Seed->getInitializer()));
+
+        // End-to-end: emitting a cloaked symbol must not abort and must verify.
+        auto *FT = FunctionType::get(Type::getVoidTy(ctx), false);
+        auto *F = Function::Create(FT, GlobalValue::ExternalLinkage, "use_cloak",
+                                   M.get());
+        IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+        Value *Name = morok::ir::emitCloakedSymbol(B, *M, "dlopen", rng);
+        CHECK(Name != nullptr);
+        B.CreateRetVoid();
+        CHECK_FALSE(verifyModule(*M, &errs()));
+    };
+
+    // (a) external i64 declaration (no initializer)
+    check(R"ir(@morok.cloak.seed = external global i64)ir");
+    // (b) wrong-typed (i32) global
+    check(R"ir(@morok.cloak.seed = global i32 7)ir");
+    // (c) i64 with a non-ConstantInt initializer
+    check(R"ir(
+@anchor = global i32 0
+@morok.cloak.seed = global i64 ptrtoint (ptr @anchor to i64)
+)ir");
 }
 
 TEST_CASE("stringEncryptModule leaves generated decoy strings as plaintext bait") {
