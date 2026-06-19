@@ -9071,6 +9071,65 @@ TEST_CASE("sealedBlobModule skips escaping marked blobs without encrypting") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("sealedBlobModule skips mutable blobs with writeonly nocapture calls") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+@secret_blob = private global [5 x i8] c"wipe\00", section ".morok.sealed"
+
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
+
+define i8 @wipe_then_read() {
+entry:
+  call void @llvm.memset.p0.i64(ptr @secret_blob, i8 0, i64 5, i1 false)
+  %v = load i8, ptr @secret_blob, align 1
+  ret i8 %v
+}
+)ir");
+    REQUIRE(M);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(95203);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::SealedBlobParams params;
+    CHECK_FALSE(morok::passes::sealedBlobModule(*M, params, rng));
+    CHECK(hasReadableByteString(*M, "wipe"));
+    CHECK(M->getGlobalVariable("secret_blob", true) != nullptr);
+    CHECK(M->getFunction("morok.sealed.open.0") == nullptr);
+    Function *Reader = M->getFunction("wipe_then_read");
+    REQUIRE(Reader != nullptr);
+    CHECK(countCallsTo(*Reader, "llvm.memset.p0.i64") == 1u);
+    CHECK(countNamedInstructions(*Reader, "morok.sealed.local") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("sealedBlobModule rejects writeonly nocapture call users") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+@secret_blob = private constant [6 x i8] c"frozen", section ".morok.sealed"
+
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
+
+define void @overwrite() {
+entry:
+  call void @llvm.memset.p0.i64(ptr @secret_blob, i8 0, i64 6, i1 false)
+  ret void
+}
+)ir");
+    REQUIRE(M);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(95204);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::SealedBlobParams params;
+    CHECK_FALSE(morok::passes::sealedBlobModule(*M, params, rng));
+    CHECK(hasReadableByteString(*M, "frozen"));
+    CHECK(M->getGlobalVariable("secret_blob", true) != nullptr);
+    CHECK(M->getFunction("morok.sealed.open.0") == nullptr);
+    Function *Writer = M->getFunction("overwrite");
+    REQUIRE(Writer != nullptr);
+    CHECK(countCallsTo(*Writer, "llvm.memset.p0.i64") == 1u);
+    CHECK(countNamedInstructions(*Writer, "morok.sealed.local") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("selfChecksumConstantsFunction fuses constants with checksum data") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

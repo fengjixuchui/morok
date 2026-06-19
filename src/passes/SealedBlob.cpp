@@ -185,7 +185,9 @@ bool supportedLeafUse(Instruction *I, const Use &U) {
     if (auto *CB = dyn_cast<CallBase>(I)) {
         if (!CB->isArgOperand(&U))
             return false;
-        return CB->doesNotCapture(CB->getArgOperandNo(&U));
+        const unsigned ArgNo = CB->getArgOperandNo(&U);
+        return CB->doesNotCapture(ArgNo) &&
+               (CB->onlyReadsMemory(ArgNo) || CB->onlyReadsMemory());
     }
 
     return false;
@@ -432,7 +434,8 @@ Function *defineAccessor(Module &M, const BlobPlan &Plan,
 bool collectPlan(GlobalVariable &GV, const SealedBlobParams &Params,
                  ir::IRRandom &Rng, std::uint32_t Id, BlobPlan &Out) {
     if (!selected(GV) || !GV.hasInitializer() || !GV.hasLocalLinkage() ||
-        GV.isThreadLocal() || GV.getName().starts_with(kCipherPrefix))
+        !GV.isConstant() || GV.isThreadLocal() ||
+        GV.getName().starts_with(kCipherPrefix))
         return false;
 
     auto *ArrTy = dyn_cast<ArrayType>(GV.getValueType());
