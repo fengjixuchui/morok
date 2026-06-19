@@ -18,6 +18,8 @@
 #include "llvm/IR/PassManager.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace llvm {
 class Module;
@@ -27,6 +29,8 @@ namespace morok::passes {
 
 struct StrEncParams {
     std::uint32_t probability = 100; ///< per-string chance, 0..100
+    std::vector<std::string> skip_content;
+    std::vector<std::string> force_content;
 };
 
 /// Encrypt eligible string literals in `M`.  Returns true if any changed.

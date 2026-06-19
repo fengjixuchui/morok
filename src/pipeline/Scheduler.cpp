@@ -460,6 +460,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         config_.passes.str_enc.enabled.value_or(false)) {
         passes::StrEncParams sp;
         sp.probability = config_.passes.str_enc.probability.value_or(100);
+        sp.skip_content = config_.passes.str_enc.skip_content;
+        sp.force_content = config_.passes.str_enc.force_content;
         changed |= passes::stringEncryptModule(M, sp, rng);
     }
 

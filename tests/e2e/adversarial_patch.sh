@@ -95,6 +95,7 @@ OBF="$TMP/obf"
 PATCHED="$TMP/patched"
 CLEAN_LOG="$TMP/clean.compile.log"
 OBF_LOG="$TMP/obf.compile.log"
+MOROK_ENV=(MOROK_ENABLE=1 MOROK_CONFIG="$CONFIG" MOROK_SEED="$SEED")
 
 if ! "$CLANG" "${SYSROOT[@]}" -O2 -std=c11 -D_GNU_SOURCE "$SRC" \
     -o "$CLEAN" >"$CLEAN_LOG" 2>&1; then
@@ -103,9 +104,8 @@ if ! "$CLANG" "${SYSROOT[@]}" -O2 -std=c11 -D_GNU_SOURCE "$SRC" \
   exit 1
 fi
 
-if ! "$CLANG" "${SYSROOT[@]}" -O2 -std=c11 -D_GNU_SOURCE \
+if ! env "${MOROK_ENV[@]}" "$CLANG" "${SYSROOT[@]}" -O2 -std=c11 -D_GNU_SOURCE \
     -fpass-plugin="$PLUGIN" \
-    -mllvm -morok -mllvm -morok-config="$CONFIG" -mllvm -morok-seed="$SEED" \
     "$SRC" -o "$OBF" >"$OBF_LOG" 2>&1; then
   echo "FAIL morok compile config=$CONFIG" >&2
   tail -120 "$OBF_LOG" >&2

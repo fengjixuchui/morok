@@ -85,6 +85,21 @@ struct Cipher {
     std::uint64_t mul = 1;      // per-string odd multiplier
 };
 
+bool matchesContent(StringRef raw, const std::vector<std::string> &patterns) {
+    for (const std::string &Pattern : patterns) {
+        if (Pattern.empty())
+            continue;
+        if (raw.contains(Pattern))
+            return true;
+    }
+    return false;
+}
+
+struct StringCandidate {
+    GlobalVariable *gv = nullptr;
+    std::uint64_t bytes = 0;
+};
+
 void emitStaticAnalysisBarrier(IRBuilderBase &B, const Module &M) {
     const Triple TT(M.getTargetTriple());
     StringRef Asm;
@@ -374,33 +389,58 @@ bool materializeStackUses(GlobalVariable *GV, const Cipher &C,
 
 bool stringEncryptModule(Module &M, const StrEncParams &params,
                          ir::IRRandom &rng) {
-    if (params.probability == 0)
-        return false;
-
     LLVMContext &ctx = M.getContext();
     auto *i8 = Type::getInt8Ty(ctx);
     auto *i64 = Type::getInt64Ty(ctx);
     auto *voidTy = Type::getVoidTy(ctx);
 
-    std::vector<GlobalVariable *> targets;
-    targets.reserve(64);
-    std::uint64_t selectedBytes = 0;
+    std::vector<StringCandidate> forcedCandidates;
+    std::vector<StringCandidate> randomCandidates;
+    forcedCandidates.reserve(16);
+    randomCandidates.reserve(64);
+    std::uint64_t forcedBytes = 0;
+    std::uint64_t randomBytes = 0;
+    auto tryQueueCandidate = [](std::vector<StringCandidate> &Candidates,
+                                std::uint64_t &QueuedBytes,
+                                GlobalVariable *GV, std::uint64_t Bytes) {
+        if (Candidates.size() >= kMaxEncryptedStrings ||
+            QueuedBytes + Bytes > kMaxEncryptedTotalBytes)
+            return;
+        Candidates.push_back({GV, Bytes});
+        QueuedBytes += Bytes;
+    };
     for (GlobalVariable &gv : M.globals()) {
-        if (targets.size() >= kMaxEncryptedStrings ||
-            selectedBytes >= kMaxEncryptedTotalBytes)
-            break;
         if (!eligible(gv))
             continue;
         const auto *cda = cast<ConstantDataArray>(gv.getInitializer());
         const std::uint64_t n = cda->getNumElements();
-        if (n > kMaxEncryptedStringBytes ||
-            selectedBytes + n > kMaxEncryptedTotalBytes)
+        if (n > kMaxEncryptedStringBytes)
             continue;
-        if (rng.chance(params.probability)) {
-            targets.push_back(&gv);
-            selectedBytes += n;
+        StringRef raw = cda->getRawDataValues();
+        if (matchesContent(raw, params.skip_content))
+            continue;
+        const bool forced = matchesContent(raw, params.force_content);
+        if (forced) {
+            tryQueueCandidate(forcedCandidates, forcedBytes, &gv, n);
+        } else if (params.probability != 0 && rng.chance(params.probability)) {
+            tryQueueCandidate(randomCandidates, randomBytes, &gv, n);
         }
     }
+
+    std::uint64_t selectedBytes = 0;
+    std::vector<GlobalVariable *> targets;
+    targets.reserve(64);
+    auto trySelect = [&](const StringCandidate &C) {
+        if (targets.size() >= kMaxEncryptedStrings ||
+            selectedBytes + C.bytes > kMaxEncryptedTotalBytes)
+            return;
+        targets.push_back(C.gv);
+        selectedBytes += C.bytes;
+    };
+    for (const StringCandidate &C : forcedCandidates)
+        trySelect(C);
+    for (const StringCandidate &C : randomCandidates)
+        trySelect(C);
     if (targets.empty())
         return false;
 

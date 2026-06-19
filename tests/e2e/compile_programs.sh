@@ -51,15 +51,14 @@ compile_one() {
   esac
 
   if [ "$mode" = "obf" ]; then
-    local morok_config=()
+    local morok_env=(MOROK_ENABLE=1 MOROK_SEED="$SEED")
     if [ -f "$CONFIG_OR_PRESET" ]; then
-      morok_config=(-mllvm -morok-config="$CONFIG_OR_PRESET")
+      morok_env+=(MOROK_CONFIG="$CONFIG_OR_PRESET")
     else
-      morok_config=(-mllvm -morok-preset="$CONFIG_OR_PRESET")
+      morok_env+=(MOROK_PRESET="$CONFIG_OR_PRESET")
     fi
-    "${cc[@]}" "${SYSROOT[@]}" -O2 "${std[@]}" \
+    env "${morok_env[@]}" "${cc[@]}" "${SYSROOT[@]}" -O2 "${std[@]}" \
       -fpass-plugin="$PLUGIN" \
-      -mllvm -morok "${morok_config[@]}" -mllvm -morok-seed="$SEED" \
       "$src" -o "$out" >"$log" 2>&1
   else
     "${cc[@]}" "${SYSROOT[@]}" -O2 "${std[@]}" \

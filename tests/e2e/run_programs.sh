@@ -40,8 +40,8 @@ run_limited() { # <seconds> <cmd...>
   if [ "${#_LIMIT[@]}" -gt 0 ]; then "${_LIMIT[@]}" "$secs" "$@"; else "$@"; fi
 }
 
-MOROK=()
-if [ -f "$CFG" ]; then MOROK=(-mllvm -morok-config="$CFG"); else MOROK=(-mllvm -morok-preset="$CFG"); fi
+MOROK_ENV=(MOROK_ENABLE=1 MOROK_SEED="$SEED")
+if [ -f "$CFG" ]; then MOROK_ENV+=(MOROK_CONFIG="$CFG"); else MOROK_ENV+=(MOROK_PRESET="$CFG"); fi
 
 # Curated deterministic programs (pure-result output, quick, no external input).
 PROGRAMS=(
@@ -75,8 +75,8 @@ for base in "${PROGRAMS[@]}"; do
 
   if ! "${cc[@]}" "${SYSROOT[@]}" -O2 "${std[@]}" "$src" -o "$TMP/clean" >/dev/null 2>&1; then
     echo "FAIL clean-compile $base" >&2; fails=$((fails + 1)); continue; fi
-  if ! "${cc[@]}" "${SYSROOT[@]}" -O2 "${std[@]}" -fpass-plugin="$PLUGIN" \
-        -mllvm -morok "${MOROK[@]}" -mllvm -morok-seed="$SEED" \
+  if ! env "${MOROK_ENV[@]}" "${cc[@]}" "${SYSROOT[@]}" -O2 "${std[@]}" \
+        -fpass-plugin="$PLUGIN" \
         "$src" -o "$TMP/obf" >/dev/null 2>&1; then
     echo "FAIL obf-compile $base" >&2; fails=$((fails + 1)); continue; fi
 

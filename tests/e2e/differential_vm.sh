@@ -21,14 +21,14 @@ SYSROOT=()
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+MOROK_ENV=(MOROK_ENABLE=1 MOROK_CONFIG="$CONFIG" MOROK_SEED="$SEED")
+
 "$CLANG" "${SYSROOT[@]}" -O2 "$SRC" -o "$TMP/ref"
-"$CLANG" "${SYSROOT[@]}" -O2 \
+env "${MOROK_ENV[@]}" "$CLANG" "${SYSROOT[@]}" -O2 \
     -fpass-plugin="$PLUGIN" \
-    -mllvm -morok -mllvm -morok-config="$CONFIG" -mllvm -morok-seed="$SEED" \
     "$SRC" -o "$TMP/obf"
-"$CLANG" "${SYSROOT[@]}" -O2 \
+env "${MOROK_ENV[@]}" "$CLANG" "${SYSROOT[@]}" -O2 \
     -fpass-plugin="$PLUGIN" \
-    -mllvm -morok -mllvm -morok-config="$CONFIG" -mllvm -morok-seed="$SEED" \
     -S -emit-llvm "$SRC" -o "$TMP/obf.ll"
 
 LIFTED="$(grep -c '@morok\.vm\.bytecode\.' "$TMP/obf.ll" || true)"

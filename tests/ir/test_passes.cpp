@@ -798,6 +798,44 @@ TEST_CASE("MorokPass demotes generated symbols to private linkage") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("MorokPass forwards string encryption content filters") {
+    {
+        LLVMContext ctx;
+        auto M = std::make_unique<Module>("strenc-force-config", ctx);
+        makePrivateString(*M, "forced.str", "force-through-config");
+
+        morok::config::Config cfg;
+        cfg.seed = 910;
+        cfg.passes.str_enc.enabled = true;
+        cfg.passes.str_enc.probability = 0;
+        cfg.passes.str_enc.force_content = {"force-through-config"};
+
+        ModuleAnalysisManager AM;
+        morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+        CHECK_FALSE(hasReadableByteString(*M, "force-through-config"));
+        CHECK_FALSE(verifyModule(*M, &errs()));
+    }
+
+    {
+        LLVMContext ctx;
+        auto M = std::make_unique<Module>("strenc-skip-config", ctx);
+        makePrivateString(*M, "skipped.str", "skip-through-config");
+
+        morok::config::Config cfg;
+        cfg.seed = 911;
+        cfg.passes.str_enc.enabled = true;
+        cfg.passes.str_enc.probability = 100;
+        cfg.passes.str_enc.skip_content = {"skip-through-config"};
+
+        ModuleAnalysisManager AM;
+        morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+        CHECK(hasReadableByteString(*M, "skip-through-config"));
+        CHECK_FALSE(verifyModule(*M, &errs()));
+    }
+}
+
 TEST_CASE("misleadingMetadataModule plants retained fake analysis anchors") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -10929,7 +10967,8 @@ TEST_CASE("stringEncryptModule materializes used strings on the stack") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(305);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     GlobalVariable *Msg = M->getGlobalVariable("msg.str", true);
     REQUIRE(Msg);
@@ -10959,6 +10998,45 @@ TEST_CASE("stringEncryptModule materializes used strings on the stack") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("stringEncryptModule honors force_content when probability is zero") {
+    LLVMContext ctx;
+    auto M = std::make_unique<Module>("force-strings", ctx);
+    makePrivateString(*M, "forced.str", "force-secret");
+    makePrivateString(*M, "plain.str", "ordinary-visible");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1901);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::StrEncParams params;
+    params.probability = 0;
+    params.force_content = {"force-secret"};
+    CHECK(morok::passes::stringEncryptModule(*M, params, rng));
+
+    CHECK_FALSE(hasReadableByteString(*M, "force-secret"));
+    CHECK(hasReadableByteString(*M, "ordinary-visible"));
+    CHECK(countFunctions(*M, "morok.strdec") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("stringEncryptModule honors skip_content before probability and force") {
+    LLVMContext ctx;
+    auto M = std::make_unique<Module>("skip-strings", ctx);
+    makePrivateString(*M, "skipped.str", "keep-clear");
+    makePrivateString(*M, "hidden.str", "hide-this");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(1902);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::StrEncParams params;
+    params.probability = 100;
+    params.skip_content = {"keep-clear"};
+    params.force_content = {"keep-clear"};
+    CHECK(morok::passes::stringEncryptModule(*M, params, rng));
+
+    CHECK(hasReadableByteString(*M, "keep-clear"));
+    CHECK_FALSE(hasReadableByteString(*M, "hide-this"));
+    CHECK(countFunctions(*M, "morok.strdec") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("stringEncryptModule uses stack decrypt loops for long callsite strings") {
     LLVMContext ctx;
     auto M = std::make_unique<Module>("stack-long-strings", ctx);
@@ -10968,7 +11046,8 @@ TEST_CASE("stringEncryptModule uses stack decrypt loops for long callsite string
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(306);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     CHECK(countFunctions(*M, "morok.strdec") == 0u);
     CHECK(countFunctions(*M, "morok.strsite") >= 1u);
@@ -11003,7 +11082,8 @@ TEST_CASE("stringEncryptModule falls back to per-string decryptors") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(307);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     // Length-hiding may replace the globals with padded ones; re-fetch by name.
     GlobalVariable *Small = M->getGlobalVariable("small.str", true);
@@ -11107,7 +11187,8 @@ TEST_CASE("stringEncryptModule preserves address space alignment and section") {
     REQUIRE(M);
     auto engine = morok::core::Xoshiro256pp::fromSeed(3901);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     // Address space preserved across the padded replacement.
     GlobalVariable *As1 = M->getGlobalVariable("s_as1", true);
@@ -11138,8 +11219,8 @@ TEST_CASE("stringEncryptModule leaves generated decoy strings as plaintext bait"
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(308);
     morok::ir::IRRandom rng(engine);
-    CHECK_FALSE(
-        morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK_FALSE(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     GlobalVariable *Decoy = M->getGlobalVariable("morok.decoy.str.test", true);
     REQUIRE(Decoy);
@@ -11161,7 +11242,8 @@ TEST_CASE("stringEncryptModule avoids byte-sub decryptor signature") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(309);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     bool sawAddDecodePath = false;
     bool sawI8Sub = false;
@@ -11191,7 +11273,8 @@ TEST_CASE("stringEncryptModule gives each string its own cipher") {
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(77);
     morok::ir::IRRandom rng(engine);
-    CHECK(morok::passes::stringEncryptModule(*M, {/*probability=*/100}, rng));
+    CHECK(morok::passes::stringEncryptModule(
+        *M, morok::passes::StrEncParams{}, rng));
 
     GlobalVariable *A = M->getGlobalVariable("a.str", true);
     GlobalVariable *B = M->getGlobalVariable("b.str", true);

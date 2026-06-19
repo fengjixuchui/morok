@@ -23,16 +23,15 @@ trap 'rm -rf "$TMP"' EXIT
 
 "$CLANG" "${SYSROOT[@]}" -O2 "$SRC" -o "$TMP/ref"
 
-MOROK_CONFIG=()
+MOROK_ENV=(MOROK_ENABLE=1 MOROK_SEED="$SEED")
 if [ -f "$CONFIG_OR_PRESET" ]; then
-  MOROK_CONFIG=(-mllvm -morok-config="$CONFIG_OR_PRESET")
+  MOROK_ENV+=(MOROK_CONFIG="$CONFIG_OR_PRESET")
 else
-  MOROK_CONFIG=(-mllvm -morok-preset="$CONFIG_OR_PRESET")
+  MOROK_ENV+=(MOROK_PRESET="$CONFIG_OR_PRESET")
 fi
 
-"$CLANG" "${SYSROOT[@]}" -O2 \
+env "${MOROK_ENV[@]}" "$CLANG" "${SYSROOT[@]}" -O2 \
     -fpass-plugin="$PLUGIN" \
-    -mllvm -morok "${MOROK_CONFIG[@]}" -mllvm -morok-seed="$SEED" \
     "$SRC" -o "$TMP/obf"
 
 REF="$("$TMP/ref")"
