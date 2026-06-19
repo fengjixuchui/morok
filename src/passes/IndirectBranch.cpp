@@ -32,6 +32,16 @@ struct Target {
     SmallVector<BasicBlock *, 4> successors;
 };
 
+// switchIndex() emits one ICmpEQ and one Select per case, so lowering a switch
+// is O(case_count) in emitted IR.  The scheduler's heavy-function budget counts
+// only the *pre-transform* instruction/block count, and a switch — however many
+// cases it carries — is a single instruction in a single block, so an enormous
+// switch passes the budget and then explodes into millions of new IR nodes,
+// exhausting the build host (worse for the ungated standalone morok-indbr).
+// Cap the case count: oversized switches are left untouched, which bounds the
+// emitted IR while still covering ordinary and large dispatch tables.
+constexpr unsigned kMaxSwitchCases = 256;
+
 bool addUniqueSuccessor(SmallVectorImpl<BasicBlock *> &successors,
                         BasicBlock *succ) {
     if (succ->isEHPad() || succ->isLandingPad())
@@ -54,6 +64,8 @@ bool collectEligibleSuccessors(Instruction *term,
     }
 
     if (auto *sw = dyn_cast<SwitchInst>(term)) {
+        if (sw->getNumCases() > kMaxSwitchCases)
+            return false;
         if (!addUniqueSuccessor(successors, sw->getDefaultDest()))
             return false;
         for (auto &c : sw->cases())

@@ -9176,6 +9176,53 @@ def:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #34: switch lowering is O(case_count) but the scheduler budget
+// counts a switch as a single instruction, so an oversized switch (which an
+// attacker can submit to a build service, and which the ungated standalone
+// morok-indbr would also expand) would balloon into millions of ICmp/Select
+// nodes.  Oversized switches must be left untouched.
+TEST_CASE("indirectBranchFunction skips oversized switches") {
+    LLVMContext ctx;
+    auto M = std::make_unique<Module>("m", ctx);
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *FT = FunctionType::get(I32, {I32}, false);
+    auto *F = Function::Create(FT, GlobalValue::ExternalLinkage, "big_switch",
+                               M.get());
+    auto *Entry = BasicBlock::Create(ctx, "entry", F);
+    auto *One = BasicBlock::Create(ctx, "one", F);
+    auto *Def = BasicBlock::Create(ctx, "def", F);
+    IRBuilder<> B(One);
+    B.CreateRet(ConstantInt::get(I32, 10));
+    B.SetInsertPoint(Def);
+    B.CreateRet(ConstantInt::get(I32, 0));
+
+    // 4096 cases, all targeting the same block: two unique successors, but a
+    // case count far above the cap.
+    const unsigned kCases = 4096;
+    auto *SI = SwitchInst::Create(F->getArg(0), Def, kCases, Entry);
+    for (unsigned i = 0; i < kCases; ++i)
+        SI->addCase(ConstantInt::get(I32, i + 1), One);
+    REQUIRE_FALSE(verifyModule(*M, &errs()));
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(3401);
+    morok::ir::IRRandom rng(engine);
+    // The oversized switch is ineligible, so the pass makes no change.
+    CHECK_FALSE(morok::passes::indirectBranchFunction(*F, {/*prob=*/100}, rng));
+
+    unsigned switchCount = 0;
+    unsigned caseCmp = 0;
+    for (Instruction &I : instructions(*F)) {
+        if (isa<SwitchInst>(&I))
+            ++switchCount;
+        if (I.getName().starts_with("morok.indbr.case"))
+            ++caseCmp;
+    }
+    CHECK(switchCount == 1u);     // switch left intact
+    CHECK(caseCmp == 0u);         // no per-case ICmp explosion
+    CHECK(countGlobals(*M, "morok.ibtable") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("functionWrapModule proxies a call and stays valid") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
