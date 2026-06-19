@@ -324,6 +324,23 @@ std::size_t countCallsTo(BasicBlock &BB, StringRef name) {
     return n;
 }
 
+bool callToPrecedes(Function &F, StringRef first, StringRef second) {
+    bool sawFirst = false;
+    for (Instruction &I : instructions(F)) {
+        auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB)
+            continue;
+        Function *Callee = CB->getCalledFunction();
+        if (!Callee)
+            continue;
+        if (Callee->getName() == first)
+            sawFirst = true;
+        if (Callee->getName() == second)
+            return sawFirst;
+    }
+    return false;
+}
+
 std::size_t countCallsThroughOperand(Function &F, const Value *Target) {
     std::size_t n = 0;
     for (Instruction &I : instructions(F))
@@ -12339,6 +12356,8 @@ entry:
           nullptr);
     CHECK(Dynamic->hasExternalWeakLinkage());
     CHECK(hasGuardedDlsymBlock);
+    CHECK(callToPrecedes(*Ctor, "morok.antihook.maps.linux",
+                         "morok.antihook.wxorx.linux"));
     CHECK(dlsymCalls == 1u);
     CHECK(dlsymUsesLinuxRtldDefault);
     CHECK(hasInlineAsmCall(*Clean));
@@ -12632,6 +12651,9 @@ entry:
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.negative.modules.extra") >= 1u);
+    CHECK(callToPrecedes(*M->getFunction("morok.antihook"),
+                         "morok.antihook.vm.darwin",
+                         "morok.antihook.wxorx.darwin"));
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.corroborate.schro.changed") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
@@ -12711,8 +12733,12 @@ entry:
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antihook"),
                                  "morok.negative.modules.extra") >= 1u);
+    CHECK(callToPrecedes(*M->getFunction("morok.antihook"),
+                         "morok.antihook.vm.windows",
+                         "morok.antihook.wxorx.windows"));
     CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.virtualprotect") >=
           1u);
+    CHECK(countNamedInstructions(*Wx, "morok.antihook.wxorx.rwx.hit") >= 1u);
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.query") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);

@@ -5023,6 +5023,8 @@ Function *windowsWxEnforceProbe(Module &M) {
                        {VPB.CreateIntToPtr(base, ptr), regionSize,
                         ConstantInt::get(i32, 0x20), oldProt},
                        "morok.antihook.wxorx.virtualprotect");
+    incrementDiff(VPB, diff, ConstantInt::getTrue(ctx),
+                  "morok.antihook.wxorx.rwx.hit");
     incrementDiff(VPB, diff,
                   VPB.CreateICmpEQ(protectRc, ConstantInt::get(i32, 0)),
                   "morok.antihook.wxorx.fail");
@@ -12156,17 +12158,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         foldFlag(B, state, changed, 0xD1C9A03F76542BE8ULL,
                  "morok.antihook.fixup.changed");
     }
-    if (Function *wx = wxEnforceProbe(M, tt)) {
-        Value *diff = B.CreateCall(wx, {}, "morok.antihook.wxorx.diff");
-        Value *changed =
-            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
-                           "morok.corroborate.wxorx.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.wxorx");
-        foldState(B, state, diff, 0x14E2B7C95A680D3FULL,
-                  "morok.antihook.wxorx");
-        foldFlag(B, state, changed, 0xD8F31C6A4B927E50ULL,
-                 "morok.antihook.wxorx.changed");
-    }
+    // Census must observe the original protections before W^X remediation can
+    // normalize suspicious RWX pages into clean-looking RX mappings.
     if (Function *census = addressSpaceCensusProbe(M, rng, tt)) {
         Value *diff = B.CreateCall(census, {}, "morok.antihook.census.diff");
         Value *changed =
@@ -12180,6 +12173,17 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                  0xA7815E3C49D206BFULL, "morok.antihook.census.changed");
         foldFlag(B, state, changed, 0xB2E746D9108CA53FULL,
                  "morok.negative.modules.extra");
+    }
+    if (Function *wx = wxEnforceProbe(M, tt)) {
+        Value *diff = B.CreateCall(wx, {}, "morok.antihook.wxorx.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.wxorx.changed");
+        incrementDiff(B, corroboration, changed, "morok.corroborate.wxorx");
+        foldState(B, state, diff, 0x14E2B7C95A680D3FULL,
+                  "morok.antihook.wxorx");
+        foldFlag(B, state, changed, 0xD8F31C6A4B927E50ULL,
+                 "morok.antihook.wxorx.changed");
     }
     if (Function *diverge = methodDivergenceProbe(M, tt)) {
         Value *diff =
