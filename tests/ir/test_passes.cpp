@@ -12091,9 +12091,18 @@ define i32 @caller() {
     bool hasFaultAsm = false;
     bool hasResolveBlock = false;
     bool indirectUsesCachedPointer = false;
+    auto requirePendingTls = [&](StringRef Name) {
+        GlobalVariable *GV = M->getGlobalVariable(Name, true);
+        REQUIRE(GV);
+        CHECK(GV->isThreadLocal());
+        CHECK(GV->getThreadLocalMode() == GlobalValue::InitialExecTLSModel);
+        return GV;
+    };
     GlobalVariable *PendingHash =
-        M->getGlobalVariable("morok.fco.ex.pending.hash", true);
-    REQUIRE(PendingHash);
+        requirePendingTls("morok.fco.ex.pending.hash");
+    requirePendingTls("morok.fco.ex.pending.name");
+    requirePendingTls("morok.fco.ex.pending.out");
+    requirePendingTls("morok.fco.ex.pending.cont");
     for (BasicBlock &BB : *Caller)
         hasResolveBlock |= BB.getName() == "morok.fco.ex.cache.resolve";
     for (Instruction &I : instructions(*Caller)) {
@@ -12121,10 +12130,6 @@ define i32 @caller() {
     Function *Install = M->getFunction("morok.fco.ex.install");
     REQUIRE(Install);
     CHECK(countCallsTo(*Install, "morok.fco.resolve.elf") == 0u);
-    CHECK(M->getGlobalVariable("morok.fco.ex.pending.hash", true) != nullptr);
-    CHECK(M->getGlobalVariable("morok.fco.ex.pending.name", true) != nullptr);
-    CHECK(M->getGlobalVariable("morok.fco.ex.pending.out", true) != nullptr);
-    CHECK(M->getGlobalVariable("morok.fco.ex.pending.cont", true) != nullptr);
     CHECK(countGlobals(*M, "morok.fco.cache") == 1u);
     CHECK(storesPendingHash);
     CHECK(hasFaultAsm);

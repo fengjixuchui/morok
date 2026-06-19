@@ -17,9 +17,10 @@
 // not crack the rest.  Only declared (external) symbols are redirected —
 // locally-defined functions stay direct, since dlsym would not resolve them.
 // On Linux x86_64 direct calls use an exception-mediated resolver: the site
-// publishes a hash-guarded pending request and deliberately faults; the SIGSEGV
-// handler claims the request and resumes at the indirect-call continuation,
-// where the manual resolver runs outside the signal context.
+// publishes a hash-guarded per-thread pending request and deliberately faults;
+// the SIGSEGV handler claims the faulting thread's request and resumes at the
+// indirect-call continuation, where the manual resolver runs outside the signal
+// context.
 
 #include "morok/passes/FunctionCallObfuscate.hpp"
 
@@ -158,6 +159,23 @@ GlobalVariable *i64Global(Module &M, StringRef Name) {
                                   ConstantInt::get(I64, 0), Name);
     GV->setDSOLocal(true);
     GV->setAlignment(Align(8));
+    return GV;
+}
+
+void configurePendingTls(GlobalVariable *GV) {
+    GV->setThreadLocalMode(GlobalValue::InitialExecTLSModel);
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::None);
+}
+
+GlobalVariable *pendingPtrGlobal(Module &M, StringRef Name) {
+    GlobalVariable *GV = ptrGlobal(M, Name);
+    configurePendingTls(GV);
+    return GV;
+}
+
+GlobalVariable *pendingI64Global(Module &M, StringRef Name) {
+    GlobalVariable *GV = i64Global(M, Name);
+    configurePendingTls(GV);
     return GV;
 }
 
@@ -2016,10 +2034,10 @@ void storeSigaction(IRBuilder<> &B, Module &M, AllocaInst *Action,
 ExceptionRuntime ensureExceptionRuntime(Module &M, FunctionCallee Resolver,
                                         bool ManualResolver, int RtldDefaultVal) {
     ExceptionRuntime Rt;
-    Rt.hash = i64Global(M, "morok.fco.ex.pending.hash");
-    Rt.name = ptrGlobal(M, "morok.fco.ex.pending.name");
-    Rt.out = ptrGlobal(M, "morok.fco.ex.pending.out");
-    Rt.cont = ptrGlobal(M, "morok.fco.ex.pending.cont");
+    Rt.hash = pendingI64Global(M, "morok.fco.ex.pending.hash");
+    Rt.name = pendingPtrGlobal(M, "morok.fco.ex.pending.name");
+    Rt.out = pendingPtrGlobal(M, "morok.fco.ex.pending.out");
+    Rt.cont = pendingPtrGlobal(M, "morok.fco.ex.pending.cont");
 
     if (M.getFunction("morok.fco.ex.install"))
         return Rt;

@@ -32,6 +32,11 @@ set(_adversarial_driver "${CMAKE_CURRENT_SOURCE_DIR}/adversarial_patch.sh")
 set(_adversarial_config "${CMAKE_CURRENT_SOURCE_DIR}/adversarial.toml")
 set(_adversarial_workload
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/adversarial_integrity.c")
+set(_fco_exception_driver "${CMAKE_CURRENT_SOURCE_DIR}/fco_exception_threads.sh")
+set(_fco_exception_config
+    "${CMAKE_CURRENT_SOURCE_DIR}/fco_exception_threads.toml")
+set(_fco_exception_workload
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/fco_exception_threads.c")
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
@@ -182,6 +187,26 @@ else()
   else()
     message(STATUS "adversarial e2e patch tests skipped (Python3 not found).")
   endif()
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+  add_test(NAME "e2e/fco_exception_threads"
+    COMMAND bash "${_fco_exception_driver}"
+            "${CMAKE_C_COMPILER}"
+            "$<TARGET_FILE:morok_plugin>"
+            "${_sysroot}"
+            "${_fco_exception_workload}"
+            "${_fco_exception_config}"
+            5757)
+  set_tests_properties("e2e/fco_exception_threads" PROPERTIES
+    LABELS "e2e;threading;security"
+    REQUIRED_FILES
+      "$<TARGET_FILE:morok_plugin>;${_fco_exception_driver};${_fco_exception_config};${_fco_exception_workload}"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 120)
+else()
+  message(STATUS "FCO exception thread stress skipped off Linux x86_64.")
 endif()
 
 # The full sample-program compile sweep runs only when the corpus is present.

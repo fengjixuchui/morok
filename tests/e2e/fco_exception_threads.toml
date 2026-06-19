@@ -1,0 +1,5 @@
+[global]
+preset = "none"
+
+[passes.function_call_obfuscate]
+enabled = true
