@@ -106,12 +106,29 @@ bool safeReturnPointer(ReturnInst &RI) {
     return true;
 }
 
+// A swifterror pointer (a swifterror alloca or a swifterror argument) may only
+// be loaded/stored or passed directly as a swifterror call argument.  Running
+// ptrtoint on it, or replacing a swifterror call operand with a laundered GEP
+// while the swifterror call-site attribute remains, produces IR the verifier
+// rejects (and miscompiles the Swift error ABI if verification is skipped).
+// Mirrors the guards in PathExplosion / StackCoalescing / Virtualization /
+// AdversarialFunctionMerging.  Always false on non-Swift IR.
+bool isSwiftErrorValue(const Value *ptr) {
+    if (const auto *Arg = dyn_cast<Argument>(ptr))
+        return Arg->hasSwiftErrorAttr();
+    if (const auto *AI = dyn_cast<AllocaInst>(ptr))
+        return AI->isSwiftError();
+    return false;
+}
+
 void addPointerOperand(const DataLayout &DL, Instruction &I, unsigned index,
                        std::vector<PointerTarget> &targets) {
     if (targets.size() >= kMaxPointerLaunderTargets)
         return;
     Value *ptr = I.getOperand(index);
     if (isPassGenerated(ptr))
+        return;
+    if (isSwiftErrorValue(ptr))
         return;
     if (canRoundTripPointer(DL, ptr->getType()))
         targets.push_back(PointerTarget{&I, index, ptr});
@@ -157,11 +174,16 @@ void collectPointerTargets(Function &F, const DataLayout &DL,
             if (auto *CB = dyn_cast<CallBase>(&I)) {
                 if (!safeCallPointerArgs(*CB))
                     continue;
-                for (unsigned Arg = 0; Arg < CB->arg_size(); ++Arg)
+                for (unsigned Arg = 0; Arg < CB->arg_size(); ++Arg) {
+                    // A swifterror call argument must remain a direct reference
+                    // to a swifterror alloca/parameter; never launder it.
+                    if (CB->paramHasAttr(Arg, Attribute::SwiftError))
+                        continue;
                     if (CB->getArgOperand(Arg)->getType()->isPointerTy())
                         addPointerOperand(
                             DL, I, CB->getArgOperandUse(Arg).getOperandNo(),
                             targets);
+                }
                 continue;
             }
             if (auto *RI = dyn_cast<ReturnInst>(&I)) {

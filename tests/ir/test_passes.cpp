@@ -2904,6 +2904,59 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #28: a swifterror pointer may only be loaded/stored or passed
+// directly as a swifterror argument.  Laundering it through ptrtoint/inttoptr +
+// GEP (and replacing the swifterror call operand with the GEP while the
+// swifterror call-site attribute remains) produces IR the verifier rejects.
+// The swifterror alloca and the swifterror call argument must be left intact;
+// the ordinary %out pointer must still be laundered so the pass clearly ran.
+TEST_CASE("pointerLaunderFunction leaves swifterror pointers untouched") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target datalayout = "e-p:64:64"
+declare void @swifterror_callee(ptr swifterror)
+
+define void @uses_swifterror(ptr %out) {
+entry:
+  %err = alloca swifterror ptr, align 8
+  store ptr null, ptr %err
+  store i32 7, ptr %out
+  call void @swifterror_callee(ptr swifterror %err)
+  ret void
+}
+)ir");
+    Function *F = M->getFunction("uses_swifterror");
+    REQUIRE(F);
+    REQUIRE_FALSE(verifyModule(*M, &errs())); // fixture starts valid
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(2801);
+    morok::ir::IRRandom rng(engine);
+    // Returns true: the ordinary %out store pointer is still laundered.
+    CHECK(morok::passes::pointerLaunderFunction(
+        *F, {/*pointer_probability=*/100, /*integer_probability=*/0}, rng));
+
+    AllocaInst *ErrAlloca = nullptr;
+    CallInst *Call = nullptr;
+    for (Instruction &I : instructions(*F)) {
+        if (auto *AI = dyn_cast<AllocaInst>(&I))
+            if (AI->isSwiftError())
+                ErrAlloca = AI;
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            if (CI->getCalledFunction() &&
+                CI->getCalledFunction()->getName() == "swifterror_callee")
+                Call = CI;
+    }
+    REQUIRE(ErrAlloca);
+    REQUIRE(Call);
+
+    // The swifterror call argument is still the direct alloca, not a laundered
+    // GEP, and no ptrtoint was ever applied to the swifterror value.
+    CHECK(Call->getArgOperand(0) == ErrAlloca);
+    for (const User *U : ErrAlloca->users())
+        CHECK_FALSE(isa<PtrToIntInst>(U));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("pointerLaunderFunction launders integer SSA through bitcasts") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
