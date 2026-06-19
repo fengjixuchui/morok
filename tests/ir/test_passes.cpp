@@ -9687,6 +9687,58 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #31: outlining an FP op must carry the source function's
+// FP-environment attributes onto the helper, and helpers must not be shared
+// across functions with different FP modes.  Otherwise a denormal/strict/target
+// FP op silently executes under default semantics in the helper.
+TEST_CASE("adversarialFunctionMergingModule preserves FP env in outlined ops") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define double @fp_a(double %a, double %b) #0 {
+entry:
+  %x = fadd double %a, %b
+  %y = fmul double %x, %a
+  ret double %y
+}
+
+define double @fp_b(double %a, double %b) #1 {
+entry:
+  %x = fadd double %a, %b
+  %y = fmul double %x, %b
+  ret double %y
+}
+
+attributes #0 = { "denormal-fp-math"="preserve-sign,preserve-sign" }
+attributes #1 = { "denormal-fp-math"="ieee,ieee" }
+)ir");
+    REQUIRE(M);
+    auto engine = morok::core::Xoshiro256pp::fromSeed(3101);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::adversarialFunctionMergingModule(
+        *M,
+        {/*probability=*/100, /*max_groups=*/1, /*max_functions=*/2,
+         /*outline_probability=*/100, /*max_outlines=*/8},
+        rng));
+
+    // Each FP helper inherits its source's denormal mode; the two distinct
+    // modes prove the helpers were not shared across functions.
+    bool hasPreserveSign = false;
+    bool hasIeee = false;
+    for (Function &F : *M) {
+        if (!F.getName().starts_with("morok.afm.outline"))
+            continue;
+        if (!F.hasFnAttribute("denormal-fp-math"))
+            continue;
+        StringRef V = F.getFnAttribute("denormal-fp-math").getValueAsString();
+        hasPreserveSign |= V == "preserve-sign,preserve-sign";
+        hasIeee |= V == "ieee,ieee";
+    }
+    CHECK(hasPreserveSign);
+    CHECK(hasIeee);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("adversarialFunctionMergingModule outlines shift and division ops") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

@@ -81,6 +81,9 @@ struct OutlineKey {
 struct OutlineHelper {
     OutlineKey key;
     Function *helper = nullptr;
+    // FP-environment signature of the source function (FP helpers only); an FP
+    // helper must not be reused across functions whose FP mode differs.
+    std::string fpSig;
 };
 
 struct OutlineTarget {
@@ -460,6 +463,39 @@ void addGeneratedAttrs(Function *F) {
     F->removeFnAttr(Attribute::NoSync);
 }
 
+bool isFloatKind(OutlineKind Kind) {
+    return Kind == OutlineKind::FBinary || Kind == OutlineKind::FCmp;
+}
+
+// Function attributes that change floating-point semantics or instruction
+// selection and so must follow an outlined FP op into its helper.  Without
+// them the helper can flush denormals differently, lower half/bfloat under the
+// wrong subtarget, or drop strict-FP semantics — silently changing results an
+// FP comparison/arithmetic might gate a security decision on.
+const char *const kFpEnvAttrs[] = {"denormal-fp-math", "denormal-fp-math-f32",
+                                   "target-features"};
+
+std::string fpEnvSignature(const Function &F) {
+    std::string Sig;
+    if (F.hasFnAttribute(Attribute::StrictFP))
+        Sig += "strictfp;";
+    for (const char *Name : kFpEnvAttrs)
+        if (F.hasFnAttribute(Name))
+            Sig += (Twine(Name) + "=" +
+                    F.getFnAttribute(Name).getValueAsString() + ";")
+                       .str();
+    return Sig;
+}
+
+void applyFpEnv(Function *Helper, const Function &Src) {
+    if (Src.hasFnAttribute(Attribute::StrictFP))
+        Helper->addFnAttr(Attribute::StrictFP);
+    for (const char *Name : kFpEnvAttrs)
+        if (Src.hasFnAttribute(Name))
+            Helper->addFnAttr(Name,
+                              Src.getFnAttribute(Name).getValueAsString());
+}
+
 void relaxFunctionEffects(Function &F) {
     F.setMemoryEffects(MemoryEffects::unknown());
     F.removeFnAttr(Attribute::NoSync);
@@ -681,7 +717,7 @@ Value *castZero(Builder &B, Value *Zero64, IntegerType *Ty) {
 }
 
 Function *createOutlineHelper(Module &M, const OutlineKey &Key,
-                              ir::IRRandom &Rng) {
+                              const Function &Src, ir::IRRandom &Rng) {
     LLVMContext &Ctx = M.getContext();
     auto *ArgTy = typeForKey(Ctx, Key);
     const bool IsCompare =
@@ -698,6 +734,10 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
                          &M);
     Fn->setDSOLocal(true);
     addGeneratedAttrs(Fn);
+    // FP helpers inherit the source function's FP-environment/target attributes
+    // so the outlined op keeps its original denormal/strict/lowering behavior.
+    if (isFloatKind(Key.kind))
+        applyFpEnv(Fn, Src);
 
     GlobalVariable *KeyGV = createOutlineKey(M, Key, Rng);
 
@@ -744,13 +784,19 @@ Function *createOutlineHelper(Module &M, const OutlineKey &Key,
 }
 
 Function *getOutlineHelper(Module &M, std::vector<OutlineHelper> &Helpers,
-                           const OutlineKey &Key, ir::IRRandom &Rng) {
+                           const OutlineKey &Key, const Function &Src,
+                           ir::IRRandom &Rng) {
+    // Integer ops are FP-environment independent (empty signature); FP ops must
+    // not share a helper across functions with different FP modes.
+    const std::string Sig =
+        isFloatKind(Key.kind) ? fpEnvSignature(Src) : std::string();
     for (const OutlineHelper &H : Helpers)
         if (H.key.kind == Key.kind && H.key.code == Key.code &&
-            H.key.bits == Key.bits && H.key.scalar == Key.scalar)
+            H.key.bits == Key.bits && H.key.scalar == Key.scalar &&
+            H.fpSig == Sig)
             return H.helper;
-    Function *Helper = createOutlineHelper(M, Key, Rng);
-    Helpers.push_back({Key, Helper});
+    Function *Helper = createOutlineHelper(M, Key, Src, Rng);
+    Helpers.push_back({Key, Helper, Sig});
     return Helper;
 }
 
@@ -809,7 +855,8 @@ bool outlineFragments(Module &M, ArrayRef<Function *> ImplFunctions,
         if (!Rng.chance(Params.outline_probability))
             continue;
         Instruction *Inst = Target.inst;
-        Function *Helper = getOutlineHelper(M, Helpers, Target.key, Rng);
+        Function *Helper = getOutlineHelper(M, Helpers, Target.key,
+                                            *Inst->getFunction(), Rng);
 
         Builder B(Inst);
         CallInst *Call = B.CreateCall(Helper->getFunctionType(), Helper,
