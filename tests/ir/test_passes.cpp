@@ -12172,6 +12172,51 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #54: the sandbox probe's clock_gettime/nanosleep heuristics
+// model struct timespec as two 64-bit fields, which is wrong on a 32-bit
+// linux-gnu ABI (two 32-bit longs) — nanosleep would read tv_sec/tv_nsec from
+// the wrong offsets and corrupt the sandbox score.  Those timing heuristics are
+// now gated to 64-bit; the sysconf CPU/RAM checks still run on 32-bit.
+TEST_CASE("antiHookingModule gates 32-bit Linux sandbox timing heuristics") {
+    // 64-bit: the timespec-based sleep/clock heuristics are emitted.
+    {
+        LLVMContext ctx;
+        auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+        auto engine = morok::core::Xoshiro256pp::fromSeed(5401);
+        morok::ir::IRRandom rng(engine);
+        CHECK(morok::passes::antiHookingModule(*M, rng));
+        Function *S = M->getFunction("morok.antihook.sandbox");
+        REQUIRE(S);
+        CHECK(countNamedInstructions(*S, "morok.antihook.sandbox.cpu.count") >=
+              1u);
+        CHECK(countNamedInstructions(*S, "morok.antihook.sandbox.sleep.req") >=
+              1u);
+    }
+    // 32-bit: the sysconf CPU check still runs, but the wrong-layout timespec
+    // timing heuristics are skipped (so the sandbox score can't be corrupted).
+    {
+        LLVMContext ctx;
+        auto M = parse(ctx, R"ir(
+target triple = "i386-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+        auto engine = morok::core::Xoshiro256pp::fromSeed(5402);
+        morok::ir::IRRandom rng(engine);
+        CHECK(morok::passes::antiHookingModule(*M, rng));
+        Function *S = M->getFunction("morok.antihook.sandbox");
+        REQUIRE(S);
+        CHECK(countNamedInstructions(*S, "morok.antihook.sandbox.cpu.count") >=
+              1u);
+        CHECK(countNamedInstructions(*S, "morok.antihook.sandbox.sleep.req") ==
+              0u);
+        CHECK(countNamedInstructions(*S, "morok.antihook.sandbox.boottime") ==
+              0u);
+    }
+}
+
 TEST_CASE("antiHookingModule emits Darwin clean-copy checker without dlsym") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(

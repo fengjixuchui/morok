@@ -5875,6 +5875,15 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
         incrementDiff(B, score, oneCpu, "morok.antihook.sandbox.cpu");
         incrementDiff(B, score, lowPages, "morok.antihook.sandbox.ram");
 
+        // The clock_gettime/nanosleep heuristics below model `struct timespec`
+        // as two 64-bit fields and read it back with emitClockGettimeNanos's
+        // LP64 layout.  That is only correct where `long` is 64-bit (LP64);
+        // on a 32-bit linux-gnu ABI timespec is two 32-bit longs, so nanosleep
+        // would read tv_sec/tv_nsec from the wrong offsets and clock_gettime
+        // would fold tv_nsec into the seconds load — corrupting the sandbox
+        // score (false tamper state or defeated sleep-skip checks).  Skip the
+        // timing heuristics there; the sysconf CPU/RAM checks above still run.
+        if (TT.isArch64Bit()) {
         Value *boot =
             emitClockGettimeNanos(B, M, 7, "morok.antihook.sandbox.boottime");
         Value *shortUptime = B.CreateAnd(
@@ -5911,6 +5920,7 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
             B.CreateICmpULT(sleepDelta, ConstantInt::get(i64, 1000000)),
             "morok.antihook.sandbox.sleep.skip");
         incrementDiff(B, score, sleepSkipped, "morok.antihook.sandbox.sleep");
+        } // TT.isArch64Bit()
     }
 
     auto *out = B.CreateLoad(i64, score, "morok.antihook.sandbox.score.ret");
