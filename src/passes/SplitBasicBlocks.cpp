@@ -11,9 +11,13 @@
 
 #include "morok/passes/SplitBasicBlocks.hpp"
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/NoFolder.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 #include <iterator>
@@ -22,6 +26,15 @@
 using namespace llvm;
 
 namespace morok::passes {
+
+namespace {
+
+// Number of decoy stack slots used by stack-confusion.  A small fixed pool kept
+// in the entry block: enough to look like real spill slots without inflating the
+// frame or risking unbounded growth (the allocas are never inside a loop).
+constexpr unsigned kDecoySlotCount = 3;
+
+} // namespace
 
 bool splitBlocksFunction(Function &F, const SplitParams &params,
                          ir::IRRandom &rng) {
@@ -33,6 +46,37 @@ bool splitBlocksFunction(Function &F, const SplitParams &params,
     std::vector<BasicBlock *> originals;
     for (BasicBlock &bb : F)
         originals.push_back(&bb);
+
+    auto *I64 = Type::getInt64Ty(F.getContext());
+    // Decoy stack slots are created lazily on the first split so functions with
+    // no eligible blocks gain no dead allocas.
+    SmallVector<AllocaInst *, kDecoySlotCount> decoySlots;
+    auto ensureDecoySlots = [&]() {
+        if (!params.stack_confusion || !decoySlots.empty())
+            return;
+        IRBuilder<NoFolder> B(&*F.getEntryBlock().getFirstInsertionPt());
+        for (unsigned s = 0; s < kDecoySlotCount; ++s) {
+            auto *slot = B.CreateAlloca(I64, nullptr, "morok.split.decoy");
+            slot->setAlignment(Align(8));
+            decoySlots.push_back(slot);
+        }
+    };
+    // At a split boundary, push spurious volatile traffic through a decoy slot:
+    // the volatile store/load cannot be optimized away (keeping the slot a live
+    // analysis surface), but the slot is never meaningfully read, so program
+    // behaviour is unchanged.
+    auto confuseAt = [&](BasicBlock *tail) {
+        if (!params.stack_confusion || decoySlots.empty())
+            return;
+        IRBuilder<NoFolder> B(&*tail->getFirstInsertionPt());
+        AllocaInst *slot = decoySlots[rng.range(kDecoySlotCount)];
+        auto *st = B.CreateStore(ConstantInt::get(I64, rng.next()), slot);
+        st->setVolatile(true);
+        st->setAlignment(Align(8));
+        auto *ld = B.CreateLoad(I64, slot, "morok.split.decoy.load");
+        ld->setVolatile(true);
+        ld->setAlignment(Align(8));
+    };
 
     bool changed = false;
     for (BasicBlock *bb : originals) {
@@ -64,6 +108,8 @@ bool splitBlocksFunction(Function &F, const SplitParams &params,
                 ++cut;
             BasicBlock *tail = SplitBlock(cur, cut);
             changed = true;
+            ensureDecoySlots();
+            confuseAt(tail);
             cur = tail; // keep splitting the remaining tail
         }
     }

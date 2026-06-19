@@ -509,6 +509,7 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
                                     eff.split.enabled.value_or(false))) {
                 passes::SplitParams p;
                 p.splits = eff.split.splits.value_or(3);
+                p.stack_confusion = eff.split.stack_confusion.value_or(false);
                 changed |= passes::splitBlocksFunction(F, p, rng);
             }
 

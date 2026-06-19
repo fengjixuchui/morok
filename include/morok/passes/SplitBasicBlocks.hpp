@@ -27,6 +27,11 @@ namespace morok::passes {
 
 struct SplitParams {
     std::uint32_t splits = 3; ///< desired extra cuts per eligible block
+    /// Clobber a small pool of decoy stack slots with volatile traffic at each
+    /// split boundary, so stack-frame/spill analysis sees spurious slots and
+    /// data movement.  Semantics-preserving (the slots are never meaningfully
+    /// read); off by default.
+    bool stack_confusion = false;
 };
 
 /// Split eligible blocks of `F`.  Returns true if any block was split.

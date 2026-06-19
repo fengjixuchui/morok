@@ -3913,6 +3913,59 @@ TEST_CASE("splitBlocksFunction multiplies blocks and stays valid") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+// Regression for #24: split_blocks.stack_confusion was advertised by the
+// presets/docs but never reached the pass, so toggling it produced byte-
+// identical IR.  It now injects decoy stack slots clobbered with volatile
+// traffic at each split boundary; the flag must measurably change the IR while
+// preserving validity.
+TEST_CASE("splitBlocksFunction stack_confusion adds decoy stack traffic") {
+    auto countDecoy = [](Function &F) {
+        unsigned allocas = 0;
+        unsigned volStores = 0;
+        for (Instruction &I : instructions(F)) {
+            if (auto *AI = dyn_cast<AllocaInst>(&I))
+                allocas += AI->getName().starts_with("morok.split.decoy");
+            if (auto *SI = dyn_cast<StoreInst>(&I))
+                volStores += SI->isVolatile() &&
+                             SI->getPointerOperand()->getName().starts_with(
+                                 "morok.split.decoy");
+        }
+        return std::make_pair(allocas, volStores);
+    };
+
+    // Off (default): no decoy stack slots at all.
+    {
+        LLVMContext ctx;
+        auto M = parse(ctx, kArith);
+        Function *F = M->getFunction("arith");
+        REQUIRE(F);
+        auto engine = morok::core::Xoshiro256pp::fromSeed(2401);
+        morok::ir::IRRandom rng(engine);
+        CHECK(morok::passes::splitBlocksFunction(
+            *F, {/*splits=*/3, /*stack_confusion=*/false}, rng));
+        auto [allocas, volStores] = countDecoy(*F);
+        CHECK(allocas == 0u);
+        CHECK(volStores == 0u);
+        CHECK_FALSE(verifyModule(*M, &errs()));
+    }
+
+    // On: decoy slots and volatile traffic appear; IR stays valid.
+    {
+        LLVMContext ctx;
+        auto M = parse(ctx, kArith);
+        Function *F = M->getFunction("arith");
+        REQUIRE(F);
+        auto engine = morok::core::Xoshiro256pp::fromSeed(2401);
+        morok::ir::IRRandom rng(engine);
+        CHECK(morok::passes::splitBlocksFunction(
+            *F, {/*splits=*/3, /*stack_confusion=*/true}, rng));
+        auto [allocas, volStores] = countDecoy(*F);
+        CHECK(allocas == 3u); // kDecoySlotCount
+        CHECK(volStores >= 1u);
+        CHECK_FALSE(verifyModule(*M, &errs()));
+    }
+}
+
 TEST_CASE("bogusControlFlowFunction adds guarded edges and stays valid") {
     LLVMContext ctx;
     auto M = parse(ctx, kArith);
