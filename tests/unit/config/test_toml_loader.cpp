@@ -102,6 +102,8 @@ TEST_CASE("a tuning section does not disable a preset-enabled pass") {
     probability = 50
     [passes.substitution]
     probability = 33
+    [passes.tracer_attestation]
+    shares = 2
   )");
     REQUIRE(r.ok);
     const auto base = presetConfig(Preset::High);
@@ -110,6 +112,11 @@ TEST_CASE("a tuning section does not disable a preset-enabled pass") {
     CHECK(r.config.passes.bcf.probability == 50u);
     CHECK(r.config.passes.sub.enabled == base.sub.enabled);
     CHECK(r.config.passes.sub.probability == 33u);
+    CHECK(r.config.passes.tracer_attestation.enabled ==
+          base.tracer_attestation.enabled);
+    CHECK(r.config.passes.tracer_attestation.shares == 2u);
+    CHECK(r.config.passes.tracer_attestation.bind_to_runtime_seal ==
+          base.tracer_attestation.bind_to_runtime_seal);
     // Fields the section never mentioned keep their preset values.
     CHECK(r.config.passes.bcf.iterations == base.bcf.iterations);
 }
@@ -236,6 +243,13 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     max_payloads = 3
     max_payload_bytes = 4096
     context_keying = true
+    [passes.tracer_attestation]
+    enabled = true
+    mode = "linux_ptrace"
+    shares = 3
+    renewal = "startup"
+    bind_to_runtime_seal = true
+    virtualize_helpers = false
     [passes.self_checksum_constants]
     enabled = true
     probability = 83
@@ -435,6 +449,12 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.hash_self_decrypt.max_payloads == 3u);
     CHECK(r.config.passes.hash_self_decrypt.max_payload_bytes == 4096u);
     CHECK(r.config.passes.hash_self_decrypt.context_keying == true);
+    CHECK(r.config.passes.tracer_attestation.enabled == true);
+    CHECK(r.config.passes.tracer_attestation.mode == "linux_ptrace");
+    CHECK(r.config.passes.tracer_attestation.shares == 3u);
+    CHECK(r.config.passes.tracer_attestation.renewal == "startup");
+    CHECK(r.config.passes.tracer_attestation.bind_to_runtime_seal == true);
+    CHECK(r.config.passes.tracer_attestation.virtualize_helpers == false);
     CHECK(r.config.passes.self_checksum.enabled == true);
     CHECK(r.config.passes.self_checksum.probability == 83u);
     CHECK(r.config.passes.self_checksum.max_constants == 6u);

@@ -595,6 +595,7 @@ user strings are encrypted, length-padded where safe, and materialized lazily.
 | Virtualization | `morok-vm` | `virtualization` | Lifts eligible integer/pointer computation kernels to encrypted threaded bytecode VMs, including multi-block, memory, cast, compare, division, selected intrinsics, and direct internal helper calls when safe. |
 | Hash-gated self-decrypt | `morok-selfdecrypt` | `hash_gated_self_decrypt` | Lazily decrypts VM bytecode from runtime hashes/context and re-encrypts on helper exit. |
 | External proof binding | `morok-proofbind` | `external_secret_binding` | Materializes a proof feed/finish API and folds proof-derived material into the `external_proof` runtime seal channel instead of returning a branchable verdict. |
+| Tracer attestation | `morok-tracer` | `tracer_attestation` | Uses a Linux/x86_64 buddy tracer to inject runtime-only share words into the parent and folds them into the `tracer` runtime seal channel. |
 | Self-checksum constants | `morok-selfcheck` | `self_checksum_constants` | Fuses constants with runtime checksum diffs so tamper corrupts data instead of branching. |
 | Mutual guard graph | `morok-mutualguard` | `mutual_guard_graph` | Emits overlapping checksum nodes whose aggregate diff poisons scalar returns. |
 | Data-flow integrity | `morok-dfi` | `data_flow_integrity` | Decodes narrow op tables from runtime integrity hashes and decoy hidden state. |
@@ -719,6 +720,7 @@ shares where needed.
 | `virtualization` | `enabled`, `probability`, `max_functions`, `max_instructions`, `max_registers` |
 | `hash_gated_self_decrypt` | `enabled`, `probability`, `max_payloads`, `max_payload_bytes`, `context_keying` |
 | `external_secret_binding` | `enabled`, `mode`, `public_key`, `identity_policy`, `bind_to_runtime_seal`, `virtualize_helpers` |
+| `tracer_attestation` | `enabled`, `mode`, `shares`, `renewal`, `bind_to_runtime_seal`, `virtualize_helpers` |
 | `self_checksum_constants` | `enabled`, `probability`, `max_constants`, `region_bytes` |
 | `data_flow_integrity` | `enabled`, `probability`, `max_tables`, `region_bytes` |
 | `mutual_guard_graph` | `enabled`, `probability`, `nodes`, `region_bytes`, `max_returns` |

@@ -1,0 +1,396 @@
+// SPDX-License-Identifier: MIT
+//
+// Morok — modular LLVM IR obfuscator.
+//
+// Buddy-process tracer material for RuntimeSeal.
+
+#include "morok/passes/TracerAttestation.hpp"
+
+#include "morok/passes/RuntimeSeal.hpp"
+
+#include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Attributes.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Type.h"
+#include "llvm/TargetParser/Triple.h"
+#include "llvm/Transforms/Utils/ModuleUtils.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <initializer_list>
+#include <vector>
+
+using namespace llvm;
+
+namespace morok::passes {
+
+namespace {
+
+constexpr StringLiteral kCtorName = "morok.tracer.attest";
+constexpr StringLiteral kShareName = "morok.tracer.share";
+constexpr std::uint32_t kMaxShares = 4;
+constexpr std::uint32_t kAttachRetries = 16;
+
+enum LinuxX64Syscall : std::uint32_t {
+    SysRead = 0,
+    SysWrite = 1,
+    SysClose = 3,
+    SysGetpid = 39,
+    SysFork = 57,
+    SysExit = 60,
+    SysWait4 = 61,
+    SysPtrace = 101,
+    SysGetppid = 110,
+    SysPrctl = 157,
+    SysSchedYield = 24,
+};
+
+enum PtraceRequest : std::uint32_t {
+    PtracePeekData = 2,
+    PtracePokeData = 5,
+    PtraceAttach = 16,
+    PtraceDetach = 17,
+};
+
+bool isForkOrSignalApiName(StringRef Name) {
+    return Name == "fork" || Name == "vfork" || Name == "clone" ||
+           Name == "sigaction" || Name == "signal" || Name == "sigprocmask" ||
+           Name == "pthread_sigmask" || Name == "sigsuspend" ||
+           Name == "sigwait" || Name == "sigwaitinfo" ||
+           Name == "sigtimedwait" || Name == "sigpending" ||
+           Name == "sigfillset" || Name == "sigemptyset" ||
+           Name == "sigaddset" || Name == "sigdelset" || Name == "raise" ||
+           Name == "kill" || Name == "alarm" || Name == "pause";
+}
+
+bool moduleUsesForkOrSignalApis(Module &M) {
+    for (Function &F : M)
+        if (!F.use_empty() && isForkOrSignalApiName(F.getName()))
+            return true;
+    return false;
+}
+
+bool supportsDirectTracer(const Triple &TT) {
+    return TT.isOSLinux() && TT.getArch() == Triple::x86_64;
+}
+
+IntegerType *intPtrTy(Module &M) {
+    unsigned Bits = M.getDataLayout().getPointerSizeInBits(0);
+    if (Bits == 0)
+        Bits = 64;
+    return IntegerType::get(M.getContext(), Bits);
+}
+
+Value *toSyscallArg(IRBuilderBase &B, Value *V) {
+    auto *IP = intPtrTy(*B.GetInsertBlock()->getModule());
+    if (V->getType()->isPointerTy())
+        return B.CreatePtrToInt(V, IP);
+    if (V->getType()->isIntegerTy())
+        return B.CreateSExtOrTrunc(V, IP);
+    return ConstantInt::get(IP, 0);
+}
+
+Value *emitLinuxSyscall(IRBuilder<> &B, Module &M, std::uint32_t Number,
+                        std::initializer_list<Value *> Args,
+                        const Twine &Name) {
+    auto *IP = intPtrTy(M);
+    std::array<Value *, 6> SysArgs = {
+        ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+        ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+        ConstantInt::get(IP, 0), ConstantInt::get(IP, 0)};
+    std::size_t I = 0;
+    for (Value *Arg : Args) {
+        if (I >= SysArgs.size())
+            break;
+        SysArgs[I++] = toSyscallArg(B, Arg);
+    }
+
+    std::vector<Type *> Params(7, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *Syscall = InlineAsm::get(
+        AsmTy, "syscall",
+        "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
+        "~{memory},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(AsmTy, Syscall,
+                        {ConstantInt::get(IP, Number), SysArgs[0], SysArgs[1],
+                         SysArgs[2], SysArgs[3], SysArgs[4], SysArgs[5]},
+                        Name);
+}
+
+Value *emitPtrace(IRBuilder<> &B, Module &M, std::uint32_t Request, Value *Pid,
+                  Value *Addr, Value *Data, const Twine &Name) {
+    auto *IP = intPtrTy(M);
+    return emitLinuxSyscall(B, M, SysPtrace,
+                            {ConstantInt::get(IP, Request), Pid, Addr, Data},
+                            Name);
+}
+
+Value *mix64(IRBuilderBase &B, Value *X, std::uint64_t Salt,
+             const Twine &Name) {
+    auto *I64 = B.getInt64Ty();
+    X = B.CreateAdd(X, ConstantInt::get(I64, Salt), Name + ".add");
+    X = B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I64, 23)),
+                    Name + ".fold23");
+    X = B.CreateMul(X, ConstantInt::get(I64, 0xD6E8FEB86659FD93ULL),
+                    Name + ".mul0");
+    X = B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I64, 41)),
+                    Name + ".fold41");
+    X = B.CreateMul(X, ConstantInt::get(I64, 0xA24BAED4963EE407ULL),
+                    Name + ".mul1");
+    return B.CreateXor(X, B.CreateLShr(X, ConstantInt::get(I64, 31)),
+                       Name + ".fold31");
+}
+
+void addHelperAttrs(Function &F, bool VirtualizeHelpers) {
+    F.addFnAttr(Attribute::NoUnwind);
+    F.addFnAttr(Attribute::NoInline);
+    if (!VirtualizeHelpers)
+        F.addFnAttr("morok.tracer.no_vm");
+}
+
+Function *makeCtorShell(Module &M) {
+    auto *Fn = Function::Create(
+        FunctionType::get(Type::getVoidTy(M.getContext()), false),
+        GlobalValue::InternalLinkage, kCtorName, &M);
+    Fn->setDSOLocal(true);
+    Fn->addFnAttr(Attribute::NoUnwind);
+    BasicBlock::Create(M.getContext(), "entry", Fn);
+    return Fn;
+}
+
+Function *getShareHelper(Module &M, ir::IRRandom &Rng, bool VirtualizeHelpers) {
+    if (Function *Existing = M.getFunction(kShareName))
+        return Existing;
+
+    LLVMContext &Ctx = M.getContext();
+    auto *I64 = Type::getInt64Ty(Ctx);
+    auto *Ty = FunctionType::get(I64, {I64, I64, I64, I64}, false);
+    Function *Fn =
+        Function::Create(Ty, GlobalValue::PrivateLinkage, kShareName, &M);
+    Fn->setDSOLocal(true);
+    addHelperAttrs(*Fn, VirtualizeHelpers);
+
+    auto It = Fn->arg_begin();
+    Value *Parent = &*It++;
+    Parent->setName("parent");
+    Value *Self = &*It++;
+    Self->setName("self");
+    Value *Slot = &*It++;
+    Slot->setName("slot");
+    Value *Index = &*It++;
+    Index->setName("index");
+
+    BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
+    IRBuilder<> B(Entry);
+    Value *X = B.CreateXor(Parent, B.CreateShl(Self, ConstantInt::get(I64, 9)),
+                           "morok.tracer.share.pid");
+    X = B.CreateXor(X,
+                    B.CreateOr(B.CreateShl(Slot, ConstantInt::get(I64, 17)),
+                               B.CreateLShr(Slot, ConstantInt::get(I64, 47)),
+                               "morok.tracer.share.slot.rot"),
+                    "morok.tracer.share.slot");
+    X = B.CreateXor(X,
+                    B.CreateMul(Index, ConstantInt::get(I64, Rng.next() | 1)),
+                    "morok.tracer.share.idx");
+    X = mix64(B, X, Rng.next(), "morok.tracer.share.mix0");
+    X = B.CreateAdd(X, ConstantInt::get(I64, Rng.next() | 1),
+                    "morok.tracer.share.bias");
+    X = mix64(B, X, Rng.next(), "morok.tracer.share.mix1");
+    B.CreateRet(
+        B.CreateOr(X, ConstantInt::get(I64, 1), "morok.tracer.share.nonzero"));
+    return Fn;
+}
+
+void restorePtracer(IRBuilder<> &B, Module &M, GlobalVariable *AntiBuddyPid) {
+    auto *IP = intPtrTy(M);
+    Value *Restore = ConstantInt::get(IP, 0);
+    if (AntiBuddyPid) {
+        auto *Loaded = B.CreateLoad(AntiBuddyPid->getValueType(), AntiBuddyPid,
+                                    "morok.tracer.restore.buddy");
+        Loaded->setVolatile(true);
+        Value *Wide = B.CreateSExtOrTrunc(Loaded, IP);
+        Value *Valid = B.CreateICmpSGT(Wide, ConstantInt::get(IP, 1),
+                                       "morok.tracer.restore.valid");
+        Restore = B.CreateSelect(Valid, Wide, ConstantInt::get(IP, 0),
+                                 "morok.tracer.restore.pid");
+    }
+    emitLinuxSyscall(B, M, SysPrctl,
+                     {ConstantInt::get(IP, 0x59616D61), Restore,
+                      ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+                      ConstantInt::get(IP, 0)},
+                     "morok.tracer.restore.ptracer");
+}
+
+void emitChildExit(IRBuilder<> &B, Module &M) {
+    auto *IP = intPtrTy(M);
+    emitLinuxSyscall(B, M, SysExit, {ConstantInt::get(IP, 0)},
+                     "morok.tracer.child.exit");
+    B.CreateUnreachable();
+}
+
+void emitShareRound(Module &M, Function &Ctor, IRBuilder<> &B,
+                    Function *ShareHelper, GlobalVariable *AntiBuddyPid,
+                    std::uint32_t Index, std::uint64_t FoldSalt) {
+    LLVMContext &Ctx = M.getContext();
+    auto *I32 = Type::getInt32Ty(Ctx);
+    auto *I64 = Type::getInt64Ty(Ctx);
+    auto *IP = intPtrTy(M);
+    auto *Ptr = PointerType::getUnqual(Ctx);
+
+    AllocaInst *Slot = B.CreateAlloca(I64, nullptr, "morok.tracer.slot");
+    AllocaInst *ParentStatus =
+        B.CreateAlloca(I32, nullptr, "morok.tracer.parent.status");
+    auto *ZeroStore = B.CreateStore(ConstantInt::get(I64, 0), Slot);
+    ZeroStore->setVolatile(true);
+    ZeroStore->setAlignment(Align(8));
+
+    Value *Pid = emitLinuxSyscall(B, M, SysFork, {}, "morok.tracer.fork");
+    BasicBlock *ChildBB = BasicBlock::Create(Ctx, "morok.tracer.child", &Ctor);
+    BasicBlock *ParentBB =
+        BasicBlock::Create(Ctx, "morok.tracer.parent", &Ctor);
+    BasicBlock *PtracerBB =
+        BasicBlock::Create(Ctx, "morok.tracer.ptracer", &Ctor);
+    BasicBlock *FoldBB = BasicBlock::Create(Ctx, "morok.tracer.fold", &Ctor);
+    BasicBlock *ContBB = BasicBlock::Create(Ctx, "morok.tracer.cont", &Ctor);
+    B.CreateCondBr(
+        B.CreateICmpEQ(Pid, ConstantInt::get(IP, 0), "morok.tracer.is_child"),
+        ChildBB, ParentBB);
+
+    IRBuilder<> ChildB(ChildBB);
+    Value *Parent =
+        emitLinuxSyscall(ChildB, M, SysGetppid, {}, "morok.tracer.child.ppid");
+    Value *Self =
+        emitLinuxSyscall(ChildB, M, SysGetpid, {}, "morok.tracer.child.pid");
+    Value *SlotAddr =
+        ChildB.CreatePtrToInt(Slot, I64, "morok.tracer.child.slot");
+    Value *Share =
+        ChildB.CreateCall(ShareHelper->getFunctionType(), ShareHelper,
+                          {ChildB.CreateZExtOrTrunc(Parent, I64),
+                           ChildB.CreateZExtOrTrunc(Self, I64), SlotAddr,
+                           ConstantInt::get(I64, Index)},
+                          "morok.tracer.child.share");
+    BasicBlock *AttachBB =
+        BasicBlock::Create(Ctx, "morok.tracer.attach", &Ctor);
+    BasicBlock *AttachedBB =
+        BasicBlock::Create(Ctx, "morok.tracer.attached", &Ctor);
+    BasicBlock *RetryBB = BasicBlock::Create(Ctx, "morok.tracer.retry", &Ctor);
+    BasicBlock *ChildExitBB =
+        BasicBlock::Create(Ctx, "morok.tracer.child.done", &Ctor);
+    ChildB.CreateBr(AttachBB);
+
+    IRBuilder<> AttachB(AttachBB);
+    PHINode *Attempt = AttachB.CreatePHI(IP, 2, "morok.tracer.retry.count");
+    Attempt->addIncoming(ConstantInt::get(IP, 0), ChildBB);
+    Value *AttachRc =
+        emitPtrace(AttachB, M, PtraceAttach, Parent, ConstantInt::get(IP, 0),
+                   ConstantInt::get(IP, 0), "morok.tracer.attach.rc");
+    AttachB.CreateCondBr(AttachB.CreateICmpEQ(AttachRc, ConstantInt::get(IP, 0),
+                                              "morok.tracer.attach.ok"),
+                         AttachedBB, RetryBB);
+
+    IRBuilder<> RetryB(RetryBB);
+    emitLinuxSyscall(RetryB, M, SysSchedYield, {}, "morok.tracer.retry.yield");
+    Value *NextAttempt = RetryB.CreateAdd(Attempt, ConstantInt::get(IP, 1),
+                                          "morok.tracer.retry.next");
+    RetryB.CreateCondBr(
+        RetryB.CreateICmpULT(NextAttempt, ConstantInt::get(IP, kAttachRetries),
+                             "morok.tracer.retry.keep"),
+        AttachBB, ChildExitBB);
+    Attempt->addIncoming(NextAttempt, RetryBB);
+
+    IRBuilder<> AttachedB(AttachedBB);
+    AllocaInst *ChildStatus =
+        AttachedB.CreateAlloca(I32, nullptr, "morok.tracer.child.status");
+    Value *WaitParent =
+        emitLinuxSyscall(AttachedB, M, SysWait4,
+                         {Parent, ChildStatus, ConstantInt::get(IP, 0),
+                          ConstantPointerNull::get(Ptr)},
+                         "morok.tracer.child.wait");
+    Value *WaitOk = AttachedB.CreateICmpEQ(WaitParent, Parent,
+                                           "morok.tracer.child.wait.ok");
+    Value *Word = AttachedB.CreateSelect(
+        WaitOk, Share, ConstantInt::get(I64, 0), "morok.tracer.child.word");
+    Value *WordIP = AttachedB.CreateZExtOrTrunc(Word, IP);
+    emitPtrace(AttachedB, M, PtracePokeData, Parent, SlotAddr, WordIP,
+               "morok.tracer.poke");
+    emitPtrace(AttachedB, M, PtraceDetach, Parent, ConstantInt::get(IP, 0),
+               ConstantInt::get(IP, 0), "morok.tracer.detach");
+    AttachedB.CreateBr(ChildExitBB);
+
+    IRBuilder<> ChildExitB(ChildExitBB);
+    emitChildExit(ChildExitB, M);
+
+    IRBuilder<> ParentB(ParentBB);
+    ParentB.CreateCondBr(ParentB.CreateICmpSGT(Pid, ConstantInt::get(IP, 0),
+                                               "morok.tracer.pid.valid"),
+                         PtracerBB, FoldBB);
+
+    IRBuilder<> PtracerB(PtracerBB);
+    emitLinuxSyscall(PtracerB, M, SysPrctl,
+                     {ConstantInt::get(IP, 0x59616D61), Pid,
+                      ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+                      ConstantInt::get(IP, 0)},
+                     "morok.tracer.ptracer.rc");
+    emitLinuxSyscall(PtracerB, M, SysWait4,
+                     {Pid, ParentStatus, ConstantInt::get(IP, 0),
+                      ConstantPointerNull::get(Ptr)},
+                     "morok.tracer.parent.wait");
+    restorePtracer(PtracerB, M, AntiBuddyPid);
+    PtracerB.CreateBr(FoldBB);
+
+    IRBuilder<> FoldB(FoldBB);
+    auto *Loaded = FoldB.CreateLoad(I64, Slot, "morok.tracer.word");
+    Loaded->setVolatile(true);
+    Loaded->setAlignment(Align(8));
+    runtime_seal::foldWord(FoldB, runtime_seal::kTracerChannel, Loaded,
+                           FoldSalt, "morok.tracer.seal");
+    FoldB.CreateBr(ContBB);
+
+    B.SetInsertPoint(ContBB);
+}
+
+} // namespace
+
+bool tracerAttestationModule(Module &M, const TracerAttestationParams &Params,
+                             ir::IRRandom &Rng) {
+    if (!Params.enabled || Params.mode != "linux_ptrace" ||
+        Params.renewal != "startup" || Params.shares == 0)
+        return false;
+
+    const Triple TT(M.getTargetTriple());
+    if (!supportsDirectTracer(TT) || moduleUsesForkOrSignalApis(M) ||
+        M.getFunction(kCtorName))
+        return false;
+
+    if (Params.bind_to_runtime_seal)
+        runtime_seal::getChannel(M, runtime_seal::kTracerChannel, Rng);
+
+    Function *ShareHelper = getShareHelper(M, Rng, Params.virtualize_helpers);
+    Function *Ctor = makeCtorShell(M);
+    GlobalVariable *AntiBuddyPid =
+        M.getGlobalVariable("morok.antidbg.buddy.pid", true);
+
+    IRBuilder<> B(&Ctor->getEntryBlock());
+    const std::uint32_t ShareCount = std::min(Params.shares, kMaxShares);
+    for (std::uint32_t I = 0; I < ShareCount; ++I)
+        emitShareRound(M, *Ctor, B, ShareHelper, AntiBuddyPid, I, Rng.next());
+    B.CreateRetVoid();
+    appendToGlobalCtors(M, Ctor, 0);
+    return true;
+}
+
+PreservedAnalyses TracerAttestationPass::run(Module &M,
+                                             ModuleAnalysisManager &) {
+    ir::IRRandom Rng(engine_);
+    return tracerAttestationModule(M, params_, Rng) ? PreservedAnalyses::none()
+                                                    : PreservedAnalyses::all();
+}
+
+} // namespace morok::passes

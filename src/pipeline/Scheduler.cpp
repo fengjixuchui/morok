@@ -53,6 +53,7 @@
 #include "morok/passes/StringEncryption.hpp"
 #include "morok/passes/SubThresholdPersistence.hpp"
 #include "morok/passes/Substitution.hpp"
+#include "morok/passes/TracerAttestation.hpp"
 #include "morok/passes/TraceKeying.hpp"
 #include "morok/passes/TypePunning.hpp"
 #include "morok/passes/UniformPrimitiveLowering.hpp"
@@ -466,6 +467,20 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     if (config_.passes.anti_dbg.enabled.value_or(false))
         changed |= passes::antiDebuggingModule(
             M, rng, !config_.passes.trap_oracles.enabled.value_or(false));
+    if (config_.passes.tracer_attestation.enabled.value_or(false)) {
+        passes::TracerAttestationParams p;
+        p.mode =
+            config_.passes.tracer_attestation.mode.value_or("linux_ptrace");
+        p.shares = config_.passes.tracer_attestation.shares.value_or(2);
+        p.renewal =
+            config_.passes.tracer_attestation.renewal.value_or("startup");
+        p.bind_to_runtime_seal =
+            config_.passes.tracer_attestation.bind_to_runtime_seal.value_or(
+                true);
+        p.virtualize_helpers =
+            config_.passes.tracer_attestation.virtualize_helpers.value_or(true);
+        changed |= passes::tracerAttestationModule(M, p, rng);
+    }
     if (config_.passes.timing_oracles.enabled.value_or(false))
         changed |= passes::timingOracleModule(M, rng);
     if (config_.passes.trap_oracles.enabled.value_or(false))

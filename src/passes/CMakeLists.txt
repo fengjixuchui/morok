@@ -47,6 +47,7 @@ add_library(morok_passes STATIC
   Nanomites.cpp
   PathExplosion.cpp
   RuntimeSeal.cpp
+  TracerAttestation.cpp
   TraceKeying.cpp
   DispatcherlessRouting.cpp
   StringEncryption.cpp

@@ -54,6 +54,7 @@
 #include "morok/passes/StringEncryption.hpp"
 #include "morok/passes/SubThresholdPersistence.hpp"
 #include "morok/passes/Substitution.hpp"
+#include "morok/passes/TracerAttestation.hpp"
 #include "morok/passes/TraceKeying.hpp"
 #include "morok/passes/TypePunning.hpp"
 #include "morok/passes/UniformPrimitiveLowering.hpp"
@@ -7068,6 +7069,37 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("virtualizeModule lifts tracer helpers in protection-helper mode") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+define private i64 @morok.tracer.mix(i64 %x) {
+entry:
+  %a = xor i64 %x, 1393753992385309935
+  %b = mul i64 %a, 16045690984833335023
+  %c = add i64 %b, 11400714819323198485
+  ret i64 %c
+}
+)ir");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(95106);
+    morok::ir::IRRandom rng(engine);
+    morok::passes::VirtualizationParams P{/*probability=*/100,
+                                           /*max_functions=*/4,
+                                           /*max_instructions=*/64,
+                                           /*max_registers=*/64};
+    P.include_protection_helpers = true;
+    P.protection_helpers_only = true;
+    CHECK(morok::passes::virtualizeModule(*M, P, rng));
+
+    Function *Tracer = M->getFunction("morok.tracer.mix");
+    REQUIRE(Tracer != nullptr);
+    CHECK(M->getFunction("morok.vm.morok.tracer.mix.exec") != nullptr);
+    CHECK(countCallsTo(*Tracer, "morok.vm.morok.tracer.mix.exec") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("virtualizeModule keeps heavy anti-hook scanners native") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -8479,6 +8511,72 @@ entry:
         if (auto *SI = dyn_cast<StoreInst>(&I))
             finishStoresSeal |= SI->getPointerOperand() == Seal;
     CHECK(finishStoresSeal);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("tracerAttestationModule emits direct Linux buddy share producer") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() {
+entry:
+  ret i32 0
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(97105);
+    morok::ir::IRRandom rng(engine);
+
+    morok::passes::TracerAttestationParams params;
+    params.shares = 2;
+    CHECK(morok::passes::tracerAttestationModule(*M, params, rng));
+
+    GlobalVariable *Seal =
+        M->getGlobalVariable("morok.seal.root.tracer", true);
+    REQUIRE(Seal != nullptr);
+    Function *Ctor = M->getFunction("morok.tracer.attest");
+    Function *Share = M->getFunction("morok.tracer.share");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Share != nullptr);
+    CHECK(Share->hasFnAttribute(Attribute::NoInline));
+    CHECK_FALSE(Share->hasFnAttribute("morok.tracer.no_vm"));
+    CHECK(M->getFunction("syscall") == nullptr);
+    CHECK(M->getFunction("ptrace") == nullptr);
+    CHECK(M->getFunction("prctl") == nullptr);
+    CHECK(M->getFunction("fork") == nullptr);
+    CHECK(M->getFunction("wait4") == nullptr);
+    CHECK(hasInlineAsmCall(*Ctor));
+    CHECK(countCallsTo(*Ctor, "morok.tracer.share") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.fork") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.attach.rc") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.poke") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.restore.ptracer") == 2u);
+    CHECK(countNamedInstructions(*Ctor, "morok.tracer.seal.next") == 2u);
+    CHECK(countNamedInstructions(*Share, "morok.tracer.share.mix") >= 2u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("tracerAttestationModule skips fork and signal owners") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+declare i32 @fork()
+declare i32 @sigaction(i32, ptr, ptr)
+define i32 @main(ptr %sa) {
+entry:
+  %pid = call i32 @fork()
+  %rc = call i32 @sigaction(i32 10, ptr %sa, ptr null)
+  %mix = add i32 %pid, %rc
+  ret i32 %mix
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(97106);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK_FALSE(morok::passes::tracerAttestationModule(
+        *M, morok::passes::TracerAttestationParams{}, rng));
+    CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) == nullptr);
+    CHECK(M->getFunction("morok.tracer.attest") == nullptr);
+    CHECK(M->getFunction("morok.tracer.share") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

@@ -101,6 +101,14 @@ max_payloads = 16
 max_payload_bytes = 65536
 context_keying = true
 
+[passes.tracer_attestation]
+enabled = true
+mode = "linux_ptrace"
+shares = 4
+renewal = "startup"
+bind_to_runtime_seal = true
+virtualize_helpers = true
+
 [passes.self_checksum_constants]
 probability = 100
 max_constants = 12

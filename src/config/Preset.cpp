@@ -165,6 +165,13 @@ PassConfig makeLow() {
     c.hash_self_decrypt.max_payload_bytes = 0;
     c.hash_self_decrypt.context_keying = false;
 
+    c.tracer_attestation.enabled = false;
+    c.tracer_attestation.mode = "linux_ptrace";
+    c.tracer_attestation.shares = 0;
+    c.tracer_attestation.renewal = "startup";
+    c.tracer_attestation.bind_to_runtime_seal = true;
+    c.tracer_attestation.virtualize_helpers = true;
+
     c.self_checksum.enabled = false;
     c.self_checksum.probability = 0;
     c.self_checksum.max_constants = 0;
@@ -377,6 +384,13 @@ PassConfig makeMid() {
     c.hash_self_decrypt.max_payloads = 0;
     c.hash_self_decrypt.max_payload_bytes = 0;
     c.hash_self_decrypt.context_keying = false;
+
+    c.tracer_attestation.enabled = false;
+    c.tracer_attestation.mode = "linux_ptrace";
+    c.tracer_attestation.shares = 0;
+    c.tracer_attestation.renewal = "startup";
+    c.tracer_attestation.bind_to_runtime_seal = true;
+    c.tracer_attestation.virtualize_helpers = true;
 
     c.self_checksum.enabled = false;
     c.self_checksum.probability = 0;
@@ -596,6 +610,13 @@ PassConfig makeHigh() {
     c.hash_self_decrypt.max_payloads = 1;
     c.hash_self_decrypt.max_payload_bytes = 64 * 1024;
     c.hash_self_decrypt.context_keying = true;
+
+    c.tracer_attestation.enabled = true;
+    c.tracer_attestation.mode = "linux_ptrace";
+    c.tracer_attestation.shares = 1;
+    c.tracer_attestation.renewal = "startup";
+    c.tracer_attestation.bind_to_runtime_seal = true;
+    c.tracer_attestation.virtualize_helpers = true;
 
     c.self_checksum.enabled = true;
     c.self_checksum.probability = 20;
@@ -836,6 +857,13 @@ PassConfig makeMax() {
     c.hash_self_decrypt.max_payloads = 16;
     c.hash_self_decrypt.max_payload_bytes = 64 * 1024;
     c.hash_self_decrypt.context_keying = true;
+
+    c.tracer_attestation.enabled = true;
+    c.tracer_attestation.mode = "linux_ptrace";
+    c.tracer_attestation.shares = 4;
+    c.tracer_attestation.renewal = "startup";
+    c.tracer_attestation.bind_to_runtime_seal = true;
+    c.tracer_attestation.virtualize_helpers = true;
 
     c.self_checksum.enabled = true;
     c.self_checksum.probability = 100;

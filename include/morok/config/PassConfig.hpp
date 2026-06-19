@@ -185,6 +185,15 @@ struct ExternalSecretBindingConfig {
     Opt<bool> virtualize_helpers;
 };
 
+struct TracerAttestationConfig {
+    Opt<bool> enabled;
+    Opt<std::string> mode;
+    Opt<std::uint32_t> shares;
+    Opt<std::string> renewal;
+    Opt<bool> bind_to_runtime_seal;
+    Opt<bool> virtualize_helpers;
+};
+
 struct SelfChecksumConfig {
     Opt<bool> enabled;
     Opt<std::uint32_t> probability;
@@ -366,6 +375,7 @@ struct PassConfig {
     VirtualizationConfig virtualization;
     HashSelfDecryptConfig hash_self_decrypt;
     ExternalSecretBindingConfig external_secret_binding;
+    TracerAttestationConfig tracer_attestation;
     SelfChecksumConfig self_checksum;
     DataFlowIntegrityConfig data_flow_integrity;
     MutualGuardConfig mutual_guard;

@@ -178,6 +178,15 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.external_secret_binding.bind_to_runtime_seal);
     mergeOpt(dst.external_secret_binding.virtualize_helpers,
              src.external_secret_binding.virtualize_helpers);
+    // Tracer attestation
+    mergeOpt(dst.tracer_attestation.enabled, src.tracer_attestation.enabled);
+    mergeOpt(dst.tracer_attestation.mode, src.tracer_attestation.mode);
+    mergeOpt(dst.tracer_attestation.shares, src.tracer_attestation.shares);
+    mergeOpt(dst.tracer_attestation.renewal, src.tracer_attestation.renewal);
+    mergeOpt(dst.tracer_attestation.bind_to_runtime_seal,
+             src.tracer_attestation.bind_to_runtime_seal);
+    mergeOpt(dst.tracer_attestation.virtualize_helpers,
+             src.tracer_attestation.virtualize_helpers);
     // Self-checksum-fused constants
     mergeOpt(dst.self_checksum.enabled, src.self_checksum.enabled);
     mergeOpt(dst.self_checksum.probability, src.self_checksum.probability);

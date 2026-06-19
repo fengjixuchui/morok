@@ -57,6 +57,7 @@
 #include "morok/passes/StringEncryption.hpp"
 #include "morok/passes/SubThresholdPersistence.hpp"
 #include "morok/passes/Substitution.hpp"
+#include "morok/passes/TracerAttestation.hpp"
 #include "morok/passes/TraceKeying.hpp"
 #include "morok/passes/TypePunning.hpp"
 #include "morok/passes/UniformPrimitiveLowering.hpp"
@@ -417,6 +418,10 @@ PassPluginLibraryInfo getPluginInfo() {
                         }
                         if (name == "morok-proofbind") {
                             MPM.addPass(passes::ExternalSecretBindingPass());
+                            return true;
+                        }
+                        if (name == "morok-tracer") {
+                            MPM.addPass(passes::TracerAttestationPass());
                             return true;
                         }
                         if (name == "morok-antidbg") {

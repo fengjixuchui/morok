@@ -231,6 +231,16 @@ void parseExternalSecretBinding(const toml::table &t,
     c.virtualize_helpers = readBool(t["virtualize_helpers"]);
 }
 
+void parseTracerAttestation(const toml::table &t,
+                            TracerAttestationConfig &c) {
+    c.enabled = readBool(t["enabled"]);
+    c.mode = readString(t["mode"]);
+    c.shares = readU32(t["shares"]);
+    c.renewal = readString(t["renewal"]);
+    c.bind_to_runtime_seal = readBool(t["bind_to_runtime_seal"]);
+    c.virtualize_helpers = readBool(t["virtualize_helpers"]);
+}
+
 void parseSelfChecksum(const toml::table &t, SelfChecksumConfig &c) {
     c.enabled = readBool(t["enabled"]);
     c.probability = readU32(t["probability"]);
@@ -438,6 +448,8 @@ void parsePasses(const toml::table &p, PassConfig &pc) {
         parseHashSelfDecrypt(*t, pc.hash_self_decrypt);
     if (auto *t = p["external_secret_binding"].as_table())
         parseExternalSecretBinding(*t, pc.external_secret_binding);
+    if (auto *t = p["tracer_attestation"].as_table())
+        parseTracerAttestation(*t, pc.tracer_attestation);
     if (auto *t = p["self_checksum_constants"].as_table())
         parseSelfChecksum(*t, pc.self_checksum);
     if (auto *t = p["data_flow_integrity"].as_table())
