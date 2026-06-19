@@ -244,11 +244,11 @@ void makeMutablePayload(GlobalVariable &GV, ArrayRef<std::uint8_t> Outer) {
 }
 
 GlobalVariable *createReady(Module &M, StringRef Suffix) {
-    auto *I1 = Type::getInt1Ty(M.getContext());
+    auto *I32 = Type::getInt32Ty(M.getContext());
     auto *Ready = new GlobalVariable(
-        M, I1, /*isConstant=*/false, GlobalValue::PrivateLinkage,
-        ConstantInt::get(I1, false), ("morok.sdb.ready." + Suffix).str());
-    Ready->setAlignment(Align(1));
+        M, I32, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(I32, 0), ("morok.sdb.ready." + Suffix).str());
+    Ready->setAlignment(Align(4));
     return Ready;
 }
 
@@ -693,6 +693,11 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
     addRuntimeAttrs(Fn);
 
     BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
+    BasicBlock *Acquire = BasicBlock::Create(Ctx, "acquire", Fn);
+    BasicBlock *ClaimDecrypt = BasicBlock::Create(Ctx, "claim", Fn);
+    BasicBlock *MaybeRetain = BasicBlock::Create(Ctx, "maybe.retain", Fn);
+    BasicBlock *Wait = BasicBlock::Create(Ctx, "wait", Fn);
+    BasicBlock *Retain = BasicBlock::Create(Ctx, "retain", Fn);
     BasicBlock *HashLoop = BasicBlock::Create(Ctx, "hash", Fn);
     BasicBlock *Gate = BasicBlock::Create(Ctx, "gate", Fn);
     BasicBlock *DecryptLoop = BasicBlock::Create(Ctx, "decrypt", Fn);
@@ -736,16 +741,56 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
     ContextZero =
         EB.CreateXor(ContextZero, ActiveEnvironmentKey, "morok.sdb.key.env");
     Value *CurrentLayoutRot = loadMoveRot(EB, CurrentRot);
-    auto *ReadyLoad = EB.CreateLoad(I1, Ready, "morok.sdb.ready.load");
-    ReadyLoad->setVolatile(true);
-    ReadyLoad->setAlignment(Align(1));
-    EB.CreateCondBr(ReadyLoad, Fail, HashLoop);
+    EB.CreateBr(Acquire);
+
+    Builder AB(Acquire);
+    auto *ReadyLoad = AB.CreateLoad(I32, Ready, "morok.sdb.ready.load");
+    ReadyLoad->setAtomic(AtomicOrdering::Acquire);
+    ReadyLoad->setAlignment(Align(4));
+    AB.CreateCondBr(
+        AB.CreateICmpEQ(ReadyLoad, ConstantInt::get(I32, 0),
+                        "morok.sdb.ready.sealed"),
+        ClaimDecrypt, MaybeRetain);
+
+    Builder CB(ClaimDecrypt);
+    auto *Claim = CB.CreateAtomicCmpXchg(
+        Ready, ConstantInt::get(I32, 0), ConstantInt::get(I32, 1),
+        MaybeAlign(4), AtomicOrdering::AcquireRelease,
+        AtomicOrdering::Monotonic);
+    CB.CreateCondBr(CB.CreateExtractValue(Claim, 1, "morok.sdb.ready.claimed"),
+                    HashLoop, Acquire);
+
+    Builder MB(MaybeRetain);
+    MB.CreateCondBr(
+        MB.CreateICmpEQ(ReadyLoad, ConstantInt::get(I32, 1),
+                        "morok.sdb.ready.busy"),
+        Wait, Retain);
+
+    Builder WB(Wait);
+    auto *WaitLoad = WB.CreateLoad(I32, Ready, "morok.sdb.ready.wait");
+    WaitLoad->setAtomic(AtomicOrdering::Acquire);
+    WaitLoad->setAlignment(Align(4));
+    WB.CreateCondBr(
+        WB.CreateICmpEQ(WaitLoad, ConstantInt::get(I32, 1),
+                        "morok.sdb.ready.waiting"),
+        Wait, Acquire);
+
+    Builder RBn(Retain);
+    Value *Retained =
+        RBn.CreateAdd(ReadyLoad, ConstantInt::get(I32, 1),
+                      "morok.sdb.ready.retain.next");
+    auto *RetainCas = RBn.CreateAtomicCmpXchg(
+        Ready, ReadyLoad, Retained, MaybeAlign(4),
+        AtomicOrdering::AcquireRelease, AtomicOrdering::Monotonic);
+    RBn.CreateCondBr(
+        RBn.CreateExtractValue(RetainCas, 1, "morok.sdb.ready.retained"),
+        Exit, Acquire);
 
     Builder HB(HashLoop);
     PHINode *HashI = HB.CreatePHI(I32, 2, "morok.sdb.hash.i");
     PHINode *Hash = HB.CreatePHI(I64, 2, "morok.sdb.hash");
-    HashI->addIncoming(ConstantInt::get(I32, 0), Entry);
-    Hash->addIncoming(ConstantInt::get(I64, S.hash_seed), Entry);
+    HashI->addIncoming(ConstantInt::get(I32, 0), ClaimDecrypt);
+    Hash->addIncoming(ConstantInt::get(I64, S.hash_seed), ClaimDecrypt);
     Value *HashPhys = rotatedIndex(HB, HashI, CurrentLayoutRot, Size,
                                    "morok.sdb.move.hash.phys");
     auto *Enc = HB.CreateLoad(I8, payloadPtr(HB, P.bytecode, HashPhys),
@@ -799,9 +844,9 @@ Function *createEnsure(Module &M, Payload &P, GlobalVariable *Ready,
     ZB.CreateCondBr(GateOk, MarkReady, Fail);
 
     Builder RB(MarkReady);
-    auto *ReadyStore = RB.CreateStore(ConstantInt::get(I1, true), Ready);
-    ReadyStore->setVolatile(true);
-    ReadyStore->setAlignment(Align(1));
+    auto *ReadyStore = RB.CreateStore(ConstantInt::get(I32, 2), Ready);
+    ReadyStore->setAtomic(AtomicOrdering::Release);
+    ReadyStore->setAlignment(Align(4));
     RB.CreateBr(Exit);
 
     Builder XB(Exit);
@@ -832,6 +877,9 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
     addRuntimeAttrs(Fn);
 
     BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
+    BasicBlock *Acquire = BasicBlock::Create(Ctx, "acquire", Fn);
+    BasicBlock *Release = BasicBlock::Create(Ctx, "release", Fn);
+    BasicBlock *ReleaseDone = BasicBlock::Create(Ctx, "release.done", Fn);
     BasicBlock *SealLoop = BasicBlock::Create(Ctx, "seal", Fn);
     BasicBlock *PublishLoop = BasicBlock::Create(Ctx, "publish", Fn);
     BasicBlock *Done = BasicBlock::Create(Ctx, "done", Fn);
@@ -873,16 +921,39 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
     Value *NextEpoch = mixMoveEpoch(EB, CurrentEpoch, ExpectedHash, KeyMask,
                                     StableEnvironmentKey, Move);
     Value *NextLayoutRot = nextRotation(EB, CurrentLayoutRot, NextEpoch, Size);
-    auto *ReadyLoad = EB.CreateLoad(I1, Ready, "morok.sdb.ready.load");
-    ReadyLoad->setVolatile(true);
-    ReadyLoad->setAlignment(Align(1));
-    EB.CreateCondBr(ReadyLoad, SealLoop, Exit);
+    EB.CreateBr(Acquire);
+
+    Builder AB(Acquire);
+    auto *ReadyLoad = AB.CreateLoad(I32, Ready, "morok.sdb.ready.load");
+    ReadyLoad->setAtomic(AtomicOrdering::Acquire);
+    ReadyLoad->setAlignment(Align(4));
+    AB.CreateCondBr(
+        AB.CreateICmpUGT(ReadyLoad, ConstantInt::get(I32, 1),
+                         "morok.sdb.ready.active"),
+        Release, Exit);
+
+    Builder RB(Release);
+    Value *NextReady =
+        RB.CreateSub(ReadyLoad, ConstantInt::get(I32, 1),
+                     "morok.sdb.ready.release.next");
+    auto *ReleaseCas = RB.CreateAtomicCmpXchg(
+        Ready, ReadyLoad, NextReady, MaybeAlign(4),
+        AtomicOrdering::AcquireRelease, AtomicOrdering::Monotonic);
+    Value *Released =
+        RB.CreateExtractValue(ReleaseCas, 1, "morok.sdb.ready.released");
+    Value *Last =
+        RB.CreateICmpEQ(ReadyLoad, ConstantInt::get(I32, 2),
+                        "morok.sdb.ready.last");
+    RB.CreateCondBr(Released, ReleaseDone, Acquire);
+
+    Builder RDB(ReleaseDone);
+    RDB.CreateCondBr(Last, SealLoop, Exit);
 
     Builder SB(SealLoop);
     PHINode *SealI = SB.CreatePHI(I32, 2, "morok.sdb.seal.i");
     PHINode *SealHash = SB.CreatePHI(I64, 2, "morok.sdb.seal.hash");
-    SealI->addIncoming(ConstantInt::get(I32, 0), Entry);
-    SealHash->addIncoming(ConstantInt::get(I64, S.hash_seed), Entry);
+    SealI->addIncoming(ConstantInt::get(I32, 0), ReleaseDone);
+    SealHash->addIncoming(ConstantInt::get(I64, S.hash_seed), ReleaseDone);
     Value *SealPtr = payloadPtr(SB, P.bytecode, SealI);
     auto *Inner = SB.CreateLoad(I8, SealPtr, "morok.sdb.inner.seal");
     Inner->setVolatile(true);
@@ -942,9 +1013,9 @@ Function *createSeal(Module &M, Payload &P, GlobalVariable *Ready,
     auto *BoundStore = DB.CreateStore(ConstantInt::get(I1, true), Bound);
     BoundStore->setVolatile(true);
     BoundStore->setAlignment(Align(1));
-    auto *ReadyStore = DB.CreateStore(ConstantInt::get(I1, false), Ready);
-    ReadyStore->setVolatile(true);
-    ReadyStore->setAlignment(Align(1));
+    auto *ReadyStore = DB.CreateStore(ConstantInt::get(I32, 0), Ready);
+    ReadyStore->setAtomic(AtomicOrdering::Release);
+    ReadyStore->setAlignment(Align(4));
     DB.CreateBr(Exit);
 
     Builder XB(Exit);

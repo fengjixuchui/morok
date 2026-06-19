@@ -7639,9 +7639,14 @@ entry:
     bool helperCallsSeal = false;
     bool hasGate = false;
     bool hasTrap = false;
-    bool hasVolatileReadyLoad = false;
-    bool hasVolatileReadyStore = false;
-    bool hasVolatileSealReadyStore = false;
+    bool hasAtomicReadyLoad = false;
+    bool hasReadyClaim = false;
+    bool hasReadyWait = false;
+    bool hasReadyRetain = false;
+    bool hasReadyPublish = false;
+    bool hasAtomicSealReadyLoad = false;
+    bool hasReadyRelease = false;
+    bool hasReadyClear = false;
     bool hasVolatileContextLoad = false;
     bool hasVolatileContextStore = false;
     bool hasContextZero = false;
@@ -7676,6 +7681,11 @@ entry:
     bool sealStoresPayload = false;
     bool sealUsesExpectedHashKey = false;
     bool activePayloadTripsFail = false;
+    bool ensureEntryBranchesToAcquire = false;
+    bool reentryWaitsOrRetains = false;
+    bool readyRetainCanExit = false;
+    bool sealReleaseRetries = false;
+    bool sealLastReleaseSeals = false;
     bool gateFallsIntoDecrypt = false;
     bool decryptBranchesToDecide = false;
     bool hasPostDecryptGateDecision = false;
@@ -7708,6 +7718,12 @@ entry:
             hasVolumeProbe = true;
         if (I.getName().starts_with("morok.sdb.move.hash.phys"))
             ensureHashesMovedPayload = true;
+        if (I.getName().starts_with("morok.sdb.ready.claimed"))
+            hasReadyClaim = true;
+        if (I.getName().starts_with("morok.sdb.ready.waiting"))
+            hasReadyWait = true;
+        if (I.getName().starts_with("morok.sdb.ready.retained"))
+            hasReadyRetain = true;
         if (auto *CI = dyn_cast<CallInst>(&I))
             if (Function *Callee = CI->getCalledFunction())
                 hasTrap |= Callee->getName() == "llvm.trap";
@@ -7721,8 +7737,8 @@ entry:
                 }
         }
         if (auto *LI = dyn_cast<LoadInst>(&I))
-            hasVolatileReadyLoad |=
-                LI->isVolatile() &&
+            hasAtomicReadyLoad |=
+                LI->isAtomic() &&
                 LI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.ready");
         if (auto *LI = dyn_cast<LoadInst>(&I)) {
@@ -7753,10 +7769,11 @@ entry:
                 LI->getPointerOperand()->getName().starts_with(
                     "morok.sdb.context.slot");
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
-            hasVolatileReadyStore |=
-                SI->isVolatile() &&
+            if (SI->isAtomic() &&
                 SI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.ready");
+                    "morok.sdb.ready"))
+                if (auto *CI = dyn_cast<ConstantInt>(SI->getValueOperand()))
+                    hasReadyPublish |= CI->getZExtValue() == 2;
             hasVolatileContextStore |=
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
@@ -7775,12 +7792,30 @@ entry:
             blockHasGate |= I.getName().starts_with("morok.sdb.gate");
         if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator())) {
             if (BB.getName() == "entry")
+                ensureEntryBranchesToAcquire =
+                    BI->isUnconditional() &&
+                    BI->getSuccessor(0)->getName() == "acquire";
+            if (BB.getName() == "entry")
                 activePayloadTripsFail =
                     BI->isConditional() &&
                     ((BI->getSuccessor(0)->getName() == "fail" &&
                       BI->getSuccessor(1)->getName() == "hash") ||
                      (BI->getSuccessor(0)->getName() == "hash" &&
                       BI->getSuccessor(1)->getName() == "fail"));
+            if (BB.getName() == "maybe.retain")
+                reentryWaitsOrRetains =
+                    BI->isConditional() &&
+                    ((BI->getSuccessor(0)->getName() == "wait" &&
+                      BI->getSuccessor(1)->getName() == "retain") ||
+                     (BI->getSuccessor(0)->getName() == "retain" &&
+                      BI->getSuccessor(1)->getName() == "wait"));
+            if (BB.getName() == "retain")
+                readyRetainCanExit =
+                    BI->isConditional() &&
+                    ((BI->getSuccessor(0)->getName() == "exit" &&
+                      BI->getSuccessor(1)->getName() == "acquire") ||
+                     (BI->getSuccessor(0)->getName() == "acquire" &&
+                      BI->getSuccessor(1)->getName() == "exit"));
             if (blockHasGate)
                 gateFallsIntoDecrypt =
                     BI->isUnconditional() &&
@@ -7813,7 +7848,13 @@ entry:
             sealPublishesMovedPayload = true;
         if (I.getName().starts_with("morok.sdb.bound.keymask.next"))
             sealComputesNextKeyMask = true;
+        if (I.getName().starts_with("morok.sdb.ready.released"))
+            hasReadyRelease = true;
         if (auto *LI = dyn_cast<LoadInst>(&I)) {
+            hasAtomicSealReadyLoad |=
+                LI->isAtomic() &&
+                LI->getPointerOperand()->getName().starts_with(
+                    "morok.sdb.ready");
             sealLoadsMoveRot |=
                 LI->isVolatile() &&
                 LI->getPointerOperand()->getName().starts_with(
@@ -7824,10 +7865,11 @@ entry:
                     "morok.sdb.move.epoch.");
         }
         if (auto *SI = dyn_cast<StoreInst>(&I)) {
-            hasVolatileSealReadyStore |=
-                SI->isVolatile() &&
+            if (SI->isAtomic() &&
                 SI->getPointerOperand()->getName().starts_with(
-                    "morok.sdb.ready");
+                    "morok.sdb.ready"))
+                if (auto *CI = dyn_cast<ConstantInt>(SI->getValueOperand()))
+                    hasReadyClear |= CI->isZero();
             sealStoresBound |=
                 SI->isVolatile() &&
                 SI->getPointerOperand()->getName().starts_with(
@@ -7854,13 +7896,36 @@ entry:
                     "morok.sdb.payload.ptr");
         }
     }
+    for (BasicBlock &BB : *Seal) {
+        if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator())) {
+            if (BB.getName() == "release")
+                sealReleaseRetries =
+                    BI->isConditional() &&
+                    ((BI->getSuccessor(0)->getName() == "release.done" &&
+                      BI->getSuccessor(1)->getName() == "acquire") ||
+                     (BI->getSuccessor(0)->getName() == "acquire" &&
+                      BI->getSuccessor(1)->getName() == "release.done"));
+            if (BB.getName() == "release.done")
+                sealLastReleaseSeals =
+                    BI->isConditional() &&
+                    ((BI->getSuccessor(0)->getName() == "seal" &&
+                      BI->getSuccessor(1)->getName() == "exit") ||
+                     (BI->getSuccessor(0)->getName() == "exit" &&
+                      BI->getSuccessor(1)->getName() == "seal"));
+        }
+    }
     CHECK(helperCallsEnsure);
     CHECK(helperCallsSeal);
     CHECK(hasGate);
     CHECK(hasTrap);
-    CHECK(hasVolatileReadyLoad);
-    CHECK(hasVolatileReadyStore);
-    CHECK(hasVolatileSealReadyStore);
+    CHECK(hasAtomicReadyLoad);
+    CHECK(hasReadyClaim);
+    CHECK(hasReadyWait);
+    CHECK(hasReadyRetain);
+    CHECK(hasReadyPublish);
+    CHECK(hasAtomicSealReadyLoad);
+    CHECK(hasReadyRelease);
+    CHECK(hasReadyClear);
     CHECK(hasVolatileContextLoad);
     CHECK(hasVolatileContextStore);
     CHECK(hasContextZero);
@@ -7897,7 +7962,12 @@ entry:
     CHECK(storesPayload);
     CHECK(sealStoresPayload);
     CHECK(sealUsesExpectedHashKey);
-    CHECK(activePayloadTripsFail);
+    CHECK_FALSE(activePayloadTripsFail);
+    CHECK(ensureEntryBranchesToAcquire);
+    CHECK(reentryWaitsOrRetains);
+    CHECK(readyRetainCanExit);
+    CHECK(sealReleaseRetries);
+    CHECK(sealLastReleaseSeals);
     CHECK(gateFallsIntoDecrypt);
     CHECK(decryptBranchesToDecide);
     CHECK(hasPostDecryptGateDecision);
