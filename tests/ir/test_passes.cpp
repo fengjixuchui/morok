@@ -13989,6 +13989,8 @@ entry:
     REQUIRE(Got != nullptr);
     Function *Rx = M->getFunction("morok.antihook.elf.rx");
     REQUIRE(Rx != nullptr);
+    Function *Lazy = M->getFunction("morok.antihook.got.lazy");
+    REQUIRE(Lazy != nullptr);
     Function *Needed = M->getFunction("morok.antihook.got.needed");
     REQUIRE(Needed != nullptr);
     Function *Maps = M->getFunction("morok.antihook.maps.linux");
@@ -14089,6 +14091,10 @@ entry:
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.sym.external") >=
           1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.expected") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.ok") >= 1u);
+    CHECK(countNamedInstructions(*Got, "morok.antihook.got.lazy.notnow") >=
+          1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.target.ok") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.local.rx") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.protect.ok") >= 1u);
@@ -14096,6 +14102,12 @@ entry:
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rx") >= 1u);
     CHECK(countNamedInstructions(*Rx, "morok.antihook.got.self.seg.hit") >= 1u);
     CHECK(countNamedInstructions(*Rx, "morok.antihook.got.map.seg.hit") == 0u);
+    CHECK(countNamedInstructions(*Lazy, "morok.antihook.got.lazy.seg.hit") >=
+          1u);
+    CHECK(countNamedInstructions(*Lazy, "morok.antihook.got.lazy.jmp.bytes") >=
+          1u);
+    CHECK(countNamedInstructions(*Lazy, "morok.antihook.got.lazy.slot.match") >=
+          1u);
     CHECK(countNamedInstructions(*Needed, "morok.antihook.got.needed.name") >=
           1u);
     CHECK(countNamedInstructions(*Needed, "morok.antihook.got.needed.match") >=

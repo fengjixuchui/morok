@@ -3219,6 +3219,144 @@ Function *linuxGotTargetInRx(Module &M) {
     return fn;
 }
 
+Function *linuxGotLazyPltTarget(Module &M) {
+    if (Function *existing = M.getFunction("morok.antihook.got.lazy"))
+        return existing;
+
+    // x86_64 lazy PLT slots initially point to the push/jmp tail of their own
+    // PLT entry.  Accept only that slot-local shape; any other self-RX target is
+    // still a violation for external imports.
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+
+    auto *fn = Function::Create(
+        FunctionType::get(i32, {ip, ip, ip, ip, ip, ip}, false),
+        GlobalValue::PrivateLinkage, "morok.antihook.got.lazy", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    auto *target = fn->getArg(0);
+    target->setName("target");
+    auto *slot = fn->getArg(1);
+    slot->setName("slot");
+    auto *atPhdr = fn->getArg(2);
+    atPhdr->setName("phdr");
+    auto *phNum = fn->getArg(3);
+    phNum->setName("phnum");
+    auto *phEnt = fn->getArg(4);
+    phEnt->setName("phent");
+    auto *selfBase = fn->getArg(5);
+    selfBase->setName("base");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    if (Triple(M.getTargetTriple()).getArch() != Triple::x86_64) {
+        IRBuilder<> B(entry);
+        B.CreateRet(ConstantInt::get(i32, 0));
+        return fn;
+    }
+
+    auto *loopBB = BasicBlock::Create(ctx, "ph.loop", fn);
+    auto *bodyBB = BasicBlock::Create(ctx, "ph.body", fn);
+    auto *checkBB = BasicBlock::Create(ctx, "plt.check", fn);
+    auto *nextBB = BasicBlock::Create(ctx, "ph.next", fn);
+    auto *ret1BB = BasicBlock::Create(ctx, "ret1", fn);
+    auto *ret0BB = BasicBlock::Create(ctx, "ret0", fn);
+
+    IRBuilder<> EB(entry);
+    Value *hasSelfPhdr =
+        EB.CreateAnd(EB.CreateICmpNE(atPhdr, ConstantInt::get(ip, 0)),
+                     EB.CreateAnd(EB.CreateICmpUGE(phEnt, ConstantInt::get(ip, 56)),
+                                  EB.CreateICmpUGT(phNum, ConstantInt::get(ip, 0))),
+                     "morok.antihook.got.lazy.phdr");
+    Value *validTarget =
+        EB.CreateAnd(EB.CreateICmpUGE(target, ConstantInt::get(ip, 6)),
+                     EB.CreateICmpNE(slot, ConstantInt::get(ip, 0)),
+                     "morok.antihook.got.lazy.valid");
+    Value *inst = EB.CreateSub(target, ConstantInt::get(ip, 6),
+                               "morok.antihook.got.lazy.inst");
+    EB.CreateCondBr(EB.CreateAnd(hasSelfPhdr, validTarget,
+                                 "morok.antihook.got.lazy.active"),
+                    loopBB, ret0BB);
+
+    IRBuilder<> LB(loopBB);
+    auto *idx = LB.CreatePHI(ip, 2, "morok.antihook.got.lazy.idx");
+    idx->addIncoming(ConstantInt::get(ip, 0), entry);
+    Value *inRange =
+        LB.CreateAnd(LB.CreateICmpULT(idx, phNum),
+                     LB.CreateICmpULT(idx, ConstantInt::get(ip, 128)));
+    LB.CreateCondBr(inRange, bodyBB, ret0BB);
+
+    IRBuilder<> BB(bodyBB);
+    Value *phPtr =
+        BB.CreateIntToPtr(BB.CreateAdd(atPhdr, BB.CreateMul(idx, phEnt)), ptr,
+                          "morok.antihook.got.lazy.ph");
+    Value *pType = loadAt(BB, M, i32, phPtr, 0ULL,
+                          "morok.antihook.got.lazy.ph.type");
+    Value *pFlags = loadAt(BB, M, i32, phPtr, 4,
+                           "morok.antihook.got.lazy.ph.flags");
+    Value *pVaddr = loadAt(BB, M, ip, phPtr, 16,
+                           "morok.antihook.got.lazy.ph.vaddr");
+    Value *pMemsz = loadAt(BB, M, ip, phPtr, 40,
+                           "morok.antihook.got.lazy.ph.memsz");
+    Value *segStart = BB.CreateAdd(selfBase, pVaddr,
+                                   "morok.antihook.got.lazy.seg.start");
+    Value *segEnd =
+        BB.CreateAdd(segStart, pMemsz, "morok.antihook.got.lazy.seg.end");
+    Value *isLoad =
+        BB.CreateICmpEQ(pType, ConstantInt::get(i32, 1),
+                       "morok.antihook.got.lazy.seg.load");
+    Value *isExec = BB.CreateICmpNE(
+        BB.CreateAnd(pFlags, ConstantInt::get(i32, 1)),
+        ConstantInt::get(i32, 0), "morok.antihook.got.lazy.seg.exec");
+    Value *containsInst =
+        BB.CreateAnd(BB.CreateICmpUGE(inst, segStart),
+                     BB.CreateICmpULE(target, segEnd),
+                     "morok.antihook.got.lazy.seg.range");
+    Value *eligible =
+        BB.CreateAnd(BB.CreateAnd(isLoad, isExec),
+                     BB.CreateAnd(BB.CreateICmpUGT(pMemsz, ConstantInt::get(ip, 0)),
+                                  containsInst),
+                     "morok.antihook.got.lazy.seg.hit");
+    BB.CreateCondBr(eligible, checkBB, nextBB);
+
+    IRBuilder<> CB(checkBB);
+    Value *instPtr = CB.CreateIntToPtr(inst, ptr, "morok.antihook.got.lazy.ptr");
+    Value *op0 = loadAt(CB, M, i8, instPtr, 0ULL,
+                        "morok.antihook.got.lazy.jmp.op0");
+    Value *op1 = loadAt(CB, M, i8, instPtr, 1,
+                        "morok.antihook.got.lazy.jmp.op1");
+    Value *disp = loadAt(CB, M, i32, instPtr, 2,
+                         "morok.antihook.got.lazy.jmp.disp");
+    Value *slotFromJmp =
+        CB.CreateAdd(target, CB.CreateSExt(disp, ip),
+                     "morok.antihook.got.lazy.jmp.slot");
+    Value *bytesOk =
+        CB.CreateAnd(CB.CreateICmpEQ(op0, ConstantInt::get(i8, 0xFF)),
+                     CB.CreateICmpEQ(op1, ConstantInt::get(i8, 0x25)),
+                     "morok.antihook.got.lazy.jmp.bytes");
+    Value *slotOk = CB.CreateICmpEQ(slotFromJmp, slot,
+                                    "morok.antihook.got.lazy.slot.match");
+    CB.CreateCondBr(CB.CreateAnd(bytesOk, slotOk,
+                                 "morok.antihook.got.lazy.match"),
+                    ret1BB, nextBB);
+
+    IRBuilder<> NB(nextBB);
+    Value *next =
+        NB.CreateAdd(idx, ConstantInt::get(ip, 1),
+                     "morok.antihook.got.lazy.next");
+    NB.CreateBr(loopBB);
+    idx->addIncoming(next, nextBB);
+
+    IRBuilder<> R1(ret1BB);
+    R1.CreateRet(ConstantInt::get(i32, 1));
+
+    IRBuilder<> R0(ret0BB);
+    R0.CreateRet(ConstantInt::get(i32, 0));
+    return fn;
+}
+
 Function *linuxGotTargetInNeeded(Module &M) {
     if (Function *existing = M.getFunction("morok.antihook.got.needed"))
         return existing;
@@ -3328,6 +3466,7 @@ Function *linuxGotPltProbe(Module &M, const Triple &TT) {
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(ctx);
     auto *rxCheck = linuxGotTargetInRx(M);
+    auto *lazyCheck = linuxGotLazyPltTarget(M);
     auto *neededCheck = linuxGotTargetInNeeded(M);
 
     auto *fn = Function::Create(FunctionType::get(i64, false),
@@ -3619,12 +3758,22 @@ Function *linuxGotPltProbe(Module &M, const Triple &TT) {
     Value *externalSym =
         RBB.CreateICmpEQ(symShndx, ConstantInt::get(Type::getInt16Ty(ctx), 0),
                          "morok.antihook.got.sym.external");
+    Value *lazy = RBB.CreateCall(
+        lazyCheck, {targetAddr, slotAddr, atPhdr, phNum, phEnt, base},
+        "morok.antihook.got.lazy");
+    Value *lazyOk = RBB.CreateAnd(
+        RBB.CreateAnd(RBB.CreateNot(hasNow, "morok.antihook.got.lazy.notnow"),
+                      externalSym),
+        RBB.CreateICmpNE(lazy, ConstantInt::get(Type::getInt32Ty(ctx), 0)),
+        "morok.antihook.got.lazy.ok");
     Value *localRxOk = RBB.CreateAnd(
         RBB.CreateNot(externalSym, "morok.antihook.got.sym.local"),
         RBB.CreateICmpNE(rxOk, ConstantInt::get(Type::getInt32Ty(ctx), 0)),
         "morok.antihook.got.local.rx");
-    Value *targetOk =
-        RBB.CreateOr(expectedOk, localRxOk, "morok.antihook.got.target.ok");
+    Value *targetOk = RBB.CreateOr(
+        expectedOk, RBB.CreateOr(localRxOk, lazyOk,
+                                 "morok.antihook.got.local.or.lazy"),
+        "morok.antihook.got.target.ok");
     incrementDiff(
         RBB, diff,
         RBB.CreateNot(targetOk, "morok.antihook.got.violation.pred"),
