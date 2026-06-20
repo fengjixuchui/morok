@@ -378,8 +378,8 @@ Value *emitPtrace(IRBuilderBase &B, Module &M, int request) {
     return runtime::emitPtraceImport(B, M, request);
 }
 
-bool useDirectLinuxSyscalls(const Triple &TT) {
-    return runtime::useDirectLinuxSyscalls(TT);
+bool useDirectLinuxSyscalls(const Module &M, const Triple &TT) {
+    return runtime::useDirectLinuxSyscalls(M, TT);
 }
 
 FunctionCallee getpidDecl(Module &M) {
@@ -476,8 +476,8 @@ Value *emitElfDynamicPresent(IRBuilder<> &B, Module &M, const Triple &TT) {
                           "morok.antihook.dynamic.present");
 }
 
-bool useDirectDarwinSyscalls(const Triple &TT) {
-    return runtime::useDirectDarwinSyscalls(TT);
+bool useDirectDarwinSyscalls(const Module &M, const Triple &TT) {
+    return runtime::useDirectDarwinSyscalls(M, TT);
 }
 
 Value *emitDarwinSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
@@ -653,7 +653,7 @@ ReadFileIR emitReadSmallFile(IRBuilder<> &B, Module &M, Function *Fn,
 }
 
 void emitLinuxMemfdReexecCtor(Module &M, ir::IRRandom &rng, const Triple &TT) {
-    if (!useDirectLinuxSyscalls(TT) ||
+    if (!useDirectLinuxSyscalls(M, TT) ||
         M.getFunction("morok.antidbg.memfd"))
         return;
 
@@ -5367,8 +5367,8 @@ Value *emitWrapperPid(IRBuilder<> &B, Module &M, FunctionCallee Callee,
 }
 
 Function *methodDivergenceProbe(Module &M, const Triple &TT) {
-    const bool linux = useDirectLinuxSyscalls(TT);
-    const bool darwin = useDirectDarwinSyscalls(TT);
+    const bool linux = useDirectLinuxSyscalls(M, TT);
+    const bool darwin = useDirectDarwinSyscalls(M, TT);
     if (!linux && !darwin)
         return nullptr;
     if (Function *existing = M.getFunction("morok.antihook.diverge.posix"))

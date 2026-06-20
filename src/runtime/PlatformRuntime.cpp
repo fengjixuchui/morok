@@ -125,7 +125,27 @@ FunctionCallee mprotectDecl(Module &M) {
         "mprotect", FunctionType::get(I32, {Ptr, IP, I32}, false));
 }
 
-bool useDirectLinuxSyscalls(const Triple &TT) {
+// Operator syscall-surface policy (#102), carried as a module flag set once by
+// the pipeline from platform_runtime.direct_syscalls.  0 = auto, 1 = always,
+// 2 = never.  The flag is IR-level metadata and is dropped before the final
+// binary, so it never appears in shipped output.
+constexpr StringLiteral kDirectSyscallFlag = "morok.platform.direct_syscalls";
+
+unsigned directSyscallPolicy(const Module &M) {
+    if (auto *MD = M.getModuleFlag(kDirectSyscallFlag))
+        if (auto *CMD = dyn_cast<ConstantAsMetadata>(MD))
+            if (auto *CI = dyn_cast<ConstantInt>(CMD->getValue()))
+                return static_cast<unsigned>(CI->getZExtValue());
+    return 0; // auto
+}
+
+// "never" forces the import path even where a direct-syscall ABI exists, so an
+// operator who wants no inline syscalls actually gets none.  "always"/"auto"
+// keep the architecture-gated direct path (a direct syscall cannot be forged
+// where the ABI is unknown, so "always" is best-effort on those targets).
+bool useDirectLinuxSyscalls(const Module &M, const Triple &TT) {
+    if (directSyscallPolicy(M) == 2u)
+        return false;
     return TT.isOSLinux() && TT.getArch() == Triple::x86_64;
 }
 
@@ -190,7 +210,7 @@ Value *emitLinuxSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
         SysArgs[I++] = toSyscallArg(B, Arg);
     }
 
-    if (useDirectLinuxSyscalls(TT)) {
+    if (useDirectLinuxSyscalls(M, TT)) {
         std::vector<Type *> Params(7, IP);
         auto *AsmTy = FunctionType::get(IP, Params, false);
         InlineAsm *Syscall = InlineAsm::get(
@@ -252,8 +272,19 @@ Value *emitLinuxPrctl(IRBuilder<> &B, Module &M, const Triple &TT,
     return B.CreateTruncOrBitCast(Rc, I32);
 }
 
-bool useDirectDarwinSyscalls(const Triple &TT) {
+bool useDirectDarwinSyscalls(const Module &M, const Triple &TT) {
+    if (directSyscallPolicy(M) == 2u)
+        return false;
     return TT.isOSDarwin() && TT.getArch() == Triple::x86_64;
+}
+
+void setDirectSyscallPolicy(Module &M, StringRef Policy) {
+    unsigned Value = 0; // auto
+    if (Policy == "always")
+        Value = 1;
+    else if (Policy == "never")
+        Value = 2;
+    M.addModuleFlag(Module::Override, kDirectSyscallFlag, Value);
 }
 
 static Value *emitArm64SvcInlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
@@ -328,7 +359,7 @@ Value *emitDarwinSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
         SysArgs[I++] = toSyscallArg(B, Arg);
     }
 
-    if (useDirectDarwinSyscalls(TT)) {
+    if (useDirectDarwinSyscalls(M, TT)) {
         std::vector<Type *> Params(7, IP);
         auto *AsmTy = FunctionType::get(IP, Params, false);
         InlineAsm *Syscall = InlineAsm::get(
@@ -351,9 +382,9 @@ Value *emitDarwinSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
 
 Value *emitDarwinGetpid(IRBuilder<> &B, Module &M, const Triple &TT) {
     auto *I32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return B.CreateTruncOrBitCast(emitDarwinSyscall(B, M, TT, 20, {}), I32);
-    if (TT.getArch() == Triple::aarch64)
+    if (TT.getArch() == Triple::aarch64 && directSyscallPolicy(M) != 2u)
         return B.CreateTruncOrBitCast(emitDarwinArm64Svc(B, M, 20, {}), I32);
     return B.CreateCall(getpidDecl(M));
 }
@@ -362,14 +393,14 @@ Value *emitDarwinPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
                         std::int32_t Request) {
     auto *I32 = Type::getInt32Ty(M.getContext());
     auto *Ptr = PointerType::getUnqual(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return B.CreateTruncOrBitCast(
             emitDarwinSyscall(
                 B, M, TT, 26,
                 {ConstantInt::getSigned(I32, Request), ConstantInt::get(I32, 0),
                  ConstantPointerNull::get(Ptr), ConstantInt::get(I32, 0)}),
             I32);
-    if (TT.getArch() == Triple::aarch64)
+    if (TT.getArch() == Triple::aarch64 && directSyscallPolicy(M) != 2u)
         return B.CreateTruncOrBitCast(
             emitDarwinArm64Svc(
                 B, M, 26,
@@ -385,12 +416,12 @@ Value *emitDarwinSysctl(IRBuilder<> &B, Module &M, const Triple &TT, Value *Mib,
     auto *I32 = Type::getInt32Ty(M.getContext());
     auto *IP = platformWordTy(M);
     auto *Ptr = PointerType::getUnqual(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return B.CreateTruncOrBitCast(
             emitDarwinSyscall(B, M, TT, 202,
                               {Mib, MibLen, OldP, OldLenP, NewP, NewLen}),
             I32);
-    if (TT.getArch() == Triple::aarch64)
+    if (TT.getArch() == Triple::aarch64 && directSyscallPolicy(M) != 2u)
         return B.CreateTruncOrBitCast(
             emitDarwinArm64Svc(B, M, 202,
                                {Mib, MibLen, OldP, OldLenP, NewP, NewLen}),
@@ -407,11 +438,11 @@ Value *emitDarwinCsops(IRBuilder<> &B, Module &M, const Triple &TT, Value *Pid,
     auto *I32 = Type::getInt32Ty(M.getContext());
     auto *IP = platformWordTy(M);
     auto *Ptr = PointerType::getUnqual(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return B.CreateTruncOrBitCast(
             emitDarwinSyscall(B, M, TT, 169, {Pid, Ops, UserAddr, UserSize}),
             I32);
-    if (TT.getArch() == Triple::aarch64)
+    if (TT.getArch() == Triple::aarch64 && directSyscallPolicy(M) != 2u)
         return B.CreateTruncOrBitCast(
             emitDarwinArm64Svc(B, M, 169, {Pid, Ops, UserAddr, UserSize}), I32);
     FunctionCallee Csops = M.getOrInsertFunction(
@@ -424,7 +455,7 @@ Value *emitDarwinCsops(IRBuilder<> &B, Module &M, const Triple &TT, Value *Pid,
 Value *emitLinuxReadlink(IRBuilder<> &B, Module &M, const Triple &TT,
                          Value *Path, Value *Buf, Value *Size) {
     LinuxCleanCopySyscalls Sys;
-    if (useDirectLinuxSyscalls(TT) && lookupLinuxCleanCopySyscalls(TT, Sys))
+    if (useDirectLinuxSyscalls(M, TT) && lookupLinuxCleanCopySyscalls(TT, Sys))
         return emitLinuxSyscall(B, M, TT, Sys.readlink, {Path, Buf, Size});
     return B.CreateCall(readlinkDecl(M), {Path, Buf, Size},
                         "morok.clean.readlink");
@@ -433,7 +464,7 @@ Value *emitLinuxReadlink(IRBuilder<> &B, Module &M, const Triple &TT,
 Value *emitLinuxLseek(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd,
                       std::int64_t Offset, std::int32_t Whence) {
     LinuxCleanCopySyscalls Sys;
-    if (useDirectLinuxSyscalls(TT) && lookupLinuxCleanCopySyscalls(TT, Sys))
+    if (useDirectLinuxSyscalls(M, TT) && lookupLinuxCleanCopySyscalls(TT, Sys))
         return emitLinuxSyscall(
             B, M, TT, Sys.lseek,
             {Fd, ConstantInt::getSigned(platformWordTy(M), Offset),
@@ -456,7 +487,7 @@ Value *emitLinuxMmapAddr(IRBuilder<> &B, Module &M, const Triple &TT,
     constexpr std::uint32_t kMapPrivate = 2;
 
     LinuxCleanCopySyscalls Sys;
-    if (useDirectLinuxSyscalls(TT) && lookupLinuxCleanCopySyscalls(TT, Sys))
+    if (useDirectLinuxSyscalls(M, TT) && lookupLinuxCleanCopySyscalls(TT, Sys))
         return emitLinuxSyscall(B, M, TT, Sys.mmap,
                                 {ConstantPointerNull::get(Ptr), Size,
                                  ConstantInt::get(I32, kProtRead),
@@ -475,7 +506,7 @@ Value *emitLinuxMmapAddr(IRBuilder<> &B, Module &M, const Triple &TT,
 void emitLinuxMunmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Addr,
                      Value *Size) {
     LinuxCleanCopySyscalls Sys;
-    if (useDirectLinuxSyscalls(TT) && lookupLinuxCleanCopySyscalls(TT, Sys)) {
+    if (useDirectLinuxSyscalls(M, TT) && lookupLinuxCleanCopySyscalls(TT, Sys)) {
         emitLinuxSyscall(B, M, TT, Sys.munmap, {Addr, Size});
         return;
     }
@@ -489,7 +520,7 @@ Value *emitLinuxMprotect(IRBuilder<> &B, Module &M, const Triple &TT,
     std::uint32_t MprotectNr = 0;
     if (TT.getArch() == Triple::x86_64)
         MprotectNr = 10;
-    if (useDirectLinuxSyscalls(TT) && MprotectNr != 0)
+    if (useDirectLinuxSyscalls(M, TT) && MprotectNr != 0)
         return B.CreateTruncOrBitCast(
             emitLinuxSyscall(B, M, TT, MprotectNr, {Addr, Size, Prot}),
             Type::getInt32Ty(M.getContext()));
@@ -513,7 +544,7 @@ void emitLinuxClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
 Value *emitDarwinOpen(IRBuilder<> &B, Module &M, const Triple &TT, Value *Path,
                       std::int32_t Flags, std::int32_t Mode) {
     auto *I32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return B.CreateTruncOrBitCast(
             emitDarwinSyscall(B, M, TT, 5,
                               {Path, ConstantInt::getSigned(I32, Flags),
@@ -526,7 +557,7 @@ Value *emitDarwinOpen(IRBuilder<> &B, Module &M, const Triple &TT, Value *Path,
 }
 
 void emitDarwinClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
-    if (useDirectDarwinSyscalls(TT)) {
+    if (useDirectDarwinSyscalls(M, TT)) {
         emitDarwinSyscall(B, M, TT, 6, {Fd});
         return;
     }
@@ -537,7 +568,7 @@ void emitDarwinClose(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd) {
 Value *emitDarwinLseek(IRBuilder<> &B, Module &M, const Triple &TT, Value *Fd,
                        std::int64_t Offset, std::int32_t Whence) {
     auto *I32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return emitDarwinSyscall(B, M, TT, 199,
                                  {Fd, ConstantInt::getSigned(platformWordTy(M),
                                                              Offset),
@@ -558,7 +589,7 @@ Value *emitDarwinMmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Size,
     constexpr std::uint32_t kProtRead = 1;
     constexpr std::uint32_t kMapPrivate = 2;
 
-    if (useDirectDarwinSyscalls(TT)) {
+    if (useDirectDarwinSyscalls(M, TT)) {
         Value *Addr = emitDarwinSyscall(
             B, M, TT, 197,
             {ConstantPointerNull::get(Ptr), Size, ConstantInt::get(I32, kProtRead),
@@ -576,7 +607,7 @@ Value *emitDarwinMmap(IRBuilder<> &B, Module &M, const Triple &TT, Value *Size,
 
 void emitDarwinMunmap(IRBuilder<> &B, Module &M, const Triple &TT,
                       Value *Mapped, Value *Size) {
-    if (useDirectDarwinSyscalls(TT)) {
+    if (useDirectDarwinSyscalls(M, TT)) {
         emitDarwinSyscall(B, M, TT, 73, {Mapped, Size});
         return;
     }
@@ -586,7 +617,7 @@ void emitDarwinMunmap(IRBuilder<> &B, Module &M, const Triple &TT,
 Value *emitDarwinMprotect(IRBuilder<> &B, Module &M, const Triple &TT,
                           Value *Addr, Value *Size, Value *Prot) {
     auto *I32 = Type::getInt32Ty(M.getContext());
-    if (useDirectDarwinSyscalls(TT))
+    if (useDirectDarwinSyscalls(M, TT))
         return B.CreateTruncOrBitCast(
             emitDarwinSyscall(B, M, TT, 74, {Addr, Size, Prot}), I32);
 
@@ -602,12 +633,12 @@ Value *emitPosixAnonMmapAddr(IRBuilder<> &B, Module &M, const Triple &TT,
     auto *I32 = Type::getInt32Ty(Ctx);
     auto *IP = platformWordTy(M);
     auto *Ptr = PointerType::getUnqual(Ctx);
-    if (TT.isOSLinux() && useDirectLinuxSyscalls(TT))
+    if (TT.isOSLinux() && useDirectLinuxSyscalls(M, TT))
         return emitLinuxSyscall(B, M, TT, 9,
                                 {ConstantPointerNull::get(Ptr), Size, Prot,
                                  Flags, ConstantInt::getSigned(I32, -1),
                                  ConstantInt::get(IP, 0)});
-    if (TT.isOSDarwin() && useDirectDarwinSyscalls(TT))
+    if (TT.isOSDarwin() && useDirectDarwinSyscalls(M, TT))
         return emitDarwinSyscall(B, M, TT, 197,
                                  {ConstantPointerNull::get(Ptr), Size, Prot,
                                   Flags, ConstantInt::getSigned(I32, -1),

@@ -63,6 +63,8 @@
 #include "morok/passes/VectorObfuscation.hpp"
 #include "morok/passes/Virtualization.hpp"
 
+#include "morok/runtime/PlatformRuntime.hpp"
+
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -412,6 +414,12 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     ir::IRRandom rng(engine);
 
     ir::materializeAnnotations(M);
+
+    // Apply the operator's syscall-surface policy (#102) before any pass emits a
+    // platform primitive, so platform_runtime.direct_syscalls = "never" actually
+    // routes every syscall through imports instead of inline direct syscalls.
+    runtime::setDirectSyscallPolicy(
+        M, config_.passes.platform_runtime.direct_syscalls.value_or("auto"));
 
     const config::Demangler demangle = [](std::string_view s) -> std::string {
         return llvm::demangle(std::string(s));

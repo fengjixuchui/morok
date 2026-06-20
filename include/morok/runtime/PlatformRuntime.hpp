@@ -48,7 +48,13 @@ llvm::FunctionCallee mmapDecl(llvm::Module &M);
 llvm::FunctionCallee munmapDecl(llvm::Module &M);
 llvm::FunctionCallee mprotectDecl(llvm::Module &M);
 
-bool useDirectLinuxSyscalls(const llvm::Triple &TT);
+// Apply the operator's syscall-surface policy (#102) to this module.  Policy is
+// "auto" | "always" | "never" (from platform_runtime.direct_syscalls); "never"
+// forces the import path so no inline direct syscalls are emitted.  Carried as a
+// module flag that the emit helpers below honor; dropped before the final binary.
+void setDirectSyscallPolicy(llvm::Module &M, llvm::StringRef Policy);
+
+bool useDirectLinuxSyscalls(const llvm::Module &M, const llvm::Triple &TT);
 bool lookupLinuxCoreSyscalls(const llvm::Triple &TT,
                              LinuxCoreSyscalls &Out);
 bool lookupLinuxCleanCopySyscalls(const llvm::Triple &TT,
@@ -68,7 +74,7 @@ llvm::Value *emitLinuxPrctl(llvm::IRBuilder<> &B, llvm::Module &M,
                             std::int64_t A2 = 0, std::int64_t A3 = 0,
                             std::int64_t A4 = 0, std::int64_t A5 = 0);
 
-bool useDirectDarwinSyscalls(const llvm::Triple &TT);
+bool useDirectDarwinSyscalls(const llvm::Module &M, const llvm::Triple &TT);
 llvm::Value *emitDarwinArm64Svc(llvm::IRBuilder<> &B, llvm::Module &M,
                                 std::uint32_t Number,
                                 std::initializer_list<llvm::Value *> Args,

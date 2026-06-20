@@ -592,6 +592,52 @@ TEST_CASE("PlatformRuntime emits direct Linux syscalls without libc import") {
     CHECK_FALSE(verifyModule(M, &errs()));
 }
 
+// Regression for #102: platform_runtime.direct_syscalls = "never" must route
+// every syscall through the libc import instead of an inline direct syscall —
+// even on a target (x86_64) whose ABI supports direct syscalls — so an operator
+// who forbids inline syscalls actually gets none.  Previously the knob was
+// parsed/merged/preset but never read, so the policy was a silent no-op.
+TEST_CASE("PlatformRuntime honors direct_syscalls=never policy") {
+    LLVMContext ctx;
+    Module M("platform-runtime-policy-never", ctx);
+    M.setTargetTriple(Triple("x86_64-unknown-linux-gnu"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+
+    morok::runtime::setDirectSyscallPolicy(M, "never");
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 39, {}, "morok.platform.getpid");
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    CHECK_FALSE(hasInlineAsmCall(*F));
+    REQUIRE(M.getFunction("syscall") != nullptr);
+    CHECK(countCallsTo(*F, "syscall") == 1u);
+    CHECK(countNamedInstructions(*F, "morok.platform.getpid.wrap") == 1u);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+// The default ("auto") keeps the direct syscall path where the ABI supports it.
+TEST_CASE("PlatformRuntime direct_syscalls=auto keeps the direct path") {
+    LLVMContext ctx;
+    Module M("platform-runtime-policy-auto", ctx);
+    M.setTargetTriple(Triple("x86_64-unknown-linux-gnu"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+
+    morok::runtime::setDirectSyscallPolicy(M, "auto");
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 39, {}, "morok.platform.getpid");
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
 TEST_CASE(
     "PlatformRuntime falls back to libc syscall on unsupported Linux arch") {
     LLVMContext ctx;
