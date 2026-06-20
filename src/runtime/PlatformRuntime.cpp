@@ -279,12 +279,19 @@ bool useDirectDarwinSyscalls(const Module &M, const Triple &TT) {
 }
 
 void setDirectSyscallPolicy(Module &M, StringRef Policy) {
-    unsigned Value = 0; // auto
+    std::uint32_t Value = 0; // auto
     if (Policy == "always")
         Value = 1;
     else if (Policy == "never")
         Value = 2;
-    M.addModuleFlag(Module::Override, kDirectSyscallFlag, Value);
+    // Use setModuleFlag, NOT addModuleFlag (#102): addModuleFlag's Override
+    // behavior only governs cross-module linking and does not replace a same-key
+    // flag already present in THIS module, so a repeated Morok run or pre-flagged
+    // input IR would accumulate duplicate llvm.module.flags entries — which are
+    // verifier-invalid (a build DoS) and let a stale first value shadow the
+    // operator policy.  setModuleFlag replaces any existing entry in place, so
+    // exactly one flag for the key is ever present.
+    M.setModuleFlag(Module::Override, kDirectSyscallFlag, Value);
 }
 
 static Value *emitArm64SvcInlineAsm(IRBuilder<> &B, Module &M, Value *Nr,

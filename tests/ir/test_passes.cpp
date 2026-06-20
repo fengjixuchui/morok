@@ -638,6 +638,35 @@ TEST_CASE("PlatformRuntime direct_syscalls=auto keeps the direct path") {
     CHECK_FALSE(verifyModule(M, &errs()));
 }
 
+// Regression for the #102 reopen: applying the policy more than once (a repeated
+// Morok run, or input IR that already carries the flag) must REPLACE the flag,
+// not append a duplicate.  Duplicate llvm.module.flags entries are verifier-
+// invalid (a build DoS) and let a stale first value shadow the operator policy.
+TEST_CASE("PlatformRuntime direct_syscalls policy flag is idempotent") {
+    LLVMContext ctx;
+    Module M("platform-runtime-policy-idem", ctx);
+    M.setTargetTriple(Triple("x86_64-unknown-linux-gnu"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+
+    morok::runtime::setDirectSyscallPolicy(M, "auto");
+    morok::runtime::setDirectSyscallPolicy(M, "always");
+    morok::runtime::setDirectSyscallPolicy(M, "never");
+
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 39, {}, "morok.platform.getpid");
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    // No duplicate module flags -> module verifies, and the last value ("never")
+    // wins, so the syscall is routed through the libc import.
+    CHECK_FALSE(verifyModule(M, &errs()));
+    CHECK_FALSE(hasInlineAsmCall(*F));
+    REQUIRE(M.getFunction("syscall") != nullptr);
+    CHECK(countCallsTo(*F, "syscall") == 1u);
+}
+
 TEST_CASE(
     "PlatformRuntime falls back to libc syscall on unsupported Linux arch") {
     LLVMContext ctx;
