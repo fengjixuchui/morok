@@ -14539,7 +14539,7 @@ entry:
     REQUIRE(ImageText != nullptr);
     Function *DylibOrdinal = M->getFunction("morok.antihook.macho.dylib.ordinal");
     REQUIRE(DylibOrdinal != nullptr);
-    Function *Expected = M->getFunction("morok.antihook.macho.expected.text");
+    Function *Expected = M->getFunction("morok.antihook.macho.expected.symbol");
     REQUIRE(Expected != nullptr);
     Function *StringEq = M->getFunction("morok.antihook.str.eq");
     REQUIRE(StringEq != nullptr);
@@ -14602,9 +14602,13 @@ entry:
     CHECK(countNamedInstructions(*Fixups,
                                  "morok.antihook.fixup.expected.dylib") >= 1u);
     CHECK(countNamedInstructions(*Fixups,
-                                 "morok.antihook.fixup.expected.text") >= 1u);
+                                 "morok.antihook.fixup.expected.symbol") >= 1u);
     CHECK(countNamedInstructions(*Fixups,
                                  "morok.antihook.fixup.expected.eq") == 0u);
+    CHECK(countNamedInstructions(*Fixups,
+                                 "morok.antihook.fixup.sym.strx") >= 1u);
+    CHECK(countNamedInstructions(*Fixups,
+                                 "morok.antihook.fixup.sym.name") >= 1u);
     CHECK(countNamedInstructions(*Fixups,
                                  "morok.antihook.fixup.target.ok") >= 1u);
     CHECK(countNamedInstructions(*Fixups,
@@ -14618,7 +14622,13 @@ entry:
                                  "morok.antihook.macho.expected.image.name.eq") >=
           1u);
     CHECK(countNamedInstructions(*Expected,
-                                 "morok.antihook.macho.expected.image.text") >=
+                                 "morok.antihook.macho.expected.sym.name.eq") >=
+          1u);
+    CHECK(countNamedInstructions(*Expected,
+                                 "morok.antihook.macho.expected.sym.eq") >=
+          1u);
+    CHECK(countNamedInstructions(*Expected,
+                                 "morok.antihook.macho.expected.symbol.hit") >=
           1u);
     CHECK(countNamedInstructions(*StringEq, "morok.antihook.str.eq.byte") >= 1u);
     CHECK(countNamedInstructions(*Text, "morok.antihook.macho.text.hit") >= 1u);

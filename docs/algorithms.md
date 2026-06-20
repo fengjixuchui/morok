@@ -1393,11 +1393,12 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `S_NON_LAZY_SYMBOL_POINTERS` and `S_LAZY_SYMBOL_POINTERS` sections such as
   `__got` and `__la_symbol_ptr`, volatile-loads each non-null pointer, and
   resolves each indirect-symbol entry's library ordinal to the expected
-  `LC_LOAD_DYLIB` name.  External fixups are accepted only when the live target
-  lands in executable segments of the already loaded dyld image with that exact
-  dylib name; the expected-address oracle does not call `dlopen` or `dlsym`.
-  Pointers that do not land in the expected image's `__TEXT`-style executable
-  range are folded into the delayed anti-hook state.
+  `LC_LOAD_DYLIB` name and symbol-table string.  External fixups are accepted
+  only when the live target equals the address of that exact symbol in the
+  already loaded dyld image with the matching dylib name; the expected-address
+  oracle does not call `dlopen` or `dlsym`, and same-dylib redirects to another
+  export or gadget no longer satisfy the check.  Pointers that do not match the
+  expected symbol address are folded into the delayed anti-hook state.
   AntiHooking also emits a bounded address-space census.  Linux parses a cloaked
   `/proc/self/maps` buffer with direct syscalls where available, flags `rwx`
   mappings, executable non-readable mappings, anonymous/private executable
