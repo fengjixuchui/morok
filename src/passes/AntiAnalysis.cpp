@@ -6345,18 +6345,25 @@ bool insertStackOriginChecks(Module &M, Function *Check, GlobalVariable *State,
     auto *i32 = Type::getInt32Ty(M.getContext());
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(M.getContext());
-    const Triple TT(M.getTargetTriple());
-    FunctionCallee returnAddress;
-    if (TT.isOSWindows()) {
-        Function *Intrinsic =
-            Intrinsic::getOrInsertDeclaration(&M, Intrinsic::returnaddress,
-                                              {ptr});
-        returnAddress =
-            FunctionCallee(Intrinsic->getFunctionType(), Intrinsic);
-    } else {
-        returnAddress = M.getOrInsertFunction(
-            "llvm.returnaddress.p0", FunctionType::get(ptr, {i32}, false));
-    }
+    // Always request the canonical declaration for llvm.returnaddress via
+    // Intrinsic::getOrInsertDeclaration so the backend recognizes and lowers it.
+    // Whether the canonical name carries a pointer-mangling suffix depends on
+    // the LLVM version: older releases declare returnaddress with a fixed ptr
+    // return (non-overloaded, name "llvm.returnaddress"), while newer ones make
+    // it overloaded on the return pointer's address space (name
+    // "llvm.returnaddress.p0"). Hardcoding either form — or passing an overload
+    // type to a non-overloaded intrinsic — yields a function the backend never
+    // recognizes; it then survives codegen as an undefined external symbol and
+    // breaks linking (e.g. lld-link: undefined symbol: llvm.returnaddress.p0).
+    // Pass the overload type only when this LLVM actually overloads the
+    // intrinsic, so the right canonical name is produced on every version.
+    SmallVector<Type *, 1> raOverloads;
+    if (Intrinsic::isOverloaded(Intrinsic::returnaddress))
+        raOverloads.push_back(ptr);
+    Function *returnAddressFn = Intrinsic::getOrInsertDeclaration(
+        &M, Intrinsic::returnaddress, raOverloads);
+    FunctionCallee returnAddress(returnAddressFn->getFunctionType(),
+                                 returnAddressFn);
     bool changed = false;
     std::uint32_t site = 1;
     for (Function *target : Targets) {
