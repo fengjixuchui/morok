@@ -18523,6 +18523,7 @@ Function *windowsRemoteBreakinWatchThread(Module &M, GlobalVariable *State) {
     auto *hideBB = BasicBlock::Create(ctx, "hide", fn);
     auto *pollLoopBB = BasicBlock::Create(ctx, "poll.loop", fn);
     auto *enumLoopBB = BasicBlock::Create(ctx, "enum.loop", fn);
+    auto *enumBodyBB = BasicBlock::Create(ctx, "enum.body", fn);
     auto *closePrevGateBB = BasicBlock::Create(ctx, "close.prev.gate", fn);
     auto *closePrevBB = BasicBlock::Create(ctx, "close.prev", fn);
     auto *probeBB = BasicBlock::Create(ctx, "probe", fn);
@@ -18612,28 +18613,39 @@ Function *windowsRemoteBreakinWatchThread(Module &M, GlobalVariable *State) {
     auto *threadIdx = EL.CreatePHI(i32, 2, "morok.win.attach.watch.thread.idx");
     current->addIncoming(ConstantInt::get(ip, 0), pollLoopBB);
     threadIdx->addIncoming(ConstantInt::get(i32, 0), pollLoopBB);
-    EL.CreateStore(ConstantInt::get(ip, 0), nextThread)->setVolatile(true);
+    // #238: enforce the per-poll thread cap BEFORE opening a handle. If we are
+    // already at the cap, do NOT call NtGetNextThread — it would open a handle
+    // that the post-cap cleanup path then drops, leaking one kernel thread
+    // handle per poll on processes that sustain >kMaxThreadsPerPoll threads.
+    // Go straight to the cleanup that closes the last kept handle.
+    Value *underCap = EL.CreateICmpULT(
+        threadIdx, ConstantInt::get(i32, kMaxThreadsPerPoll),
+        "morok.win.attach.watch.thread.under.cap");
+    EL.CreateCondBr(underCap, enumBodyBB, closeLastGateBB);
+
+    IRBuilder<> EB(enumBodyBB);
+    EB.CreateStore(ConstantInt::get(ip, 0), nextThread)->setVolatile(true);
     Value *getStatus = emitWindowsDirect11(
-        EL, direct11,
+        EB, direct11,
         {getNextSsn, ConstantInt::getSigned(ip, -1), current,
          ConstantInt::get(ip, kThreadQueryInformation), ConstantInt::get(ip, 0),
          ConstantInt::get(ip, 0),
-         EL.CreatePtrToInt(nextThread, ip,
+         EB.CreatePtrToInt(nextThread, ip,
                            "morok.win.attach.watch.next.slot.ip")},
         "morok.win.attach.watch.getnext.status");
     Value *getStatus32 =
-        EL.CreateTrunc(getStatus, i32, "morok.win.attach.watch.getnext.i32");
+        EB.CreateTrunc(getStatus, i32, "morok.win.attach.watch.getnext.i32");
     Value *nextHandle =
-        EL.CreateLoad(ip, nextThread, "morok.win.attach.watch.next.handle");
+        EB.CreateLoad(ip, nextThread, "morok.win.attach.watch.next.handle");
     cast<LoadInst>(nextHandle)->setVolatile(true);
-    Value *gotThread = EL.CreateAnd(
-        EL.CreateAnd(EL.CreateICmpSGE(getStatus32, ConstantInt::get(i32, 0)),
-                     EL.CreateICmpNE(nextHandle, ConstantInt::get(ip, 0)),
-                     "morok.win.attach.watch.next.valid"),
-        EL.CreateICmpULT(threadIdx, ConstantInt::get(i32, kMaxThreadsPerPoll),
-                         "morok.win.attach.watch.thread.limit"),
+    // Cap already enforced above, so the verdict here is just "a valid handle
+    // came back". The false edge (enum exhausted / NtGetNextThread error) leaves
+    // nextHandle == 0, so the shared cleanup closing only `current` is correct.
+    Value *gotThread = EB.CreateAnd(
+        EB.CreateICmpSGE(getStatus32, ConstantInt::get(i32, 0)),
+        EB.CreateICmpNE(nextHandle, ConstantInt::get(ip, 0)),
         "morok.win.attach.watch.got.thread");
-    EL.CreateCondBr(gotThread, closePrevGateBB, closeLastGateBB);
+    EB.CreateCondBr(gotThread, closePrevGateBB, closeLastGateBB);
 
     IRBuilder<> CPG(closePrevGateBB);
     CPG.CreateCondBr(CPG.CreateICmpNE(current, ConstantInt::get(ip, 0),

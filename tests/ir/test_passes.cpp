@@ -19129,6 +19129,21 @@ define i32 @main() { ret i32 0 }
     REQUIRE(PageGuardVeh != nullptr);
     REQUIRE(Direct11 != nullptr);
     REQUIRE(Resolve != nullptr);
+    // #238: the per-poll thread cap must gate NtGetNextThread so no handle is
+    // opened when at the cap (the old code opened the handle, then bailed on the
+    // cap clause, leaking it). The cap check (`thread.under.cap`) must exist and
+    // live in a DIFFERENT block from the NtGetNextThread call (the enum body is
+    // branched-to only on the under-cap edge), and the old post-open cap clause
+    // (`thread.limit`) must be gone.
+    Instruction *WatchUnderCap =
+        findNamedInstruction(*Watcher, "morok.win.attach.watch.thread.under.cap");
+    REQUIRE(WatchUnderCap != nullptr);
+    Instruction *WatchGetNext =
+        findNamedInstruction(*Watcher, "morok.win.attach.watch.getnext.i32");
+    REQUIRE(WatchGetNext != nullptr);
+    CHECK(WatchUnderCap->getParent() != WatchGetNext->getParent());
+    CHECK(countNamedInstructions(*Watcher,
+                                 "morok.win.attach.watch.thread.limit") == 0u);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.win.attach.invalid.exception.seen",
                                true) != nullptr);
