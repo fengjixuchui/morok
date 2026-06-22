@@ -2330,6 +2330,8 @@ void emitLinuxWatcherStart(IRBuilder<> &B, Module &M, Function *WatchFn) {
 
 Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
                          const Triple &TT);
+Function *windowsHardwareBreakpointProbe(Module &M, GlobalVariable *State,
+                                         ir::IRRandom &rng, const Triple &TT);
 
 Function *probeWatchThread(Module &M, Function *Probe, GlobalVariable *Heartbeat,
                            ir::IRRandom &rng) {
@@ -8452,7 +8454,10 @@ Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
     } else if (TT.isOSDarwin()) {
         emitDarwinSysctlCheck(B, M, State, TT);
         emitDarwinCsopsCheck(B, M, State, TT);
-    } else if (!TT.isOSWindows()) {
+    } else if (TT.isOSWindows()) {
+        if (Function *dr = windowsHardwareBreakpointProbe(M, State, rng, TT))
+            B.CreateCall(dr->getFunctionType(), dr, {tag});
+    } else {
         auto *i32 = Type::getInt32Ty(ctx);
         Value *rc = emitPtrace(B, M, 0);
         foldFlag(B, State, B.CreateICmpSLT(rc, ConstantInt::getSigned(i32, 0)),
@@ -14399,6 +14404,255 @@ Function *windowsSyscallsProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+void initWindowsDebugContext(IRBuilder<> &B, Module &M, AllocaInst *Ctx,
+                             const Twine &Name) {
+    constexpr std::uint64_t kContextBytes = 1232;
+    constexpr std::uint32_t kContextAmd64DebugRegisters = 0x00100010;
+    auto *i8 = Type::getInt8Ty(M.getContext());
+    auto *ip = intPtrTy(M);
+    B.CreateMemSet(Ctx, ConstantInt::get(i8, 0),
+                   ConstantInt::get(ip, kContextBytes), MaybeAlign(16));
+    storeAt(B, M, Ctx, 0x30, ConstantInt::get(Type::getInt32Ty(M.getContext()),
+                                              kContextAmd64DebugRegisters),
+            Name + ".flags");
+}
+
+struct WindowsDebugRegisterSample {
+    Value *dr0;
+    Value *dr1;
+    Value *dr2;
+    Value *dr3;
+    Value *dr6;
+    Value *dr7;
+    Value *signal;
+};
+
+WindowsDebugRegisterSample loadWindowsDebugRegisters(IRBuilder<> &B, Module &M,
+                                                     AllocaInst *Ctx,
+                                                     const Twine &Name) {
+    auto *ip = intPtrTy(M);
+    Value *dr0 = loadAt(B, M, ip, Ctx, 0x48, Name + ".dr0");
+    Value *dr1 = loadAt(B, M, ip, Ctx, 0x50, Name + ".dr1");
+    Value *dr2 = loadAt(B, M, ip, Ctx, 0x58, Name + ".dr2");
+    Value *dr3 = loadAt(B, M, ip, Ctx, 0x60, Name + ".dr3");
+    Value *dr6 = loadAt(B, M, ip, Ctx, 0x68, Name + ".dr6");
+    Value *dr7 = loadAt(B, M, ip, Ctx, 0x70, Name + ".dr7");
+    Value *dr7Enabled =
+        B.CreateAnd(dr7, ConstantInt::get(ip, 0x55), Name + ".dr7.enabled");
+    Value *dr6Reason =
+        B.CreateAnd(dr6, ConstantInt::get(ip, 0x0f), Name + ".dr6.reason");
+    Value *addrSignal = B.CreateOr(B.CreateOr(dr0, dr1, Name + ".addr01"),
+                                   B.CreateOr(dr2, dr3, Name + ".addr23"),
+                                   Name + ".addr");
+    Value *signal =
+        B.CreateOr(addrSignal, B.CreateOr(dr7Enabled, dr6Reason),
+                   Name + ".signal");
+    return {dr0, dr1, dr2, dr3, dr6, dr7, signal};
+}
+
+Function *windowsHardwareBreakpointProbe(Module &M, GlobalVariable *State,
+                                         ir::IRRandom &rng, const Triple &TT) {
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
+        intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antidbg.win.dr"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    constexpr std::uint64_t kContextBytes = 1232;
+    constexpr std::uint64_t kDr0Offset = 0x48;
+    constexpr std::uint64_t kDr1Offset = 0x50;
+    constexpr std::uint64_t kDr2Offset = 0x58;
+    constexpr std::uint64_t kDr3Offset = 0x60;
+    constexpr std::uint64_t kDr6Offset = 0x68;
+    constexpr std::uint64_t kDr7Offset = 0x70;
+
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), {i64},
+                                                  false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.win.dr", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *tag = fn->getArg(0);
+    tag->setName("tag");
+
+    Function *pebReader = windowsPebReader(M);
+    Function *moduleByHash = windowsLdrModuleByHash(M);
+    Function *resolver = windowsPeExportResolver(M);
+    Function *scanner = windowsSyscallStubScanner(M);
+    Function *direct = windowsDirectSyscallThunk(M);
+    if (!pebReader || !moduleByHash || !resolver || !scanner || !direct)
+        return nullptr;
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *getBB = BasicBlock::Create(ctx, "get", fn);
+    auto *sentinelBB = BasicBlock::Create(ctx, "sentinel", fn);
+    auto *readbackBB = BasicBlock::Create(ctx, "readback", fn);
+    auto *cleanupBB = BasicBlock::Create(ctx, "cleanup", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    auto *ctxTy = ArrayType::get(i8, kContextBytes);
+    AllocaInst *ctxBuf = B.CreateAlloca(ctxTy, nullptr, "morok.win.dr.context");
+    ctxBuf->setAlignment(Align(16));
+    Value *ctxIp = B.CreatePtrToInt(ctxBuf, ip, "morok.win.dr.context.ip");
+    Value *peb = B.CreateCall(pebReader, {}, "morok.win.dr.peb");
+    Value *ntdll = B.CreateCall(
+        moduleByHash,
+        {peb, ConstantInt::get(i64, fnv1aLowerAsciiName("ntdll.dll"))},
+        "morok.win.dr.ntdll");
+    Value *getCtx = B.CreateCall(
+        resolver,
+        {ntdll, ConstantInt::get(i64, fnv1aName("NtGetContextThread"))},
+        "morok.win.dr.ntgetcontextthread");
+    Value *setCtx = B.CreateCall(
+        resolver,
+        {ntdll, ConstantInt::get(i64, fnv1aName("NtSetContextThread"))},
+        "morok.win.dr.ntsetcontextthread");
+    Value *getPack = B.CreateCall(
+        scanner, {B.CreateIntToPtr(getCtx, ptr, "morok.win.dr.get.ptr"),
+                  ConstantInt::getTrue(ctx)},
+        "morok.win.dr.ntgetcontextthread.pack");
+    Value *setPack = B.CreateCall(
+        scanner, {B.CreateIntToPtr(setCtx, ptr, "morok.win.dr.set.ptr"),
+                  ConstantInt::getTrue(ctx)},
+        "morok.win.dr.ntsetcontextthread.pack");
+    Value *getSsn = B.CreateTrunc(getPack, i32, "morok.win.dr.get.ssn");
+    Value *setSsn = B.CreateTrunc(setPack, i32, "morok.win.dr.set.ssn");
+    foldState(B, State, tag, rng.next(), "morok.win.dr.tag.mix");
+    foldState(B, State, ntdll, rng.next(), "morok.win.dr.ntdll.mix");
+    foldState(B, State, getPack, rng.next(), "morok.win.dr.get.pack.mix");
+    foldState(B, State, setPack, rng.next(), "morok.win.dr.set.pack.mix");
+    Value *getReady = B.CreateAnd(
+        B.CreateICmpNE(getCtx, ConstantInt::get(ip, 0)),
+        B.CreateICmpNE(getSsn, ConstantInt::get(i32, 0),
+                       "morok.win.dr.get.ssn.ready"),
+        "morok.win.dr.get.ready");
+    B.CreateCondBr(getReady, getBB, retBB);
+
+    IRBuilder<> GB(getBB);
+    initWindowsDebugContext(GB, M, ctxBuf, "morok.win.dr.get.context");
+    auto *directTy = direct->getFunctionType();
+    Value *currentThread = ConstantInt::getSigned(ip, -2);
+    Value *getStatus = GB.CreateCall(
+        directTy, direct,
+        {getSsn, currentThread, ctxIp, ConstantInt::get(ip, 0),
+         ConstantInt::get(ip, 0)},
+        "morok.win.dr.get.status");
+    Value *getStatus32 = GB.CreateTrunc(getStatus, i32,
+                                        "morok.win.dr.get.status.i32");
+    WindowsDebugRegisterSample sample =
+        loadWindowsDebugRegisters(GB, M, ctxBuf, "morok.win.dr");
+    Value *getOk = GB.CreateICmpSGE(getStatus32, ConstantInt::get(i32, 0),
+                                    "morok.win.dr.get.ok");
+    Value *active =
+        GB.CreateAnd(getOk,
+                     GB.CreateICmpNE(sample.signal, ConstantInt::get(ip, 0),
+                                     "morok.win.dr.signal.nonzero"),
+                     "morok.win.dr.active");
+    foldState(GB, State, getStatus, rng.next(), "morok.win.dr.get.status.mix");
+    foldState(GB, State, sample.signal, rng.next(), "morok.win.dr.signal.mix");
+    foldEnforcedFlag(GB, State, active, 0x6B37D18CE49A520FULL,
+                     "morok.win.dr.active");
+    Value *setReady = GB.CreateAnd(
+        getOk,
+        GB.CreateAnd(GB.CreateICmpEQ(sample.signal, ConstantInt::get(ip, 0),
+                                     "morok.win.dr.clean"),
+                     GB.CreateICmpNE(setSsn, ConstantInt::get(i32, 0),
+                                     "morok.win.dr.set.ssn.ready")),
+        "morok.win.dr.sentinel.ready");
+    GB.CreateCondBr(setReady, sentinelBB, retBB);
+
+    IRBuilder<> SB(sentinelBB);
+    initWindowsDebugContext(SB, M, ctxBuf, "morok.win.dr.set.context");
+    Value *sentinelOffset =
+        SB.CreateAnd(tag, ConstantInt::get(ip, 0x3f8),
+                     "morok.win.dr.sentinel.offset");
+    Value *sentinel = SB.CreateAdd(ctxIp, sentinelOffset,
+                                   "morok.win.dr.sentinel");
+    storeAt(SB, M, ctxBuf, kDr0Offset, sentinel, "morok.win.dr.sentinel.dr0");
+    storeAt(SB, M, ctxBuf, kDr1Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.sentinel.dr1");
+    storeAt(SB, M, ctxBuf, kDr2Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.sentinel.dr2");
+    storeAt(SB, M, ctxBuf, kDr3Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.sentinel.dr3");
+    storeAt(SB, M, ctxBuf, kDr6Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.sentinel.dr6");
+    storeAt(SB, M, ctxBuf, kDr7Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.sentinel.dr7");
+    Value *setStatus = SB.CreateCall(
+        directTy, direct,
+        {setSsn, currentThread, ctxIp, ConstantInt::get(ip, 0),
+         ConstantInt::get(ip, 0)},
+        "morok.win.dr.set.status");
+    Value *setStatus32 = SB.CreateTrunc(setStatus, i32,
+                                        "morok.win.dr.set.status.i32");
+    foldState(SB, State, setStatus, rng.next(), "morok.win.dr.set.status.mix");
+    SB.CreateCondBr(SB.CreateICmpSGE(setStatus32, ConstantInt::get(i32, 0),
+                                     "morok.win.dr.set.ok"),
+                    readbackBB, retBB);
+
+    IRBuilder<> RB(readbackBB);
+    initWindowsDebugContext(RB, M, ctxBuf, "morok.win.dr.readback.context");
+    Value *readbackStatus = RB.CreateCall(
+        directTy, direct,
+        {getSsn, currentThread, ctxIp, ConstantInt::get(ip, 0),
+         ConstantInt::get(ip, 0)},
+        "morok.win.dr.readback.status");
+    Value *readbackStatus32 =
+        RB.CreateTrunc(readbackStatus, i32, "morok.win.dr.readback.status.i32");
+    WindowsDebugRegisterSample readback =
+        loadWindowsDebugRegisters(RB, M, ctxBuf, "morok.win.dr.readback");
+    Value *readbackOk =
+        RB.CreateICmpSGE(readbackStatus32, ConstantInt::get(i32, 0),
+                         "morok.win.dr.readback.ok");
+    Value *sentinelMissing =
+        RB.CreateAnd(readbackOk,
+                     RB.CreateICmpNE(readback.dr0, sentinel,
+                                     "morok.win.dr.sentinel.missing"),
+                     "morok.win.dr.sentinel.mismatch");
+    foldState(RB, State, readbackStatus, rng.next(),
+              "morok.win.dr.readback.status.mix");
+    foldState(RB, State, readback.signal, rng.next(),
+              "morok.win.dr.readback.signal.mix");
+    foldEnforcedFlag(RB, State, sentinelMissing, 0xC40A91B72E635D8FULL,
+                     "morok.win.dr.sentinel");
+    RB.CreateBr(cleanupBB);
+
+    IRBuilder<> CB(cleanupBB);
+    initWindowsDebugContext(CB, M, ctxBuf, "morok.win.dr.restore.context");
+    storeAt(CB, M, ctxBuf, kDr0Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.restore.dr0");
+    storeAt(CB, M, ctxBuf, kDr1Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.restore.dr1");
+    storeAt(CB, M, ctxBuf, kDr2Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.restore.dr2");
+    storeAt(CB, M, ctxBuf, kDr3Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.restore.dr3");
+    storeAt(CB, M, ctxBuf, kDr6Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.restore.dr6");
+    storeAt(CB, M, ctxBuf, kDr7Offset, ConstantInt::get(ip, 0),
+            "morok.win.dr.restore.dr7");
+    Value *restoreStatus = CB.CreateCall(
+        directTy, direct,
+        {setSsn, currentThread, ctxIp, ConstantInt::get(ip, 0),
+         ConstantInt::get(ip, 0)},
+        "morok.win.dr.restore.status");
+    foldState(CB, State, restoreStatus, rng.next(),
+              "morok.win.dr.restore.status.mix");
+    CB.CreateBr(retBB);
+
+    IRBuilder<> RetB(retBB);
+    RetB.CreateRetVoid();
+    return fn;
+}
+
 Function *windowsUnhookProbe(Module &M, GlobalVariable *State,
                              ir::IRRandom &rng, const Triple &TT) {
     if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
@@ -14761,6 +15015,15 @@ Function *windowsProcessMitigationsProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+void emitWindowsAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
+                          ir::IRRandom &rng, const Triple &TT) {
+    IRBuilder<> B(&Ctor->getEntryBlock());
+    if (Function *dr = windowsHardwareBreakpointProbe(M, State, rng, TT))
+        B.CreateCall(dr->getFunctionType(), dr,
+                     {ConstantInt::get(B.getInt64Ty(), rng.next())});
+    B.CreateRetVoid();
+}
+
 } // namespace
 
 bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace) {
@@ -14780,6 +15043,8 @@ bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace) {
                            startLiveWatchers);
     else if (tt.isOSDarwin())
         emitDarwinAntiDebug(M, ctor, state, rng, tt, startLiveWatchers);
+    else if (tt.isOSWindows())
+        emitWindowsAntiDebug(M, ctor, state, rng, tt);
     else
         IRBuilder<>(&ctor->getEntryBlock()).CreateRetVoid();
     Function *probe = antiDebugProbe(M, state, rng, tt);

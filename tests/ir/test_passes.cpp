@@ -16996,6 +16996,89 @@ define i32 @main() { ret i32 0 }
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("antiDebuggingModule emits Windows hardware breakpoint DR probe") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-pc-windows-msvc"
+define i32 @work(i32 %x) {
+entry:
+  %y = add i32 %x, 13
+  ret i32 %y
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 29)
+  ret i32 %v
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8823);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.antidbg");
+    Function *Probe = M->getFunction("morok.antidbg.probe");
+    Function *WinDr = M->getFunction("morok.antidbg.win.dr");
+    Function *Work = M->getFunction("work");
+    Function *Main = M->getFunction("main");
+    Function *Peb = M->getFunction("morok.win.peb");
+    Function *Ldr = M->getFunction("morok.win.ldr.module");
+    Function *Resolve = M->getFunction("morok.win.pe.resolve");
+    Function *Scan = M->getFunction("morok.win.sys.scan");
+    Function *Direct = M->getFunction("morok.win.sys.direct");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Probe != nullptr);
+    REQUIRE(WinDr != nullptr);
+    REQUIRE(Work != nullptr);
+    REQUIRE(Main != nullptr);
+    REQUIRE(Peb != nullptr);
+    REQUIRE(Ldr != nullptr);
+    REQUIRE(Resolve != nullptr);
+    REQUIRE(Scan != nullptr);
+    REQUIRE(Direct != nullptr);
+    CHECK(WinDr->arg_size() == 1u);
+    CHECK(M->getGlobalVariable("morok.antidbg.state", true) != nullptr);
+    checkSealEnforcement(*M, *WinDr);
+    CHECK(hasInlineAsmCall(*Peb));
+    CHECK(hasInlineAsmCall(*Direct));
+    CHECK(countCallsTo(*Ctor, "morok.antidbg.win.dr") >= 1u);
+    CHECK(countCallsTo(*Probe, "morok.antidbg.win.dr") >= 1u);
+    const std::size_t userProbeSites =
+        countCallsTo(*Work, "morok.antidbg.probe") +
+        countCallsTo(*Main, "morok.antidbg.probe");
+    CHECK(userProbeSites >= 2u);
+    CHECK(userProbeSites + countCallsTo(*Ctor, "morok.antidbg.win.dr") >= 3u);
+    CHECK(M->getFunction("GetThreadContext") == nullptr);
+    CHECK(M->getFunction("SetThreadContext") == nullptr);
+    CHECK(M->getFunction("NtGetContextThread") == nullptr);
+    CHECK(M->getFunction("NtSetContextThread") == nullptr);
+    CHECK(countNamedInstructions(*WinDr, "morok.win.dr.ntdll") >= 1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.ntgetcontextthread") >= 1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.ntsetcontextthread") >= 1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.ntgetcontextthread.pack") >=
+          1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.ntsetcontextthread.pack") >=
+          1u);
+    CHECK(countNamedInstructions(*WinDr, "morok.win.dr.get.status") >= 1u);
+    CHECK(countNamedInstructions(*WinDr, "morok.win.dr.signal") >= 1u);
+    CHECK(countNamedInstructions(*WinDr, "morok.win.dr.active") >= 1u);
+    CHECK(countNamedInstructions(*WinDr, "morok.win.dr.set.status") >= 1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.readback.status") >= 1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.sentinel.mismatch") >= 1u);
+    CHECK(countNamedInstructions(*WinDr,
+                                 "morok.win.dr.restore.status") >= 1u);
+    Instruction *Active = findNamedInstruction(*WinDr, "morok.win.dr.active");
+    REQUIRE(Active != nullptr);
+    CHECK(valueFeedsNamedInstruction(Active, "morok.seal.fold.anti_debug"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("antiDebuggingModule emits x86_64 Darwin source checks through "
           "direct syscalls") {
     LLVMContext ctx;
