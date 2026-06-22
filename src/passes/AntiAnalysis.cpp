@@ -1957,11 +1957,329 @@ Function *linuxSignalMaskThreadCheck(Module &M, ir::IRRandom &rng,
     return fn;
 }
 
+bool linuxUnameSyscall(const Triple &TT, std::uint32_t &Uname);
+
+Value *linuxKernelVersionAtLeast(IRBuilder<> &B, Module &M, const Triple &TT,
+                                 std::uint32_t NeedMajor,
+                                 std::uint32_t NeedMinor,
+                                 const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    std::uint32_t unameNr = 0;
+    if (!linuxUnameSyscall(TT, unameNr))
+        return ConstantInt::getFalse(ctx);
+
+    auto *utsTy = ArrayType::get(i8, 390);
+    AllocaInst *uts = B.CreateAlloca(utsTy, nullptr, Name + ".uts");
+    Value *utsPtr = B.CreateInBoundsGEP(
+        utsTy, uts, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        Name + ".uts.ptr");
+    Value *rc = emitLinuxSyscall(B, M, TT, unameNr, {utsPtr});
+    rc->setName(Name + ".uname");
+    Value *ok = B.CreateICmpEQ(rc, ConstantInt::get(ip, 0), Name + ".uname.ok");
+    auto loadRelease = [&](std::uint64_t Offset, const Twine &Field) {
+        return loadAt(B, M, i8, uts, Offset, Name + "." + Field);
+    };
+    auto digitValue = [&](Value *Ch, const Twine &Field) {
+        return B.CreateSub(B.CreateZExt(Ch, i32, Field + ".zext"),
+                           ConstantInt::get(i32, '0'), Field);
+    };
+
+    Value *c0 = loadRelease(130, "c0");
+    Value *c1 = loadRelease(131, "c1");
+    Value *c2 = loadRelease(132, "c2");
+    Value *c3 = loadRelease(133, "c3");
+    Value *c4 = loadRelease(134, "c4");
+    Value *c0Digit = B.CreateAnd(
+        B.CreateICmpUGE(c0, ConstantInt::get(i8, '0'), Name + ".c0.ge0"),
+        B.CreateICmpULE(c0, ConstantInt::get(i8, '9'), Name + ".c0.le9"),
+        Name + ".c0.digit");
+    Value *c1Digit = B.CreateAnd(
+        B.CreateICmpUGE(c1, ConstantInt::get(i8, '0'), Name + ".c1.ge0"),
+        B.CreateICmpULE(c1, ConstantInt::get(i8, '9'), Name + ".c1.le9"),
+        Name + ".c1.digit");
+    Value *oneDigitMajor =
+        B.CreateAnd(c0Digit, B.CreateICmpEQ(c1, ConstantInt::get(i8, '.')),
+                    Name + ".major.one");
+    Value *twoDigitMajor = B.CreateAnd(
+        B.CreateAnd(c0Digit, c1Digit),
+        B.CreateICmpEQ(c2, ConstantInt::get(i8, '.')), Name + ".major.two");
+    Value *d0 = digitValue(c0, Name + ".major.d0");
+    Value *d1 = digitValue(c1, Name + ".major.d1");
+    Value *major2 =
+        B.CreateAdd(B.CreateMul(d0, ConstantInt::get(i32, 10)), d1,
+                    Name + ".major.two.value");
+    Value *major = B.CreateSelect(twoDigitMajor, major2, d0, Name + ".major");
+    Value *m0 = B.CreateSelect(twoDigitMajor, c3, c2, Name + ".minor.c0");
+    Value *m1 = B.CreateSelect(twoDigitMajor, c4, c3, Name + ".minor.c1");
+    Value *m0Digit = B.CreateAnd(
+        B.CreateICmpUGE(m0, ConstantInt::get(i8, '0'), Name + ".m0.ge0"),
+        B.CreateICmpULE(m0, ConstantInt::get(i8, '9'), Name + ".m0.le9"),
+        Name + ".m0.digit");
+    Value *m1Digit = B.CreateAnd(
+        B.CreateICmpUGE(m1, ConstantInt::get(i8, '0'), Name + ".m1.ge0"),
+        B.CreateICmpULE(m1, ConstantInt::get(i8, '9'), Name + ".m1.le9"),
+        Name + ".m1.digit");
+    Value *minorOne =
+        B.CreateAnd(m0Digit, B.CreateNot(m1Digit), Name + ".minor.one");
+    Value *minorTwo =
+        B.CreateAnd(m0Digit, m1Digit, Name + ".minor.two");
+    Value *md0 = digitValue(m0, Name + ".minor.d0");
+    Value *md1 = digitValue(m1, Name + ".minor.d1");
+    Value *minor2 =
+        B.CreateAdd(B.CreateMul(md0, ConstantInt::get(i32, 10)), md1,
+                    Name + ".minor.two.value");
+    Value *minor = B.CreateSelect(minorTwo, minor2, md0, Name + ".minor");
+    Value *parsed =
+        B.CreateAnd(B.CreateOr(oneDigitMajor, twoDigitMajor),
+                    B.CreateOr(minorOne, minorTwo), Name + ".parsed");
+    Value *newerMajor =
+        B.CreateICmpUGT(major, ConstantInt::get(i32, NeedMajor),
+                        Name + ".major.newer");
+    Value *sameMajor =
+        B.CreateICmpEQ(major, ConstantInt::get(i32, NeedMajor),
+                       Name + ".major.same");
+    Value *minorOk =
+        B.CreateICmpUGE(minor, ConstantInt::get(i32, NeedMinor),
+                        Name + ".minor.ok");
+    return B.CreateAnd(
+        B.CreateAnd(ok, parsed, Name + ".version.ok"),
+        B.CreateOr(newerMajor, B.CreateAnd(sameMajor, minorOk),
+                   Name + ".version.ge"),
+        Name + ".kernel.ok");
+}
+
+Value *parseFixedBufferPrefix(IRBuilder<> &B, Module &M, AllocaInst *Buf,
+                              Value *N,
+                              std::initializer_list<unsigned char> Prefix,
+                              std::uint64_t MaxBytes, const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    Function *fn = B.GetInsertBlock()->getParent();
+    auto *i1 = Type::getInt1Ty(ctx);
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *ip = intPtrTy(M);
+    std::vector<unsigned char> prefix(Prefix.begin(), Prefix.end());
+
+    auto *matchSlot = B.CreateAlloca(i1, nullptr, Name + ".slot");
+    B.CreateStore(ConstantInt::getFalse(ctx), matchSlot)->setVolatile(true);
+    auto *checkBB = BasicBlock::Create(ctx, (Name + ".check").str(), fn);
+    auto *matchBB = BasicBlock::Create(ctx, (Name + ".match").str(), fn);
+    auto *doneBB = BasicBlock::Create(ctx, (Name + ".done").str(), fn);
+    B.CreateBr(checkBB);
+
+    IRBuilder<> CB(checkBB);
+    Value *enough =
+        CB.CreateICmpSGE(N, ConstantInt::get(ip, prefix.size()),
+                         Name + ".enough");
+    Value *withinBuf = ConstantInt::get(i1, prefix.size() <= MaxBytes);
+    CB.CreateCondBr(CB.CreateAnd(enough, withinBuf), matchBB, doneBB);
+
+    IRBuilder<> MB(matchBB);
+    Value *match = ConstantInt::getTrue(ctx);
+    for (std::uint64_t j = 0; j < prefix.size(); ++j) {
+        Value *ch = loadAt(MB, M, i8, Buf, j, Name + ".ch");
+        match = MB.CreateAnd(
+            match, MB.CreateICmpEQ(ch, ConstantInt::get(i8, prefix[j])),
+            Name + ".prefix");
+    }
+    MB.CreateStore(match, matchSlot)->setVolatile(true);
+    MB.CreateBr(doneBB);
+
+    B.SetInsertPoint(doneBB);
+    auto *out = B.CreateLoad(i1, matchSlot, Name);
+    out->setVolatile(true);
+    return out;
+}
+
+struct StatStateIR {
+    Value *found = nullptr;
+    Value *state = nullptr;
+    Value *stopped = nullptr;
+    Value *traceStop = nullptr;
+    Value *stopLike = nullptr;
+};
+
+StatStateIR parseLinuxStatState(IRBuilder<> &B, Module &M, AllocaInst *Buf,
+                                Value *N, std::uint64_t MaxBytes,
+                                const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    Function *fn = B.GetInsertBlock()->getParent();
+    auto *i1 = Type::getInt1Ty(ctx);
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *foundSlot = B.CreateAlloca(i1, nullptr, Name + ".found.slot");
+    auto *stateSlot = B.CreateAlloca(i8, nullptr, Name + ".state.slot");
+    B.CreateStore(ConstantInt::getFalse(ctx), foundSlot)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(i8, 0), stateSlot)->setVolatile(true);
+
+    auto *loopBB = BasicBlock::Create(ctx, (Name + ".scan").str(), fn);
+    auto *charBB = BasicBlock::Create(ctx, (Name + ".char").str(), fn);
+    auto *nextBB = BasicBlock::Create(ctx, (Name + ".next").str(), fn);
+    auto *foundBB = BasicBlock::Create(ctx, (Name + ".found").str(), fn);
+    auto *readBB = BasicBlock::Create(ctx, (Name + ".read").str(), fn);
+    auto *doneBB = BasicBlock::Create(ctx, (Name + ".done").str(), fn);
+    BasicBlock *startBB = B.GetInsertBlock();
+    Value *lastIdx = B.CreateSub(N, ConstantInt::get(ip, 1), Name + ".last");
+    Value *hasAny = B.CreateICmpSGT(N, ConstantInt::get(ip, 3),
+                                   Name + ".has.any");
+    B.CreateCondBr(hasAny, loopBB, doneBB);
+
+    IRBuilder<> LB(loopBB);
+    auto *idx = LB.CreatePHI(ip, 2, Name + ".idx");
+    idx->addIncoming(lastIdx, startBB);
+    Value *valid =
+        LB.CreateICmpSGE(idx, ConstantInt::getSigned(ip, 0), Name + ".valid");
+    LB.CreateCondBr(valid, charBB, doneBB);
+
+    IRBuilder<> CB(charBB);
+    Value *ch = loadAt(CB, M, i8, Buf, idx, Name + ".ch");
+    CB.CreateCondBr(CB.CreateICmpEQ(ch, ConstantInt::get(i8, ')'),
+                                    Name + ".close"),
+                    foundBB, nextBB);
+
+    IRBuilder<> NB(nextBB);
+    Value *prev = NB.CreateSub(idx, ConstantInt::get(ip, 1), Name + ".prev");
+    NB.CreateBr(loopBB);
+    idx->addIncoming(prev, nextBB);
+
+    IRBuilder<> FB(foundBB);
+    Value *stateIdx = FB.CreateAdd(idx, ConstantInt::get(ip, 2),
+                                   Name + ".state.idx");
+    Value *inRead = FB.CreateICmpSLT(stateIdx, N, Name + ".state.in.read");
+    Value *inBuf =
+        FB.CreateICmpULT(stateIdx, ConstantInt::get(ip, MaxBytes),
+                         Name + ".state.in.buf");
+    FB.CreateCondBr(FB.CreateAnd(inRead, inBuf), readBB, doneBB);
+
+    IRBuilder<> RB(readBB);
+    Value *state = loadAt(RB, M, i8, Buf, stateIdx, Name + ".state.raw");
+    RB.CreateStore(state, stateSlot)->setVolatile(true);
+    RB.CreateStore(ConstantInt::getTrue(ctx), foundSlot)->setVolatile(true);
+    RB.CreateBr(doneBB);
+
+    B.SetInsertPoint(doneBB);
+    StatStateIR out;
+    out.found = B.CreateLoad(i1, foundSlot, Name + ".found");
+    cast<LoadInst>(out.found)->setVolatile(true);
+    out.state = B.CreateLoad(i8, stateSlot, Name + ".state");
+    cast<LoadInst>(out.state)->setVolatile(true);
+    out.stopped = B.CreateAnd(
+        out.found,
+        B.CreateICmpEQ(out.state, ConstantInt::get(i8, 'T'), Name + ".stopped"),
+        Name + ".stopped.found");
+    out.traceStop = B.CreateAnd(
+        out.found,
+        B.CreateICmpEQ(out.state, ConstantInt::get(i8, 't'),
+                       Name + ".trace.stop"),
+        Name + ".trace.stop.found");
+    out.stopLike =
+        B.CreateOr(out.stopped, out.traceStop, Name + ".state.stop");
+    return out;
+}
+
+Function *linuxPtraceStopCoherenceCheck(Module &M, ir::IRRandom &rng,
+                                        const Triple &TT,
+                                        Function *StatusFn) {
+    if (Function *existing = M.getFunction("morok.antidbg.linux.ptrace_stop"))
+        return existing;
+    if (!TT.isOSLinux() || !StatusFn)
+        return nullptr;
+    std::uint32_t unameNr = 0;
+    if (!linuxUnameSyscall(TT, unameNr))
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.linux.ptrace_stop", &M);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *probeBB = BasicBlock::Create(ctx, "probe", fn);
+    auto *gateRetBB = BasicBlock::Create(ctx, "ret0.kernel", fn);
+    IRBuilder<> B(entry);
+    Value *kernelOk =
+        linuxKernelVersionAtLeast(B, M, TT, 3, 4,
+                                  "morok.antidbg.ptrace_stop.kernel");
+    B.CreateCondBr(kernelOk, probeBB, gateRetBB);
+
+    IRBuilder<> PB(probeBB);
+    ReadFileIR wchan =
+        emitReadSmallFile(PB, M, fn, "/proc/self/wchan", 64, rng, TT);
+    IRBuilder<> WB(wchan.afterRead);
+    ReadFileIR stat =
+        emitReadSmallFile(WB, M, fn, "/proc/self/stat", 1024, rng, TT);
+
+    IRBuilder<> SB(stat.afterRead);
+    Value *wchanStop = parseFixedBufferPrefix(
+        SB, M, wchan.buf, wchan.n,
+        {'p', 't', 'r', 'a', 'c', 'e', '_', 's', 't', 'o', 'p'}, 64,
+        "morok.antidbg.ptrace_stop.wchan.ptrace_stop");
+    StatStateIR statState = parseLinuxStatState(
+        SB, M, stat.buf, stat.n, 1024, "morok.antidbg.ptrace_stop.stat");
+    Value *status = SB.CreateCall(StatusFn->getFunctionType(), StatusFn, {},
+                                  "morok.antidbg.ptrace_stop.status");
+    Value *traced =
+        SB.CreateICmpNE(status, ConstantInt::get(i32, 0),
+                        "morok.antidbg.ptrace_stop.tracer");
+    Value *stopPair = SB.CreateAnd(wchanStop, statState.stopLike,
+                                   "morok.antidbg.ptrace_stop.stop.pair");
+    Value *coherent =
+        SB.CreateAnd(traced, stopPair, "morok.antidbg.ptrace_stop.coherent");
+    Value *notTraced = SB.CreateNot(traced, "morok.antidbg.ptrace_stop.clean");
+    Value *wchanNoTracer =
+        SB.CreateAnd(wchanStop, notTraced,
+                     "morok.antidbg.ptrace_stop.wchan.no_tracer");
+    Value *statNoTracer =
+        SB.CreateAnd(statState.stopLike, notTraced,
+                     "morok.antidbg.ptrace_stop.stat.no_tracer");
+    Value *wchanStatDelta =
+        SB.CreateXor(wchanStop, statState.stopLike,
+                     "morok.antidbg.ptrace_stop.wchan.stat.delta");
+
+    Value *packed = SB.CreateZExt(coherent, i64,
+                                  "morok.antidbg.ptrace_stop.pack.coherent");
+    auto packBit = [&](Value *Flag, std::uint64_t Shift, const Twine &Name) {
+        return SB.CreateShl(SB.CreateZExt(Flag, i64), ConstantInt::get(i64, Shift),
+                            Name);
+    };
+    packed = SB.CreateOr(
+        packed, packBit(traced, 1, "morok.antidbg.ptrace_stop.pack.tracer"),
+        "morok.antidbg.ptrace_stop.pack.1");
+    packed = SB.CreateOr(
+        packed, packBit(wchanStop, 2, "morok.antidbg.ptrace_stop.pack.wchan"),
+        "morok.antidbg.ptrace_stop.pack.2");
+    packed = SB.CreateOr(
+        packed,
+        packBit(statState.stopLike, 3, "morok.antidbg.ptrace_stop.pack.stat"),
+        "morok.antidbg.ptrace_stop.pack.3");
+    packed = SB.CreateOr(
+        packed,
+        packBit(wchanStatDelta, 4, "morok.antidbg.ptrace_stop.pack.delta"),
+        "morok.antidbg.ptrace_stop.pack.4");
+    packed = SB.CreateOr(
+        packed,
+        packBit(wchanNoTracer, 5, "morok.antidbg.ptrace_stop.pack.wchan.clean"),
+        "morok.antidbg.ptrace_stop.pack.5");
+    packed = SB.CreateOr(
+        packed,
+        packBit(statNoTracer, 6, "morok.antidbg.ptrace_stop.pack.stat.clean"),
+        "morok.antidbg.ptrace_stop.pack");
+    SB.CreateRet(packed);
+
+    finishI64Ret(gateRetBB, 0);
+    finishI64Ret(wchan.ret0, 0);
+    finishI64Ret(stat.ret0, 0);
+    return fn;
+}
+
 bool linuxBuddyLivenessSyscalls(const Triple &TT, std::uint32_t &Kill,
                                 std::uint32_t &Wait4);
 
 Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
-                           Function *SignalMaskFn,
+                           Function *SignalMaskFn, Function *PtraceStopFn,
                            GlobalVariable *State, GlobalVariable *BuddyPid,
                            GlobalVariable *SentinelActive, const Triple &TT,
                            bool AllowSelfTrace) {
@@ -2040,6 +2358,19 @@ Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
                             "morok.antidbg.watch.sigmask.cgt.diverged");
         sealFold(BB, unblockable, 0x8E7B1346D5A0C29FULL);
         sealFold(BB, cgtDiverged, 0x42F9C16B8D30A57EULL);
+    }
+    if (PtraceStopFn) {
+        Value *ptraceStop = BB.CreateCall(PtraceStopFn->getFunctionType(),
+                                          PtraceStopFn, {},
+                                          "morok.antidbg.watch.stopcoh");
+        foldState(BB, State, ptraceStop, 0xA63F5B4C91D207E8ULL,
+                  "morok.antidbg.watch.stopcoh");
+        Value *coherent =
+            BB.CreateICmpNE(BB.CreateAnd(ptraceStop, ConstantInt::get(i64, 1),
+                                         "morok.antidbg.watch.stopcoh.bit"),
+                            ConstantInt::get(i64, 0),
+                            "morok.antidbg.watch.stopcoh.coherent");
+        sealFold(BB, coherent, 0xD5A127BC904E63F8ULL);
     }
     if (watchBuddy) {
         BB.CreateBr(buddyCheckBB);
@@ -3887,6 +4218,10 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
     Function *sigmaskFn = StartLiveWatchers
                               ? linuxSignalMaskThreadCheck(M, rng, TT)
                               : nullptr;
+    Function *ptraceStopFn = StartLiveWatchers
+                                 ? linuxPtraceStopCoherenceCheck(M, rng, TT,
+                                                                 statusFn)
+                                 : nullptr;
     Value *status = B.CreateCall(statusFn);
     Value *stat4 = B.CreateCall(statFn);
     foldFlag(B, State, B.CreateICmpNE(status, ConstantInt::get(i32, 0)),
@@ -3905,8 +4240,8 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
 
     if (StartLiveWatchers) {
         Function *watch = linuxWatchThread(M, statusFn, statFn, sigmaskFn,
-                                           State, buddyPid, drActive, TT,
-                                           AllowSelfTrace);
+                                           ptraceStopFn, State, buddyPid,
+                                           drActive, TT, AllowSelfTrace);
         emitLinuxWatcherStart(B, M, watch);
     }
     B.CreateRetVoid();
@@ -14209,6 +14544,9 @@ bool linuxUnameSyscall(const Triple &TT, std::uint32_t &Uname) {
         return true;
     case Triple::aarch64:
         Uname = 160;
+        return true;
+    case Triple::arm:
+        Uname = 122;
         return true;
     default:
         return false;
