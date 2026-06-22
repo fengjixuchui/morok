@@ -3541,7 +3541,7 @@ DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
     Value *adhocClass =
         classBit(0x00000002U, 0x1U, "morok.antidbg.csops.sigclass.adhoc");
     Value *devClass =
-        classBit(0x00002000U, 0x2U, "morok.antidbg.csops.sigclass.dev");
+        classBit(0x40000000U, 0x2U, "morok.antidbg.csops.sigclass.dev");
     Value *platformClass =
         classBit(0x04000000U, 0x4U, "morok.antidbg.csops.sigclass.platform");
     Value *sigClass = B.CreateOr(
@@ -3561,6 +3561,35 @@ DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
     foldState(B, State, effectiveDelta, 0xA76C5D9021B4E38FULL,
               "morok.antidbg.csops.sigclass");
     sealFold(B, classDrift, 0xA76C5D9021B4E38FULL);
+
+    if (DistributionSigned) {
+        Value *runtimeBits =
+            B.CreateAnd(flags, ConstantInt::get(i32, 0x00010000U),
+                        "morok.antidbg.csops.hr.runtime.bits");
+        Value *runtimePresent =
+            B.CreateICmpNE(runtimeBits, ConstantInt::get(i32, 0),
+                           "morok.antidbg.csops.hr.runtime");
+        Value *runtimeMissing =
+            B.CreateNot(runtimePresent,
+                        "morok.antidbg.csops.hr.runtime.missing");
+        Value *lvBits =
+            B.CreateAnd(flags, ConstantInt::get(i32, 0x00002000U),
+                        "morok.antidbg.csops.hr.lv.bits");
+        Value *lvPresent =
+            B.CreateICmpNE(lvBits, ConstantInt::get(i32, 0),
+                           "morok.antidbg.csops.hr.lv");
+        Value *lvMissing =
+            B.CreateNot(lvPresent, "morok.antidbg.csops.hr.lv.missing");
+        Value *hardeningMissing =
+            B.CreateOr(runtimeMissing, lvMissing,
+                       "morok.antidbg.csops.hr.missing");
+        Value *releaseHardeningAbsent =
+            B.CreateAnd(ok, hardeningMissing,
+                        "morok.antidbg.csops.hr.release.absent");
+        foldEnforcedFlag(B, State, releaseHardeningAbsent,
+                         0x6DE9A14C7B8253F5ULL,
+                         "morok.antidbg.csops.hr.release");
+    }
 
     Value *taskAllowBits =
         B.CreateAnd(flags, ConstantInt::get(i32, 0x4),

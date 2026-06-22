@@ -226,6 +226,16 @@ Instruction *findNamedInstruction(Function &F, StringRef name) {
     return nullptr;
 }
 
+bool instructionHasConstantOperand(Instruction *I, std::uint64_t Expected) {
+    if (!I)
+        return false;
+    for (Value *Op : I->operands())
+        if (auto *CI = dyn_cast<ConstantInt>(Op))
+            if (CI->getZExtValue() == Expected)
+                return true;
+    return false;
+}
+
 // Byte offset of a gepI8-emitted `getelementptr i8, ptr Base, ip <off>` named
 // `name`. Returns -1 if the instruction is missing or not a constant-offset
 // i8 GEP. Used to pin platform struct field offsets in emitted handlers.
@@ -265,6 +275,26 @@ void checkSealEnforcement(Module &M, Function &F) {
     CHECK(countNamedInstructions(F, "morok.seal.fold.anti_debug.next") >= 1u);
 }
 
+void checkDarwinCsopsHardenedRuntimeSignals(Function &F) {
+    Instruction *RuntimeBits =
+        findNamedInstruction(F, "morok.antidbg.csops.hr.runtime.bits");
+    Instruction *LvBits =
+        findNamedInstruction(F, "morok.antidbg.csops.hr.lv.bits");
+    Instruction *ReleaseAbsent =
+        findNamedInstruction(F, "morok.antidbg.csops.hr.release.absent");
+    REQUIRE(RuntimeBits != nullptr);
+    REQUIRE(LvBits != nullptr);
+    REQUIRE(ReleaseAbsent != nullptr);
+    CHECK(instructionHasConstantOperand(RuntimeBits, 0x10000u));
+    CHECK(instructionHasConstantOperand(LvBits, 0x2000u));
+    CHECK(countNamedInstructions(F, "morok.antidbg.csops.hr.runtime.missing") >=
+          1u);
+    CHECK(countNamedInstructions(F, "morok.antidbg.csops.hr.lv.missing") >= 1u);
+    CHECK(countNamedInstructions(F, "morok.antidbg.csops.hr.missing") >= 1u);
+    CHECK(valueFeedsNamedInstruction(ReleaseAbsent,
+                                     "morok.seal.fold.anti_debug"));
+}
+
 void checkDarwinCsopsTaskAllowSignals(Function &F,
                                       bool DistributionSigned = false) {
     CHECK(countNamedInstructions(F, "morok.antidbg.csops.gta.bits") >= 1u);
@@ -276,8 +306,10 @@ void checkDarwinCsopsTaskAllowSignals(Function &F,
 
     CHECK(countNamedInstructions(F, "morok.antidbg.csops.sigclass.adhoc.bits") >=
           1u);
-    CHECK(countNamedInstructions(F, "morok.antidbg.csops.sigclass.dev.bits") >=
-          1u);
+    Instruction *DevBits =
+        findNamedInstruction(F, "morok.antidbg.csops.sigclass.dev.bits");
+    REQUIRE(DevBits != nullptr);
+    CHECK(instructionHasConstantOperand(DevBits, 0x40000000u));
     CHECK(countNamedInstructions(F,
                                  "morok.antidbg.csops.sigclass.platform.bits") >=
           1u);
@@ -300,11 +332,11 @@ void checkDarwinCsopsTaskAllowSignals(Function &F,
     CHECK(valueFeedsNamedInstruction(Drift, "morok.seal.fold.anti_debug"));
 
     const std::uint64_t ForbiddenMask = DistributionSigned ? 0x7u : 0x4u;
-    bool UsesExpectedMask = false;
-    for (Value *Op : Delta->operands())
-        if (auto *CI = dyn_cast<ConstantInt>(Op))
-            UsesExpectedMask |= CI->getZExtValue() == ForbiddenMask;
-    CHECK(UsesExpectedMask);
+    CHECK(instructionHasConstantOperand(Delta, ForbiddenMask));
+    if (DistributionSigned)
+        checkDarwinCsopsHardenedRuntimeSignals(F);
+    else
+        CHECK(countNamedInstructions(F, "morok.antidbg.csops.hr.") == 0u);
 }
 
 void checkDarwinCsopsExceptionCoherence(Function &F) {
