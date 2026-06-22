@@ -19219,17 +19219,23 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Oracle, "morok.timing.bad.distribution") >=
           1u);
     CHECK(countNamedInstructions(*Oracle,
+                                 "morok.timing.coherent.distribution") >= 1u);
+    CHECK(countNamedInstructions(
+              *Oracle, "morok.timing.divergent.distribution") >= 1u);
+    CHECK(countNamedInstructions(*Oracle,
                                  "morok.timing.bad.distribution.score") >= 1u);
     CHECK(countNamedInstructions(
-              *Oracle, "morok.timing.divergent.distribution.score") >= 1u);
+              *Oracle, "morok.timing.coherent.distribution.score") >= 1u);
+    CHECK(countNamedInstructions(
+              *Oracle, "morok.timing.divergent.distribution.score") == 0u);
     CHECK(hasNamedIcmpWithConstant(
         *Oracle, "morok.timing.bad.distribution.score.enough", 8u));
     CHECK(hasNamedIcmpWithConstant(
-        *Oracle, "morok.timing.divergent.distribution.score.enough", 8u));
+        *Oracle, "morok.timing.coherent.distribution.score.enough", 8u));
     CHECK_FALSE(hasNamedIcmpWithConstant(
         *Oracle, "morok.timing.bad.distribution.score.enough", 32u));
     CHECK_FALSE(hasNamedIcmpWithConstant(
-        *Oracle, "morok.timing.divergent.distribution.score.enough", 32u));
+        *Oracle, "morok.timing.coherent.distribution.score.enough", 32u));
     // The x86 timestamp read lives in a CPUID-gated helper (rdtscp + rdtsc
     // fallback); the probe calls it rather than inlining the asm.
     Function *Tsc = M->getFunction("morok.timing.tsc.read");
@@ -19292,6 +19298,8 @@ define i32 @main() { ret i32 0 }
     Function *Oracle = M->getFunction("morok.timing.oracle");
     REQUIRE(Oracle != nullptr);
     CHECK(M->getGlobalVariable("morok.timing.state", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.seal.score.anti_debug.weight", true) ==
+          nullptr);
     checkNoSealEnforcement(*Oracle);
     CHECK(M->getFunction("mach_absolute_time") != nullptr);
     CHECK(M->getFunction("clock_gettime") != nullptr);

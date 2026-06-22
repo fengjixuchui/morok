@@ -10830,6 +10830,7 @@ Function *timingOracleProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
     B.CreateStore(ConstantInt::get(i64, rng.next()), acc)->setVolatile(true);
 
     Value *badSamples = ConstantInt::get(i32, 0);
+    Value *coherentSamples = ConstantInt::get(i32, 0);
     Value *divergentSamples = ConstantInt::get(i32, 0);
     Value *mix = ConstantInt::get(i64, rng.next());
     const bool hasCycleClock = isX86Target(TT);
@@ -10860,10 +10861,15 @@ Function *timingOracleProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
             "morok.timing.secondary.slow");
         Value *sampleSlow =
             B.CreateOr(primarySlow, secondarySlow, "morok.timing.sample.slow");
+        Value *sampleCoherent = B.CreateAnd(primarySlow, secondarySlow,
+                                            "morok.timing.sample.coherent");
         Value *sampleDiverged = B.CreateXor(primarySlow, secondarySlow,
                                             "morok.timing.sample.diverged");
         badSamples = B.CreateAdd(badSamples, B.CreateZExt(sampleSlow, i32),
                                  "morok.timing.bad.n");
+        coherentSamples =
+            B.CreateAdd(coherentSamples, B.CreateZExt(sampleCoherent, i32),
+                        "morok.timing.coherent.n");
         divergentSamples =
             B.CreateAdd(divergentSamples, B.CreateZExt(sampleDiverged, i32),
                         "morok.timing.divergent.n");
@@ -10879,20 +10885,29 @@ Function *timingOracleProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
     foldState(B, State, mix, 0x275C92B4EF31D68BULL, "morok.timing.mix");
     foldState(B, State, badSamples, 0x7A6D2E10B94F35C1ULL,
               "morok.timing.bad.samples");
+    foldState(B, State, coherentSamples, 0x13BA2A5F4E1C6D07ULL,
+              "morok.timing.coherent.samples");
     foldState(B, State, divergentSamples, 0xC541A9E72318BE6FULL,
               "morok.timing.divergent.samples");
     Value *badDistribution = B.CreateICmpUGE(
         badSamples, ConstantInt::get(i32, 3),
         "morok.timing.bad.distribution");
+    Value *coherentDistribution = B.CreateICmpUGE(
+        coherentSamples, ConstantInt::get(i32, 3),
+        "morok.timing.coherent.distribution");
     Value *divergentDistribution = B.CreateICmpUGE(
         divergentSamples, ConstantInt::get(i32, 2),
         "morok.timing.divergent.distribution");
-    // Wall-clock spans are scheduler-sensitive; keep these verdicts telemetry.
+    const bool scoreSoftTiming = hasCycleClock;
+    // Score only when an independent cycle clock participates and corroborates
+    // sustained slowness. Wall-clock-only targets and lone stretched clocks are
+    // scheduler-sensitive telemetry, not consumed seal evidence.
     foldFlag(B, State, badDistribution, 0xA331D8B47E1C5905ULL,
-             "morok.timing.bad.distribution", /*ScoreSoftSignal=*/true);
+             "morok.timing.bad.distribution", scoreSoftTiming);
+    foldFlag(B, State, coherentDistribution, 0x4B1D6A80C2E39F17ULL,
+             "morok.timing.coherent.distribution", scoreSoftTiming);
     foldFlag(B, State, divergentDistribution, 0x5E74B29D13C8A60BULL,
-             "morok.timing.divergent.distribution",
-             /*ScoreSoftSignal=*/true);
+             "morok.timing.divergent.distribution");
     B.CreateRetVoid();
     return fn;
 }
