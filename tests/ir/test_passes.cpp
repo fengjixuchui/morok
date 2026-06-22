@@ -15843,8 +15843,16 @@ entry:
                                        "morok.watchdog.crypto") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.fork") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.pid.valid") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.ptracer.rc") >=
+          1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.dr.ptracer.restricted") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.ptracer.ok") >=
           1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.ptracer.old") ==
+          0u);
+    CHECK(storesNamedValueToGlobalPrefix(*AntiDbg, "morok.antidbg.dr.active",
+                                         "morok.antidbg.dr.ptracer.ok"));
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.child.dumpable") >=
           1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.child.ptracer") >=

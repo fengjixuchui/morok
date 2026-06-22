@@ -1584,10 +1584,14 @@ bool emitLinuxDrSentinelStart(IRBuilder<> &B, Module &M, GlobalVariable *State,
         {ConstantInt::get(ip, 0x59616D61), pid, ConstantInt::get(ip, 0),
          ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
     prctlRc->setName("morok.antidbg.dr.ptracer.rc");
-    foldState(PB, State, prctlRc, 0x419C75EF62D3A80BULL,
-              "morok.antidbg.dr.ptracer");
-    Value *ptracerOk = PB.CreateICmpEQ(prctlRc, ConstantInt::get(ip, 0),
-                                       "morok.antidbg.dr.ptracer.ok");
+    // PR_SET_PTRACER can be denied by Yama, seccomp, or container policy on a
+    // clean host.  That denial disables the DR sentinel; later /proc checks
+    // provide the corroborated debugger evidence that may poison State.
+    Value *ptracerRestricted =
+        PB.CreateICmpNE(prctlRc, ConstantInt::get(ip, 0),
+                        "morok.antidbg.dr.ptracer.restricted");
+    Value *ptracerOk =
+        PB.CreateNot(ptracerRestricted, "morok.antidbg.dr.ptracer.ok");
     auto *activeStore = PB.CreateStore(ptracerOk, SentinelActive);
     activeStore->setVolatile(true);
     activeStore->setAlignment(Align(1));

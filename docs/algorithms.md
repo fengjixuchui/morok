@@ -1264,10 +1264,14 @@ All integer identities hold in the ring Z/2ⁿ (two's-complement wraparound).
   `kill(pid, 0)` plus `wait4(..., WNOHANG)` with direct syscalls, folding a
   missing or exited child into the hidden anti-debug state.  The parent also
   tracks a volatile DR-active flag that is set only after the helper is forked
-  and `PR_SET_PTRACER` succeeds; if startup fails or the watchdog later marks
-  the buddy missing, Morok clears that flag and dynamically re-arms the
-  `PTRACE_TRACEME` fallback instead of relying on a compile-time helper-present
-  decision.  On macOS
+  and `PR_SET_PTRACER` succeeds.  If that authorization is denied by host policy
+  such as Yama, seccomp, or container restrictions, the denial is policy-neutral:
+  it disables the DR sentinel without folding the setup return code into
+  `morok.antidbg.state`, leaving the existing `/proc` tracer checks and buddy
+  liveness checks as the corroborated poison sources.  If startup fails or the
+  watchdog later marks the buddy missing, Morok clears that flag and dynamically
+  re-arms the `PTRACE_TRACEME` fallback instead of relying on a compile-time
+  helper-present decision.  On macOS
   x86_64/arm64, a pthread watchdog enumerates Mach threads with `task_threads`,
   reads the architecture debug state, clears the x86 DR slots or ARM
   breakpoint/watchpoint/MDSCR state, writes it back with `thread_set_state`, and
