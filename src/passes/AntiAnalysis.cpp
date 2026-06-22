@@ -8623,6 +8623,445 @@ GlobalVariable *dbiSmcGate(Module &M) {
     return gv;
 }
 
+Value *smcStatePtr(IRBuilder<> &B, Module &M, Value *State,
+                   std::uint64_t Offset, const Twine &Name) {
+    return gepI8(B, M, State, constIp(M, Offset), Name);
+}
+
+LoadInst *smcAtomicLoad(IRBuilder<> &B, Type *Ty, Value *Ptr, Align A,
+                        const Twine &Name) {
+    auto *L = B.CreateLoad(Ty, Ptr, Name);
+    L->setVolatile(true);
+    L->setAtomic(AtomicOrdering::SequentiallyConsistent);
+    L->setAlignment(A);
+    return L;
+}
+
+StoreInst *smcAtomicStore(IRBuilder<> &B, Value *Val, Value *Ptr, Align A) {
+    auto *S = B.CreateStore(Val, Ptr);
+    S->setVolatile(true);
+    S->setAtomic(AtomicOrdering::SequentiallyConsistent);
+    S->setAlignment(A);
+    return S;
+}
+
+Value *smcRaceValueValid(IRBuilder<> &B, Value *V, const Twine &Name) {
+    auto *i64 = Type::getInt64Ty(B.getContext());
+    Value *valid = B.CreateICmpEQ(V, ConstantInt::get(i64, 0),
+                                  Name + ".zero");
+    for (std::uint64_t allowed : {0x41C67EA6B7D92F15ULL,
+                                  0x9E3779B97F4A7C15ULL,
+                                  0xD1B54A32D192ED03ULL,
+                                  0x94D049BB133111EBULL}) {
+        valid = B.CreateOr(
+            valid, B.CreateICmpEQ(V, ConstantInt::get(i64, allowed)),
+            Name + ".allow");
+    }
+    return valid;
+}
+
+void smcRaceAccumulateBad(IRBuilder<> &B, Value *BadPtr, Value *Bad,
+                          const Twine &Name) {
+    auto *i64 = Type::getInt64Ty(B.getContext());
+    Value *inc = B.CreateZExt(Bad, i64, Name + ".inc");
+    B.CreateAtomicRMW(AtomicRMWInst::Add, BadPtr, inc, Align(8),
+                      AtomicOrdering::SequentiallyConsistent);
+}
+
+Function *dbiSmcLockRaceWorker(Module &M) {
+    if (Function *existing =
+            M.getFunction("morok.antihook.dbi.smc.lock.worker"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(ptr, {ptr}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.dbi.smc.lock.worker", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    Argument *state = fn->getArg(0);
+    state->setName("state");
+    Value *slotPtr = nullptr;
+    Value *badPtr = nullptr;
+    Value *readyPtr = nullptr;
+    Value *goPtr = nullptr;
+    Value *donePtr = nullptr;
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *waitBB = BasicBlock::Create(ctx, "wait", fn);
+    auto *waitMoreBB = BasicBlock::Create(ctx, "wait.more", fn);
+    auto *raceBB = BasicBlock::Create(ctx, "race", fn);
+    auto *bodyBB = BasicBlock::Create(ctx, "body", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> EB(entry);
+    slotPtr = smcStatePtr(EB, M, state, 0,
+                          "morok.antihook.dbi.smc.lock.worker.slot");
+    badPtr = smcStatePtr(EB, M, state, 8,
+                         "morok.antihook.dbi.smc.lock.worker.bad");
+    readyPtr = smcStatePtr(EB, M, state, 16,
+                           "morok.antihook.dbi.smc.lock.worker.ready.ptr");
+    goPtr = smcStatePtr(EB, M, state, 20,
+                        "morok.antihook.dbi.smc.lock.worker.go.ptr");
+    donePtr = smcStatePtr(EB, M, state, 24,
+                          "morok.antihook.dbi.smc.lock.worker.done.ptr");
+    smcAtomicStore(EB, ConstantInt::get(i32, 1), readyPtr, Align(4));
+    EB.CreateBr(waitBB);
+
+    IRBuilder<> WB(waitBB);
+    auto *go =
+        smcAtomicLoad(WB, i32, goPtr, Align(4),
+                      "morok.antihook.dbi.smc.lock.worker.go");
+    auto *waitDone =
+        smcAtomicLoad(WB, i32, donePtr, Align(4),
+                      "morok.antihook.dbi.smc.lock.worker.done.wait");
+    Value *goSet = WB.CreateICmpNE(go, ConstantInt::get(i32, 0),
+                                   "morok.antihook.dbi.smc.lock.worker.go.set");
+    Value *doneSet = WB.CreateICmpNE(
+        waitDone, ConstantInt::get(i32, 0),
+        "morok.antihook.dbi.smc.lock.worker.done.set");
+    WB.CreateCondBr(goSet, raceBB, waitMoreBB);
+
+    IRBuilder<> WMB(waitMoreBB);
+    WMB.CreateCondBr(doneSet, retBB, waitBB);
+
+    IRBuilder<> LB(raceBB);
+    auto *iter = LB.CreatePHI(i32, 2,
+                              "morok.antihook.dbi.smc.lock.worker.iter");
+    iter->addIncoming(ConstantInt::get(i32, 0), waitBB);
+    auto *loopDone =
+        smcAtomicLoad(LB, i32, donePtr, Align(4),
+                      "morok.antihook.dbi.smc.lock.worker.done.loop");
+    Value *keep = LB.CreateAnd(
+        LB.CreateICmpULT(iter, ConstantInt::get(i32, 64),
+                         "morok.antihook.dbi.smc.lock.worker.bound"),
+        LB.CreateICmpEQ(loopDone, ConstantInt::get(i32, 0),
+                        "morok.antihook.dbi.smc.lock.worker.open"),
+        "morok.antihook.dbi.smc.lock.worker.keep");
+    LB.CreateCondBr(keep, bodyBB, retBB);
+
+    IRBuilder<> BB(bodyBB);
+    smcAtomicStore(BB, ConstantInt::get(i64, 0xD1B54A32D192ED03ULL), slotPtr,
+                   Align(8));
+    auto *claim = BB.CreateAtomicCmpXchg(
+        slotPtr, ConstantInt::get(i64, 0xD1B54A32D192ED03ULL),
+        ConstantInt::get(i64, 0x94D049BB133111EBULL), MaybeAlign(8),
+        AtomicOrdering::SequentiallyConsistent,
+        AtomicOrdering::SequentiallyConsistent);
+    claim->setName("morok.antihook.dbi.smc.lock.worker.cmpxchg");
+    Value *observed = BB.CreateExtractValue(
+        claim, 0, "morok.antihook.dbi.smc.lock.worker.observed");
+    auto *final =
+        smcAtomicLoad(BB, i64, slotPtr, Align(8),
+                      "morok.antihook.dbi.smc.lock.worker.final");
+    Value *bad = BB.CreateOr(
+        BB.CreateNot(smcRaceValueValid(
+            BB, observed, "morok.antihook.dbi.smc.lock.worker.observed.valid")),
+        BB.CreateNot(smcRaceValueValid(
+            BB, final, "morok.antihook.dbi.smc.lock.worker.final.valid")),
+        "morok.antihook.dbi.smc.lock.worker.torn");
+    smcRaceAccumulateBad(BB, badPtr, bad,
+                         "morok.antihook.dbi.smc.lock.worker.bad");
+    Value *next =
+        BB.CreateAdd(iter, ConstantInt::get(i32, 1),
+                     "morok.antihook.dbi.smc.lock.worker.next");
+    BB.CreateBr(raceBB);
+    iter->addIncoming(next, bodyBB);
+
+    IRBuilder<> RB(retBB);
+    RB.CreateRet(ConstantPointerNull::get(ptr));
+    return fn;
+}
+
+void emitSmcLockCmpxchgProbe(IRBuilder<> &B, Module &M, AllocaInst *Diff,
+                              const Triple &TT) {
+    if (TT.getArch() != Triple::x86_64)
+        return;
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    AllocaInst *slot =
+        B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.smc.lock.slot");
+    slot->setAlignment(Align(8));
+    B.CreateStore(ConstantInt::get(i64, 1), slot)->setVolatile(true);
+    auto *claim = B.CreateAtomicCmpXchg(
+        slot, ConstantInt::get(i64, 1), ConstantInt::get(i64, 2),
+        MaybeAlign(8), AtomicOrdering::SequentiallyConsistent,
+        AtomicOrdering::SequentiallyConsistent);
+    claim->setName("morok.antihook.dbi.smc.lock.cmpxchg");
+    Value *observed =
+        B.CreateExtractValue(claim, 0, "morok.antihook.dbi.smc.lock.observed");
+    Value *success =
+        B.CreateExtractValue(claim, 1, "morok.antihook.dbi.smc.lock.success");
+    auto *final =
+        B.CreateLoad(i64, slot, "morok.antihook.dbi.smc.lock.final");
+    final->setVolatile(true);
+    Value *mismatch = B.CreateOr(
+        B.CreateNot(success, "morok.antihook.dbi.smc.lock.fail"),
+        B.CreateOr(B.CreateICmpNE(observed, ConstantInt::get(i64, 1)),
+                   B.CreateICmpNE(final, ConstantInt::get(i64, 2))),
+        "morok.antihook.dbi.smc.lock.mismatch");
+    incrementDiff(B, Diff, mismatch, "morok.antihook.dbi.smc.lock");
+}
+
+void emitSmcLockThreadRaceProbe(IRBuilder<> &B, Module &M, Function *Fn,
+                                AllocaInst *Diff, const Triple &TT) {
+    if (TT.getArch() != Triple::x86_64 ||
+        (!TT.isOSLinux() && !TT.isOSDarwin() && !TT.isOSWindows()))
+        return;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    Function *worker = dbiSmcLockRaceWorker(M);
+
+    auto *stateTy = ArrayType::get(i8, 32);
+    auto *state =
+        B.CreateAlloca(stateTy, nullptr, "morok.antihook.dbi.smc.lock.state");
+    state->setAlignment(Align(8));
+    Value *statePtr = B.CreateInBoundsGEP(
+        stateTy, state, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        "morok.antihook.dbi.smc.lock.state.ptr");
+    Value *slotPtr =
+        smcStatePtr(B, M, statePtr, 0, "morok.antihook.dbi.smc.lock.race.slot");
+    Value *badPtr =
+        smcStatePtr(B, M, statePtr, 8, "morok.antihook.dbi.smc.lock.race.bad");
+    Value *readyPtr = smcStatePtr(B, M, statePtr, 16,
+                                  "morok.antihook.dbi.smc.lock.race.ready.ptr");
+    Value *goPtr = smcStatePtr(B, M, statePtr, 20,
+                               "morok.antihook.dbi.smc.lock.race.go.ptr");
+    Value *donePtr = smcStatePtr(B, M, statePtr, 24,
+                                 "morok.antihook.dbi.smc.lock.race.done.ptr");
+    smcAtomicStore(B, ConstantInt::get(i64, 0), slotPtr, Align(8));
+    smcAtomicStore(B, ConstantInt::get(i64, 0), badPtr, Align(8));
+    smcAtomicStore(B, ConstantInt::get(i32, 0), readyPtr, Align(4));
+    smcAtomicStore(B, ConstantInt::get(i32, 0), goPtr, Align(4));
+    smcAtomicStore(B, ConstantInt::get(i32, 0), donePtr, Align(4));
+
+    const bool posixThread = TT.isOSLinux() || TT.isOSDarwin();
+    Type *threadTokenTy = ip;
+    if (TT.isOSDarwin() || TT.isOSWindows())
+        threadTokenTy = ptr;
+    Value *threadToken = nullptr;
+    AllocaInst *thread = nullptr;
+    Value *created = nullptr;
+    FunctionCallee pthreadJoin;
+    FunctionCallee waitForSingleObject;
+    FunctionCallee closeHandle;
+    if (posixThread) {
+        thread = B.CreateAlloca(threadTokenTy, nullptr,
+                                "morok.antihook.dbi.smc.lock.thread");
+        thread->setAlignment(Align(8));
+        FunctionCallee pthreadCreate = M.getOrInsertFunction(
+            "pthread_create",
+            FunctionType::get(i32, {ptr, ptr, ptr, ptr}, false));
+        pthreadJoin = M.getOrInsertFunction(
+            "pthread_join",
+            FunctionType::get(i32, {threadTokenTy, ptr}, false));
+        Value *rc = B.CreateCall(
+            pthreadCreate,
+            {thread, ConstantPointerNull::get(ptr), worker, statePtr},
+            "morok.antihook.dbi.smc.lock.pthread");
+        created = B.CreateICmpEQ(
+            rc, ConstantInt::get(i32, 0),
+            "morok.antihook.dbi.smc.lock.thread.created");
+    } else {
+        FunctionCallee createThread = M.getOrInsertFunction(
+            "CreateThread",
+            FunctionType::get(ptr, {ptr, ip, ptr, ptr, i32, ptr}, false));
+        waitForSingleObject = M.getOrInsertFunction(
+            "WaitForSingleObject", FunctionType::get(i32, {ptr, i32}, false));
+        closeHandle = M.getOrInsertFunction(
+            "CloseHandle", FunctionType::get(i32, {ptr}, false));
+        threadToken = B.CreateCall(
+            createThread,
+            {ConstantPointerNull::get(ptr), ConstantInt::get(ip, 0), worker,
+             statePtr, ConstantInt::get(i32, 0),
+             ConstantPointerNull::get(ptr)},
+            "morok.antihook.dbi.smc.lock.createthread");
+        created = B.CreateICmpNE(
+            threadToken, ConstantPointerNull::get(ptr),
+            "morok.antihook.dbi.smc.lock.thread.created");
+    }
+
+    auto *waitBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.wait", Fn);
+    auto *waitMoreBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.wait.more", Fn);
+    auto *startBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.start", Fn);
+    auto *raceBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.race", Fn);
+    auto *bodyBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.body", Fn);
+    auto *finishBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.finish", Fn);
+    auto *timeoutBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.timeout", Fn);
+    auto *joinBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.join", Fn);
+    auto *doneBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.lock.done", Fn);
+    BasicBlock *entryBB = B.GetInsertBlock();
+    B.CreateCondBr(created, waitBB, doneBB);
+
+    IRBuilder<> WB(waitBB);
+    auto *waitIter =
+        WB.CreatePHI(i32, 2, "morok.antihook.dbi.smc.lock.wait.iter");
+    waitIter->addIncoming(ConstantInt::get(i32, 0), entryBB);
+    auto *ready =
+        smcAtomicLoad(WB, i32, readyPtr, Align(4),
+                      "morok.antihook.dbi.smc.lock.ready");
+    WB.CreateCondBr(WB.CreateICmpNE(ready, ConstantInt::get(i32, 0),
+                                    "morok.antihook.dbi.smc.lock.ready.set"),
+                    startBB, waitMoreBB);
+
+    IRBuilder<> WMB(waitMoreBB);
+    Value *nextWait =
+        WMB.CreateAdd(waitIter, ConstantInt::get(i32, 1),
+                      "morok.antihook.dbi.smc.lock.wait.next");
+    WMB.CreateCondBr(WMB.CreateICmpULT(
+                         nextWait, ConstantInt::get(i32, 4096),
+                         "morok.antihook.dbi.smc.lock.wait.more"),
+                     waitBB, timeoutBB);
+    waitIter->addIncoming(nextWait, waitMoreBB);
+
+    IRBuilder<> SB(startBB);
+    smcAtomicStore(SB, ConstantInt::get(i32, 1), goPtr, Align(4));
+    SB.CreateBr(raceBB);
+
+    IRBuilder<> RB(raceBB);
+    auto *raceIter =
+        RB.CreatePHI(i32, 2, "morok.antihook.dbi.smc.lock.race.iter");
+    raceIter->addIncoming(ConstantInt::get(i32, 0), startBB);
+    RB.CreateCondBr(RB.CreateICmpULT(raceIter, ConstantInt::get(i32, 64),
+                                     "morok.antihook.dbi.smc.lock.race.bound"),
+                    bodyBB, finishBB);
+
+    IRBuilder<> BB(bodyBB);
+    smcAtomicStore(BB, ConstantInt::get(i64, 0x41C67EA6B7D92F15ULL), slotPtr,
+                   Align(8));
+    auto *claim = BB.CreateAtomicCmpXchg(
+        slotPtr, ConstantInt::get(i64, 0x41C67EA6B7D92F15ULL),
+        ConstantInt::get(i64, 0x9E3779B97F4A7C15ULL), MaybeAlign(8),
+        AtomicOrdering::SequentiallyConsistent,
+        AtomicOrdering::SequentiallyConsistent);
+    claim->setName("morok.antihook.dbi.smc.lock.race.cmpxchg");
+    Value *observed = BB.CreateExtractValue(
+        claim, 0, "morok.antihook.dbi.smc.lock.race.observed");
+    auto *final =
+        smcAtomicLoad(BB, i64, slotPtr, Align(8),
+                      "morok.antihook.dbi.smc.lock.race.final");
+    Value *bad = BB.CreateOr(
+        BB.CreateNot(smcRaceValueValid(
+            BB, observed, "morok.antihook.dbi.smc.lock.race.observed.valid")),
+        BB.CreateNot(smcRaceValueValid(
+            BB, final, "morok.antihook.dbi.smc.lock.race.final.valid")),
+        "morok.antihook.dbi.smc.lock.race.torn");
+    smcRaceAccumulateBad(BB, badPtr, bad,
+                         "morok.antihook.dbi.smc.lock.race.bad");
+    Value *nextRace =
+        BB.CreateAdd(raceIter, ConstantInt::get(i32, 1),
+                     "morok.antihook.dbi.smc.lock.race.next");
+    BB.CreateBr(raceBB);
+    raceIter->addIncoming(nextRace, bodyBB);
+
+    IRBuilder<> FB(finishBB);
+    smcAtomicStore(FB, ConstantInt::get(i32, 1), donePtr, Align(4));
+    FB.CreateBr(joinBB);
+
+    IRBuilder<> TB(timeoutBB);
+    smcAtomicStore(TB, ConstantInt::get(i32, 1), donePtr, Align(4));
+    TB.CreateBr(joinBB);
+
+    IRBuilder<> JB(joinBB);
+    if (posixThread) {
+        auto *tid = JB.CreateLoad(threadTokenTy, thread,
+                                  "morok.antihook.dbi.smc.lock.thread.id");
+        JB.CreateCall(pthreadJoin, {tid, ConstantPointerNull::get(ptr)},
+                      "morok.antihook.dbi.smc.lock.join.rc");
+    } else {
+        JB.CreateCall(waitForSingleObject,
+                      {threadToken, ConstantInt::get(i32, 0xFFFFFFFFu)},
+                      "morok.antihook.dbi.smc.lock.wait.rc");
+        JB.CreateCall(closeHandle, {threadToken},
+                      "morok.antihook.dbi.smc.lock.close.rc");
+    }
+    auto *badFinal =
+        smcAtomicLoad(JB, i64, badPtr, Align(8),
+                      "morok.antihook.dbi.smc.lock.race.bad.final");
+    Value *mismatch =
+        JB.CreateICmpNE(badFinal, ConstantInt::get(i64, 0),
+                        "morok.antihook.dbi.smc.lock.race.mismatch");
+    incrementDiff(JB, Diff, mismatch, "morok.antihook.dbi.smc.lock.race");
+    JB.CreateBr(doneBB);
+
+    B.SetInsertPoint(doneBB);
+}
+
+void emitSmcClflushProbe(IRBuilder<> &B, Module &M, Function *Fn,
+                         AllocaInst *Diff, const Triple &TT) {
+    if (TT.getArch() != Triple::x86_64)
+        return;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    AllocaInst *scratch =
+        B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.smc.clflush.scratch");
+    scratch->setAlignment(Align(64));
+    B.CreateStore(ConstantInt::get(i64, 0), scratch)->setVolatile(true);
+
+    Value *leaf1 = emitCpuid(B, M, ConstantInt::get(i32, 1),
+                             ConstantInt::get(i32, 0));
+    Value *edx = cpuidReg(B, leaf1, 3, "morok.antihook.dbi.smc.cpuid.edx");
+    Value *clflushBit =
+        B.CreateAnd(edx, ConstantInt::get(i32, 1u << 19),
+                    "morok.antihook.dbi.smc.cpuid.clflush");
+    Value *hasClflush =
+        B.CreateICmpNE(clflushBit, ConstantInt::get(i32, 0),
+                       "morok.antihook.dbi.smc.clflush.supported");
+    auto *flushBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.clflush", Fn);
+    auto *doneBB =
+        BasicBlock::Create(ctx, "morok.antihook.dbi.smc.clflush.done", Fn);
+    B.CreateCondBr(hasClflush, flushBB, doneBB);
+
+    IRBuilder<> FB(flushBB);
+    auto *asmTy = FunctionType::get(i64, {ptr}, false);
+    InlineAsm *flush = InlineAsm::get(
+        asmTy,
+        "movabsq $$0x1122334455667788, %rax\n\t"
+        "movq %rax, (%rdi)\n\t"
+        "mfence\n\t"
+        "clflush (%rdi)\n\t"
+        "mfence\n\t"
+        "movabsq $$0x8877665544332211, %rax\n\t"
+        "movq %rax, (%rdi)\n\t"
+        "mfence\n\t"
+        "clflush (%rdi)\n\t"
+        "mfence\n\t"
+        "movq (%rdi), %rax",
+        "={rax},{rdi},~{memory},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    Value *observed = FB.CreateCall(
+        asmTy, flush, {scratch}, "morok.antihook.dbi.smc.clflush.value");
+    Value *mismatch =
+        FB.CreateICmpNE(observed, ConstantInt::get(i64, 0x8877665544332211ULL),
+                        "morok.antihook.dbi.smc.clflush.mismatch");
+    incrementDiff(FB, Diff, mismatch, "morok.antihook.dbi.smc.clflush");
+    FB.CreateBr(doneBB);
+
+    B.SetInsertPoint(doneBB);
+}
+
 Function *dbiSmcTarget(Module &M) {
     if (Function *existing = M.getFunction("morok.antihook.dbi.smc.target"))
         return existing;
@@ -8666,6 +9105,9 @@ Function *dbiSmcTripwireProbe(Module &M, const Triple &TT) {
     IRBuilder<> B(entry);
     AllocaInst *diff = B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.smc.diff");
     B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    emitSmcLockCmpxchgProbe(B, M, diff, TT);
+    emitSmcClflushProbe(B, M, fn, diff, TT);
+    emitSmcLockThreadRaceProbe(B, M, fn, diff, TT);
     GlobalVariable *smcGate = dbiSmcGate(M);
     Value *gateSeed =
         B.CreatePtrToInt(target, ip, "morok.antihook.dbi.smc.gate.seed");
@@ -8716,6 +9158,50 @@ Function *dbiSmcTripwireProbe(Module &M, const Triple &TT) {
     oldByte->setVolatile(true);
     auto *touch = WB.CreateStore(oldByte, codePtr);
     touch->setVolatile(true);
+    Value *patchPtr =
+        gepI8(WB, M, codePtr, constIp(M, 1),
+              "morok.antihook.dbi.smc.patch.ptr");
+    auto *oldPatch =
+        WB.CreateLoad(i8, patchPtr, "morok.antihook.dbi.smc.patch.byte");
+    oldPatch->setVolatile(true);
+    Value *canPatch =
+        WB.CreateICmpEQ(oldByte, ConstantInt::get(i8, 0xB8),
+                        "morok.antihook.dbi.smc.patch.mov");
+    Value *patchFlip =
+        WB.CreateXor(oldPatch, ConstantInt::get(i8, 1),
+                     "morok.antihook.dbi.smc.patch.flip");
+    Value *patchByte =
+        WB.CreateSelect(canPatch, patchFlip, oldPatch,
+                        "morok.antihook.dbi.smc.patch.next");
+    auto *patchStore = WB.CreateStore(patchByte, patchPtr);
+    patchStore->setVolatile(true);
+    if (TT.getArch() == Triple::x86_64) {
+        auto *fenceTy = FunctionType::get(Type::getVoidTy(ctx), false);
+        InlineAsm *fence =
+            InlineAsm::get(fenceTy, "mfence",
+                           "~{memory},~{dirflag},~{fpsr},~{flags}",
+                           /*hasSideEffects=*/true);
+        WB.CreateCall(fenceTy, fence, {});
+    }
+    Value *patchResult =
+        WB.CreateCall(target, {}, "morok.antihook.dbi.smc.patch.result");
+    Value *patchExpected = WB.CreateSelect(
+        canPatch, ConstantInt::get(i32, 0x13579BDEu),
+        ConstantInt::get(i32, 0x13579BDFu),
+        "morok.antihook.dbi.smc.patch.expected");
+    Value *patchBad =
+        WB.CreateICmpNE(patchResult, patchExpected,
+                        "morok.antihook.dbi.smc.patch.bad");
+    auto *restorePatch = WB.CreateStore(oldPatch, patchPtr);
+    restorePatch->setVolatile(true);
+    if (TT.getArch() == Triple::x86_64) {
+        auto *fenceTy = FunctionType::get(Type::getVoidTy(ctx), false);
+        InlineAsm *fence =
+            InlineAsm::get(fenceTy, "mfence",
+                           "~{memory},~{dirflag},~{fpsr},~{flags}",
+                           /*hasSideEffects=*/true);
+        WB.CreateCall(fenceTy, fence, {});
+    }
     if (TT.isOSLinux()) {
         Value *rc = emitLinuxMprotect(WB, M, TT, page, ConstantInt::get(ip, 4096),
                                       ConstantInt::get(i32, 5));
@@ -8735,9 +9221,12 @@ Function *dbiSmcTripwireProbe(Module &M, const Triple &TT) {
                       "morok.antihook.dbi.smc.virtualprotect.rx");
     }
     Value *result = WB.CreateCall(target, {}, "morok.antihook.dbi.smc.result");
+    Value *restoreBad =
+        WB.CreateICmpNE(result, ConstantInt::get(i32, 0x13579BDFu),
+                        "morok.antihook.dbi.smc.restore.bad");
     incrementDiff(WB, diff,
-                  WB.CreateICmpNE(result, ConstantInt::get(i32, 0x13579BDFu),
-                                  "morok.antihook.dbi.smc.trip"),
+                  WB.CreateOr(patchBad, restoreBad,
+                              "morok.antihook.dbi.smc.trip"),
                   "morok.antihook.dbi.smc.trip");
     WB.CreateBr(retBB);
 

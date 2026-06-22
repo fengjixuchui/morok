@@ -714,6 +714,73 @@ void checkFpuSimdProbe(Function &Fpu, Function &Ctor) {
                                      "morok.seal.fold.anti_debug"));
 }
 
+void checkSmcCoherencyProbe(Function &Smc) {
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.cmpxchg") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.mismatch") >=
+          1u);
+    CHECK(countNamedInstructions(
+              Smc, "morok.antihook.dbi.smc.clflush.supported") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.clflush.value") >=
+          1u);
+    CHECK(countNamedInstructions(
+              Smc, "morok.antihook.dbi.smc.clflush.mismatch") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.patch.mov") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.patch.result") >=
+          1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.patch.bad") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.restore.bad") >= 1u);
+}
+
+void checkSmcThreadRaceCore(Module &M, Function &Smc) {
+    Function *Worker = M.getFunction("morok.antihook.dbi.smc.lock.worker");
+    REQUIRE(Worker != nullptr);
+    CHECK(countNamedInstructions(
+              Smc, "morok.antihook.dbi.smc.lock.thread.created") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.ready") >= 1u);
+    CHECK(countNamedInstructions(
+              Smc, "morok.antihook.dbi.smc.lock.race.cmpxchg") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.race.torn") >=
+          1u);
+    CHECK(countNamedInstructions(
+              Smc, "morok.antihook.dbi.smc.lock.race.mismatch") >= 1u);
+    CHECK(countNamedInstructions(
+              *Worker, "morok.antihook.dbi.smc.lock.worker.cmpxchg") >= 1u);
+    CHECK(countNamedInstructions(
+              *Worker, "morok.antihook.dbi.smc.lock.worker.torn") >= 1u);
+}
+
+void checkPosixSmcThreadRaceProbe(Module &M, Function &Smc) {
+    checkSmcThreadRaceCore(M, Smc);
+    CHECK(M.getFunction("pthread_create") != nullptr);
+    CHECK(M.getFunction("pthread_join") != nullptr);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.pthread") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.join.rc") >= 1u);
+}
+
+void checkWindowsSmcThreadRaceProbe(Module &M, Function &Smc) {
+    checkSmcThreadRaceCore(M, Smc);
+    CHECK(M.getFunction("CreateThread") != nullptr);
+    CHECK(M.getFunction("WaitForSingleObject") != nullptr);
+    CHECK(M.getFunction("CloseHandle") != nullptr);
+    CHECK(countNamedInstructions(
+              Smc, "morok.antihook.dbi.smc.lock.createthread") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.wait.rc") >= 1u);
+    CHECK(countNamedInstructions(Smc,
+                                 "morok.antihook.dbi.smc.lock.close.rc") >= 1u);
+}
+
 TEST_CASE("RuntimeSeal gates weighted detector score with corroboration") {
     LLVMContext ctx;
     Module M("seal-score", ctx);
@@ -16210,6 +16277,8 @@ entry:
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
+    checkSmcCoherencyProbe(*Smc);
+    checkPosixSmcThreadRaceProbe(*M, *Smc);
     CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.mmap") >= 1u);
     CHECK(countNamedInstructions(*Schro,
                                  "morok.antihook.schro.sigaction.segv") >= 1u);
@@ -16526,6 +16595,8 @@ entry:
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.mprotect.rwx") >=
           1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
+    checkSmcCoherencyProbe(*Smc);
+    checkPosixSmcThreadRaceProbe(*M, *Smc);
     CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.mmap") >= 1u);
     CHECK(countNamedInstructions(*Schro,
                                  "morok.antihook.schro.sigaction.segv") >= 1u);
@@ -16674,6 +16745,8 @@ entry:
     CHECK(countNamedInstructions(
               *Smc, "morok.antihook.dbi.smc.virtualprotect.rwx") >= 1u);
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
+    checkSmcCoherencyProbe(*Smc);
+    checkWindowsSmcThreadRaceProbe(*M, *Smc);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
@@ -16720,6 +16793,8 @@ entry:
     REQUIRE(Schro != nullptr);
     Function *SchroHandler = M->getFunction("morok.antihook.schro.handler");
     REQUIRE(SchroHandler != nullptr);
+    Function *Smc = M->getFunction("morok.antihook.dbi.smc");
+    REQUIRE(Smc != nullptr);
     Function *AntiDump = M->getFunction("morok.antihook.antidump.macho");
     REQUIRE(AntiDump != nullptr);
     checkSealEnforcement(*M, *Ctor);
@@ -16735,6 +16810,13 @@ entry:
                                  "morok.antihook.schro.mcontext") >= 1u);
     CHECK(countNamedInstructions(*SchroHandler,
                                  "morok.antihook.schro.rip.allowed") >= 1u);
+    CHECK(countNamedInstructions(*Smc,
+                                 "morok.antihook.dbi.smc.patch.mov") >= 1u);
+    CHECK(countNamedInstructions(*Smc,
+                                 "morok.antihook.dbi.smc.lock.cmpxchg") == 0u);
+    CHECK(countNamedInstructions(*Smc,
+                                 "morok.antihook.dbi.smc.clflush.value") == 0u);
+    CHECK(M->getFunction("morok.antihook.dbi.smc.lock.worker") == nullptr);
     CHECK(countNamedInstructions(*AntiDump,
                                  "morok.antidump.macho.section.name") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.antidump.changed") >=
