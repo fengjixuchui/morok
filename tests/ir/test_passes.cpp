@@ -17944,6 +17944,7 @@ entry:
     CHECK(M->getFunction("morok.antidbg.linux.status") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.stat4") != nullptr);
     Function *Memfd = M->getFunction("morok.antidbg.memfd");
+    Function *Sigmask = M->getFunction("morok.antidbg.linux.sigmask");
     Function *Watch = M->getFunction("morok.antidbg.linux.watch");
     Function *Sentinel = M->getFunction("morok.antidbg.linux.dr.sentinel");
     Function *Scrub = M->getFunction("morok.antidbg.linux.dr.scrub");
@@ -17956,6 +17957,7 @@ entry:
         M->getFunction("morok.antidbg.faultcf.handler");
     Function *HotProbe = M->getFunction("morok.antidbg.probe");
     REQUIRE(Memfd != nullptr);
+    REQUIRE(Sigmask != nullptr);
     CHECK(Watch != nullptr);
     CHECK(Sentinel != nullptr);
     CHECK(Scrub != nullptr);
@@ -17988,6 +17990,7 @@ entry:
     CHECK(M->getFunction("sigaction") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(hasInlineAsmCall(*Memfd));
+    CHECK(hasInlineAsmCall(*Sigmask));
     CHECK(hasInlineAsmCall(*AntiDbg));
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.status")));
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.stat4")));
@@ -18029,6 +18032,32 @@ entry:
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.kill") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.wait") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.keep") >= 1u);
+    CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.sigmask") >=
+          1u);
+    Instruction *SigmaskUnblockable = findNamedInstruction(
+        *Watch, "morok.antidbg.watch.sigmask.unblockable");
+    REQUIRE(SigmaskUnblockable != nullptr);
+    CHECK(valueFeedsNamedInstruction(SigmaskUnblockable,
+                                     "morok.seal.fold.anti_debug"));
+    Instruction *SigmaskCgt = findNamedInstruction(
+        *Watch, "morok.antidbg.watch.sigmask.cgt.diverged");
+    REQUIRE(SigmaskCgt != nullptr);
+    CHECK(valueFeedsNamedInstruction(SigmaskCgt,
+                                     "morok.seal.fold.anti_debug"));
+    CHECK(countNamedInstructions(*Sigmask,
+                                 "morok.antidbg.sigmask.proc.blk.found") >=
+          1u);
+    CHECK(countNamedInstructions(*Sigmask,
+                                 "morok.antidbg.sigmask.thread.blk.found") >=
+          1u);
+    CHECK(countNamedInstructions(*Sigmask,
+                                 "morok.antidbg.sigmask.cgt.diverged") >= 1u);
+    CHECK(countNamedInstructions(
+              *Sigmask, "morok.antidbg.sigmask.live.thread.delta") >= 1u);
+    CHECK(countNamedInstructions(
+              *Sigmask, "morok.antidbg.sigmask.rt_sigprocmask") >= 1u);
+    CHECK(countNamedInstructions(*Sigmask,
+                                 "morok.seal.fold.anti_debug") == 0u);
     CHECK(countNamedInstructions(
               *Watch, "morok.antidbg.watch.ptrace.active.load") >= 1u);
     CHECK(countNamedInstructions(
@@ -18248,11 +18277,14 @@ entry:
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/exe"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/fd/200"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/status"));
+    CHECK_FALSE(hasReadableByteString(*M, "/proc/thread-self/status"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/stat"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/%ld/task"));
     CHECK_FALSE(
         hasReadableByteString(*M, "/proc/sys/kernel/yama/ptrace_scope"));
     CHECK_FALSE(hasReadableByteString(*M, "TracerPid"));
+    CHECK_FALSE(hasReadableByteString(*M, "SigBlk"));
+    CHECK_FALSE(hasReadableByteString(*M, "SigCgt"));
     CHECK_FALSE(hasReadableByteString(*M, ".nscd-cache"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
@@ -18271,6 +18303,8 @@ define i32 @main() { ret i32 0 }
 
     Function *Ctor = M->getFunction("morok.antidbg");
     REQUIRE(Ctor != nullptr);
+    Function *Sigmask = M->getFunction("morok.antidbg.linux.sigmask");
+    REQUIRE(Sigmask != nullptr);
     Function *FaultCf = M->getFunction("morok.antidbg.faultcf");
     REQUIRE(FaultCf != nullptr);
     Function *FaultCfHandler =
@@ -18283,6 +18317,8 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.seccomp.tsync") >= 1u);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antidbg.seccomp.rt_sigaction") >= 1u);
+    CHECK(countNamedInstructions(
+              *Sigmask, "morok.antidbg.sigmask.rt_sigprocmask") >= 1u);
     auto Aarch64SigsysSentinels = namedCallFirstArgConstants(
         *Ctor, "morok.antidbg.seccomp.sigsys.raise");
     auto Aarch64TraceSentinels = namedCallFirstArgConstants(
@@ -18318,6 +18354,7 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.ptrace.init.chain") ==
           0u);
     CHECK(functionHasConstantInt(*Ctor, 134u));       // rt_sigaction syscall
+    CHECK(functionHasConstantInt(*Sigmask, 135u));    // rt_sigprocmask syscall
     CHECK(functionHasConstantInt(*Ctor, 277u));       // seccomp syscall
     CHECK(functionHasConstantInt(*FaultCf, 132u));    // sigaltstack syscall
     CHECK(functionHasConstantInt(*Ctor, 0xC00000B7)); // AUDIT_ARCH_AARCH64
@@ -18421,6 +18458,7 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Watch != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.status") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.stat4") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.sigmask") != nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.dr.active", true) != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.dr.sentinel") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.dr.scrub") != nullptr);
@@ -18430,6 +18468,8 @@ define i32 @main() { ret i32 0 }
           0u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.ptrace") == 0u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.ptrace") == 0u);
+    CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.sigmask") >=
+          1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.pid.valid") >=
           1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.missing") >= 1u);
@@ -18901,6 +18941,7 @@ entry:
     CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.status") != nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.stat4") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.linux.sigmask") == nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.buddy.pid", true) == nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.dr.sentinel") == nullptr);
     CHECK(M->getFunction("morok.antidbg.linux.dr.scrub") == nullptr);

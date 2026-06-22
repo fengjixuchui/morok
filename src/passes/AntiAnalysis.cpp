@@ -1487,6 +1487,11 @@ void finishI32Ret(BasicBlock *BB, std::uint32_t Value) {
     B.CreateRet(ConstantInt::get(Type::getInt32Ty(BB->getContext()), Value));
 }
 
+void finishI64Ret(BasicBlock *BB, std::uint64_t Value) {
+    IRBuilder<> B(BB);
+    B.CreateRet(ConstantInt::get(Type::getInt64Ty(BB->getContext()), Value));
+}
+
 Function *linuxStatusTracerCheck(Module &M, ir::IRRandom &rng,
                                  const Triple &TT) {
     if (Function *existing = M.getFunction("morok.antidbg.linux.status"))
@@ -1654,10 +1659,309 @@ Function *linuxStatField4Check(Module &M, ir::IRRandom &rng, const Triple &TT) {
     return fn;
 }
 
+struct StatusHexFieldIR {
+    Value *found = nullptr;
+    Value *value = nullptr;
+};
+
+StatusHexFieldIR parseProcStatusHexField(IRBuilder<> &B, Module &M,
+                                         AllocaInst *Buf, Value *N,
+                                         std::initializer_list<unsigned char> Prefix,
+                                         std::uint64_t MaxBytes,
+                                         const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    Function *fn = B.GetInsertBlock()->getParent();
+    auto *i1 = Type::getInt1Ty(ctx);
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    std::vector<unsigned char> prefix(Prefix.begin(), Prefix.end());
+
+    auto *foundSlot = B.CreateAlloca(i1, nullptr, Name + ".found.slot");
+    auto *valueSlot = B.CreateAlloca(i64, nullptr, Name + ".value.slot");
+    auto *idxSlot = B.CreateAlloca(ip, nullptr, Name + ".idx.slot");
+    B.CreateStore(ConstantInt::getFalse(ctx), foundSlot)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(i64, 0), valueSlot)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(ip, 0), idxSlot)->setVolatile(true);
+
+    auto *scanBB = BasicBlock::Create(ctx, (Name + ".scan").str(), fn);
+    auto *matchBB = BasicBlock::Create(ctx, (Name + ".match").str(), fn);
+    auto *parseBB = BasicBlock::Create(ctx, (Name + ".parse").str(), fn);
+    auto *charBB = BasicBlock::Create(ctx, (Name + ".char").str(), fn);
+    auto *digitBB = BasicBlock::Create(ctx, (Name + ".digit").str(), fn);
+    auto *skipBB = BasicBlock::Create(ctx, (Name + ".skip").str(), fn);
+    auto *stopBB = BasicBlock::Create(ctx, (Name + ".stop").str(), fn);
+    auto *hitBB = BasicBlock::Create(ctx, (Name + ".hit").str(), fn);
+    auto *nextBB = BasicBlock::Create(ctx, (Name + ".next").str(), fn);
+    auto *doneBB = BasicBlock::Create(ctx, (Name + ".done").str(), fn);
+    B.CreateBr(scanBB);
+
+    IRBuilder<> SB(scanBB);
+    auto *found = SB.CreateLoad(i1, foundSlot, Name + ".found.v");
+    found->setVolatile(true);
+    auto *idx = SB.CreateLoad(ip, idxSlot, Name + ".idx");
+    idx->setVolatile(true);
+    Value *end = SB.CreateAdd(idx, ConstantInt::get(ip, prefix.size()),
+                              Name + ".end");
+    Value *withinRead = SB.CreateICmpSLE(end, N, Name + ".within.read");
+    Value *withinBuf = SB.CreateICmpULE(end, ConstantInt::get(ip, MaxBytes),
+                                        Name + ".within.buf");
+    SB.CreateCondBr(SB.CreateAnd(SB.CreateAnd(withinRead, withinBuf),
+                                 SB.CreateNot(found)),
+                    matchBB, doneBB);
+
+    IRBuilder<> MB(matchBB);
+    Value *match = ConstantInt::getTrue(ctx);
+    for (std::uint64_t j = 0; j < prefix.size(); ++j) {
+        Value *ch = loadAt(MB, M, i8, Buf,
+                           MB.CreateAdd(idx, ConstantInt::get(ip, j)),
+                           Name + ".prefix.ch");
+        match = MB.CreateAnd(
+            match, MB.CreateICmpEQ(ch, ConstantInt::get(i8, prefix[j])),
+            Name + ".prefix.match");
+    }
+    MB.CreateCondBr(match, parseBB, nextBB);
+
+    IRBuilder<> PB(parseBB);
+    Value *start = PB.CreateAdd(idx, ConstantInt::get(ip, prefix.size()),
+                                Name + ".value.start");
+    PB.CreateBr(charBB);
+
+    IRBuilder<> CB(charBB);
+    auto *pos = CB.CreatePHI(ip, 3, Name + ".pos");
+    auto *acc = CB.CreatePHI(i64, 3, Name + ".acc");
+    auto *seen = CB.CreatePHI(i1, 3, Name + ".seen");
+    pos->addIncoming(start, parseBB);
+    acc->addIncoming(ConstantInt::get(i64, 0), parseBB);
+    seen->addIncoming(ConstantInt::getFalse(ctx), parseBB);
+    Value *posInRead = CB.CreateICmpSLT(pos, N, Name + ".pos.in.read");
+    Value *posInBuf =
+        CB.CreateICmpULT(pos, ConstantInt::get(ip, MaxBytes), Name + ".pos.in.buf");
+    CB.CreateCondBr(CB.CreateAnd(posInRead, posInBuf), digitBB, stopBB);
+
+    IRBuilder<> DB(digitBB);
+    Value *ch = loadAt(DB, M, i8, Buf, pos, Name + ".ch");
+    Value *dec = DB.CreateAnd(
+        DB.CreateICmpUGE(ch, ConstantInt::get(i8, '0'), Name + ".dec.lo"),
+        DB.CreateICmpULE(ch, ConstantInt::get(i8, '9'), Name + ".dec.hi"),
+        Name + ".dec");
+    Value *lower = DB.CreateAnd(
+        DB.CreateICmpUGE(ch, ConstantInt::get(i8, 'a'), Name + ".lower.lo"),
+        DB.CreateICmpULE(ch, ConstantInt::get(i8, 'f'), Name + ".lower.hi"),
+        Name + ".lower");
+    Value *upper = DB.CreateAnd(
+        DB.CreateICmpUGE(ch, ConstantInt::get(i8, 'A'), Name + ".upper.lo"),
+        DB.CreateICmpULE(ch, ConstantInt::get(i8, 'F'), Name + ".upper.hi"),
+        Name + ".upper");
+    Value *hex = DB.CreateOr(dec, DB.CreateOr(lower, upper), Name + ".is.hex");
+    Value *decDigit =
+        DB.CreateSub(DB.CreateZExt(ch, i64), ConstantInt::get(i64, '0'),
+                     Name + ".digit.dec");
+    Value *lowerDigit =
+        DB.CreateAdd(DB.CreateSub(DB.CreateZExt(ch, i64),
+                                  ConstantInt::get(i64, 'a')),
+                     ConstantInt::get(i64, 10), Name + ".digit.lower");
+    Value *upperDigit =
+        DB.CreateAdd(DB.CreateSub(DB.CreateZExt(ch, i64),
+                                  ConstantInt::get(i64, 'A')),
+                     ConstantInt::get(i64, 10), Name + ".digit.upper");
+    Value *alphaDigit =
+        DB.CreateSelect(lower, lowerDigit, upperDigit, Name + ".digit.alpha");
+    Value *digit = DB.CreateSelect(dec, decDigit, alphaDigit, Name + ".digit");
+    Value *nextAcc =
+        DB.CreateOr(DB.CreateShl(acc, ConstantInt::get(i64, 4),
+                                 Name + ".shift"),
+                    digit, Name + ".next.acc");
+    Value *nextPos = DB.CreateAdd(pos, ConstantInt::get(ip, 1),
+                                  Name + ".next.pos");
+    DB.CreateCondBr(hex, charBB, skipBB);
+    pos->addIncoming(nextPos, digitBB);
+    acc->addIncoming(nextAcc, digitBB);
+    seen->addIncoming(ConstantInt::getTrue(ctx), digitBB);
+
+    IRBuilder<> SKB(skipBB);
+    Value *ws = SKB.CreateOr(
+        SKB.CreateICmpEQ(ch, ConstantInt::get(i8, ' '), Name + ".space"),
+        SKB.CreateICmpEQ(ch, ConstantInt::get(i8, '\t'), Name + ".tab"),
+        Name + ".ws");
+    Value *skip = SKB.CreateAnd(SKB.CreateNot(seen), ws, Name + ".skip.ws");
+    Value *skipPos = SKB.CreateAdd(pos, ConstantInt::get(ip, 1),
+                                   Name + ".skip.pos");
+    SKB.CreateCondBr(skip, charBB, stopBB);
+    pos->addIncoming(skipPos, skipBB);
+    acc->addIncoming(acc, skipBB);
+    seen->addIncoming(seen, skipBB);
+
+    IRBuilder<> STB(stopBB);
+    STB.CreateCondBr(seen, hitBB, doneBB);
+
+    IRBuilder<> HTB(hitBB);
+    HTB.CreateStore(ConstantInt::getTrue(ctx), foundSlot)->setVolatile(true);
+    HTB.CreateStore(acc, valueSlot)->setVolatile(true);
+    HTB.CreateBr(doneBB);
+
+    IRBuilder<> NB(nextBB);
+    NB.CreateStore(NB.CreateAdd(idx, ConstantInt::get(ip, 1), Name + ".idx.next"),
+                   idxSlot)
+        ->setVolatile(true);
+    NB.CreateBr(scanBB);
+
+    B.SetInsertPoint(doneBB);
+    StatusHexFieldIR out;
+    out.found = B.CreateLoad(i1, foundSlot, Name + ".found");
+    cast<LoadInst>(out.found)->setVolatile(true);
+    out.value = B.CreateLoad(i64, valueSlot, Name + ".value");
+    cast<LoadInst>(out.value)->setVolatile(true);
+    return out;
+}
+
+bool linuxRtSigprocmaskSyscall(const Triple &TT, std::uint32_t &RtSigprocmask) {
+    switch (TT.getArch()) {
+    case Triple::x86_64:
+        RtSigprocmask = 14;
+        return true;
+    case Triple::aarch64:
+        RtSigprocmask = 135;
+        return true;
+    case Triple::arm:
+        RtSigprocmask = 175;
+        return true;
+    default:
+        return false;
+    }
+}
+
+Function *linuxSignalMaskThreadCheck(Module &M, ir::IRRandom &rng,
+                                     const Triple &TT) {
+    if (Function *existing = M.getFunction("morok.antidbg.linux.sigmask"))
+        return existing;
+    if (!TT.isOSLinux())
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    std::uint32_t rtSigprocmaskNr = 0;
+    if (!linuxRtSigprocmaskSyscall(TT, rtSigprocmaskNr))
+        return nullptr;
+
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.linux.sigmask", &M);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    ReadFileIR proc =
+        emitReadSmallFile(B, M, fn, "/proc/self/status", 1024, rng, TT);
+
+    IRBuilder<> PB(proc.afterRead);
+    ReadFileIR thread = emitReadSmallFile(PB, M, fn, "/proc/thread-self/status",
+                                          1024, rng, TT);
+
+    IRBuilder<> TB(thread.afterRead);
+    StatusHexFieldIR procBlk = parseProcStatusHexField(
+        TB, M, proc.buf, proc.n,
+        {'S', 'i', 'g', 'B', 'l', 'k', ':'}, 1024,
+        "morok.antidbg.sigmask.proc.blk");
+    StatusHexFieldIR procCgt = parseProcStatusHexField(
+        TB, M, proc.buf, proc.n,
+        {'S', 'i', 'g', 'C', 'g', 't', ':'}, 1024,
+        "morok.antidbg.sigmask.proc.cgt");
+    StatusHexFieldIR threadBlk = parseProcStatusHexField(
+        TB, M, thread.buf, thread.n,
+        {'S', 'i', 'g', 'B', 'l', 'k', ':'}, 1024,
+        "morok.antidbg.sigmask.thread.blk");
+    StatusHexFieldIR threadCgt = parseProcStatusHexField(
+        TB, M, thread.buf, thread.n,
+        {'S', 'i', 'g', 'C', 'g', 't', ':'}, 1024,
+        "morok.antidbg.sigmask.thread.cgt");
+
+    auto *liveMask = TB.CreateAlloca(i64, nullptr,
+                                     "morok.antidbg.sigmask.live.mask");
+    TB.CreateStore(ConstantInt::get(i64, 0), liveMask)->setVolatile(true);
+    Value *sigRc = emitLinuxSyscall(
+        TB, M, TT, rtSigprocmaskNr,
+        {ConstantInt::get(ip, 0), ConstantPointerNull::get(ptr), liveMask,
+         ConstantInt::get(ip, 8)});
+    sigRc->setName("morok.antidbg.sigmask.rt_sigprocmask");
+    Value *sigOk =
+        TB.CreateICmpEQ(sigRc, ConstantInt::get(ip, 0),
+                        "morok.antidbg.sigmask.rt_sigprocmask.ok");
+    auto *live = TB.CreateLoad(i64, liveMask, "morok.antidbg.sigmask.live");
+    live->setVolatile(true);
+
+    constexpr std::uint64_t unblockableMask = (1ULL << 8) | (1ULL << 18);
+    auto hasUnblockable = [&](StatusHexFieldIR Field, const Twine &Name) {
+        Value *masked =
+            TB.CreateAnd(Field.value, ConstantInt::get(i64, unblockableMask),
+                         Name + ".bits");
+        Value *set =
+            TB.CreateICmpNE(masked, ConstantInt::get(i64, 0), Name);
+        return TB.CreateAnd(Field.found, set, Name + ".found");
+    };
+    Value *procUnblockable =
+        hasUnblockable(procBlk, "morok.antidbg.sigmask.proc.unblockable");
+    Value *threadUnblockable =
+        hasUnblockable(threadBlk, "morok.antidbg.sigmask.thread.unblockable");
+    Value *statusUnblockable = TB.CreateOr(
+        procUnblockable, threadUnblockable,
+        "morok.antidbg.sigmask.status.unblockable");
+
+    Value *cgtReady =
+        TB.CreateAnd(procCgt.found, threadCgt.found,
+                     "morok.antidbg.sigmask.cgt.ready");
+    Value *cgtDelta =
+        TB.CreateICmpNE(procCgt.value, threadCgt.value,
+                        "morok.antidbg.sigmask.cgt.delta");
+    Value *cgtDiverged =
+        TB.CreateAnd(cgtReady, cgtDelta, "morok.antidbg.sigmask.cgt.diverged");
+
+    Value *liveUnblockableRaw =
+        TB.CreateICmpNE(TB.CreateAnd(live, ConstantInt::get(i64, unblockableMask),
+                                     "morok.antidbg.sigmask.live.unblockable.bits"),
+                        ConstantInt::get(i64, 0),
+                        "morok.antidbg.sigmask.live.unblockable.raw");
+    Value *liveUnblockable =
+        TB.CreateAnd(sigOk, liveUnblockableRaw,
+                     "morok.antidbg.sigmask.live.unblockable");
+    Value *liveThreadDeltaRaw =
+        TB.CreateICmpNE(TB.CreateXor(live, threadBlk.value,
+                                     "morok.antidbg.sigmask.live.thread.xor"),
+                        ConstantInt::get(i64, 0),
+                        "morok.antidbg.sigmask.live.thread.delta.raw");
+    Value *liveThreadDelta =
+        TB.CreateAnd(TB.CreateAnd(sigOk, threadBlk.found),
+                     liveThreadDeltaRaw,
+                     "morok.antidbg.sigmask.live.thread.delta");
+
+    Value *packed = TB.CreateOr(
+        TB.CreateZExt(statusUnblockable, i64),
+        TB.CreateShl(TB.CreateZExt(cgtDiverged, i64), ConstantInt::get(i64, 1)),
+        "morok.antidbg.sigmask.pack.seal");
+    packed = TB.CreateOr(
+        packed,
+        TB.CreateShl(TB.CreateZExt(liveUnblockable, i64),
+                     ConstantInt::get(i64, 8),
+                     "morok.antidbg.sigmask.live.unblockable.bit"),
+        "morok.antidbg.sigmask.pack.live");
+    packed = TB.CreateOr(
+        packed,
+        TB.CreateShl(TB.CreateZExt(liveThreadDelta, i64),
+                     ConstantInt::get(i64, 9),
+                     "morok.antidbg.sigmask.live.thread.bit"),
+        "morok.antidbg.sigmask.pack");
+    TB.CreateRet(packed);
+
+    finishI64Ret(proc.ret0, 0);
+    finishI64Ret(thread.ret0, 0);
+    return fn;
+}
+
 bool linuxBuddyLivenessSyscalls(const Triple &TT, std::uint32_t &Kill,
                                 std::uint32_t &Wait4);
 
 Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
+                           Function *SignalMaskFn,
                            GlobalVariable *State, GlobalVariable *BuddyPid,
                            GlobalVariable *SentinelActive, const Triple &TT,
                            bool AllowSelfTrace) {
@@ -1666,6 +1970,7 @@ Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
 
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(ctx);
     std::uint32_t killNr = 0;
@@ -1717,6 +2022,25 @@ Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
              0x64C2D0B6D8F44A2DULL, "morok.antidbg.watch.status");
     foldState(BB, State, stat4, 0x8CB92BA72F3D8DD7ULL,
               "morok.antidbg.watch.stat4");
+    if (SignalMaskFn) {
+        Value *sigmask = BB.CreateCall(SignalMaskFn->getFunctionType(),
+                                       SignalMaskFn, {},
+                                       "morok.antidbg.watch.sigmask");
+        foldState(BB, State, sigmask, 0x5C36D8A19E4072BFULL,
+                  "morok.antidbg.watch.sigmask");
+        Value *unblockable =
+            BB.CreateICmpNE(BB.CreateAnd(sigmask, ConstantInt::get(i64, 1),
+                                         "morok.antidbg.watch.sigmask.unblockable.bit"),
+                            ConstantInt::get(i64, 0),
+                            "morok.antidbg.watch.sigmask.unblockable");
+        Value *cgtDiverged =
+            BB.CreateICmpNE(BB.CreateAnd(sigmask, ConstantInt::get(i64, 2),
+                                         "morok.antidbg.watch.sigmask.cgt.bit"),
+                            ConstantInt::get(i64, 0),
+                            "morok.antidbg.watch.sigmask.cgt.diverged");
+        sealFold(BB, unblockable, 0x8E7B1346D5A0C29FULL);
+        sealFold(BB, cgtDiverged, 0x42F9C16B8D30A57EULL);
+    }
     if (watchBuddy) {
         BB.CreateBr(buddyCheckBB);
 
@@ -3560,6 +3884,9 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
 
     Function *statusFn = linuxStatusTracerCheck(M, rng, TT);
     Function *statFn = linuxStatField4Check(M, rng, TT);
+    Function *sigmaskFn = StartLiveWatchers
+                              ? linuxSignalMaskThreadCheck(M, rng, TT)
+                              : nullptr;
     Value *status = B.CreateCall(statusFn);
     Value *stat4 = B.CreateCall(statFn);
     foldFlag(B, State, B.CreateICmpNE(status, ConstantInt::get(i32, 0)),
@@ -3577,8 +3904,9 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
                                    0x3D2D7F2BAE63D5C9ULL);
 
     if (StartLiveWatchers) {
-        Function *watch = linuxWatchThread(M, statusFn, statFn, State, buddyPid,
-                                           drActive, TT, AllowSelfTrace);
+        Function *watch = linuxWatchThread(M, statusFn, statFn, sigmaskFn,
+                                           State, buddyPid, drActive, TT,
+                                           AllowSelfTrace);
         emitLinuxWatcherStart(B, M, watch);
     }
     B.CreateRetVoid();
