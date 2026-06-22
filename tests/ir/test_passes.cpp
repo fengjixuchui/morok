@@ -1265,6 +1265,118 @@ TEST_CASE("PlatformRuntime direct_syscalls=auto keeps the direct path") {
     CHECK_FALSE(verifyModule(M, &errs()));
 }
 
+TEST_CASE("PlatformRuntime emits Darwin exception-port query through direct "
+          "Mach IPC") {
+    LLVMContext ctx;
+    Module M("platform-runtime-darwin-exc-direct", ctx);
+    M.setTargetTriple(Triple("x86_64-apple-macosx13.0.0"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *ArrayTy = ArrayType::get(I32, 32);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+    AllocaInst *Masks = B.CreateAlloca(ArrayTy, nullptr, "masks");
+    AllocaInst *Handlers = B.CreateAlloca(ArrayTy, nullptr, "handlers");
+    AllocaInst *Behaviors = B.CreateAlloca(ArrayTy, nullptr, "behaviors");
+    AllocaInst *Flavors = B.CreateAlloca(ArrayTy, nullptr, "flavors");
+    AllocaInst *Count = B.CreateAlloca(I32, nullptr, "count");
+    Value *Zero = ConstantInt::get(Type::getInt64Ty(ctx), 0);
+    Value *First = B.CreateInBoundsGEP(ArrayTy, Masks, {Zero, Zero});
+    Value *FirstHandler = B.CreateInBoundsGEP(ArrayTy, Handlers, {Zero, Zero});
+    Value *FirstBehavior =
+        B.CreateInBoundsGEP(ArrayTy, Behaviors, {Zero, Zero});
+    Value *FirstFlavor = B.CreateInBoundsGEP(ArrayTy, Flavors, {Zero, Zero});
+
+    Value *Rc = morok::runtime::emitDarwinTaskGetExceptionPorts(
+        B, M, Triple(M.getTargetTriple()), ConstantInt::get(I32, 1),
+        ConstantInt::get(I32, 0x7FE), First, Count, FirstHandler,
+        FirstBehavior, FirstFlavor, "morok.test.exc");
+    B.CreateRet(Rc);
+
+    CHECK(M.getFunction("task_get_exception_ports") == nullptr);
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countNamedInstructions(*F, "morok.test.exc.mig.message") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.reply_port") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.mach_msg") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.msg2.ports") == 0u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.direct.rc") >= 1u);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime emits Darwin arm64 exception-port query through "
+          "mach_msg2 trap ABI") {
+    LLVMContext ctx;
+    Module M("platform-runtime-darwin-exc-arm64-direct", ctx);
+    M.setTargetTriple(Triple("arm64-apple-macosx14.0.0"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *ArrayTy = ArrayType::get(I32, 32);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+    AllocaInst *Masks = B.CreateAlloca(ArrayTy, nullptr, "masks");
+    AllocaInst *Handlers = B.CreateAlloca(ArrayTy, nullptr, "handlers");
+    AllocaInst *Behaviors = B.CreateAlloca(ArrayTy, nullptr, "behaviors");
+    AllocaInst *Flavors = B.CreateAlloca(ArrayTy, nullptr, "flavors");
+    AllocaInst *Count = B.CreateAlloca(I32, nullptr, "count");
+    Value *Zero = ConstantInt::get(Type::getInt64Ty(ctx), 0);
+
+    Value *Rc = morok::runtime::emitDarwinTaskGetExceptionPorts(
+        B, M, Triple(M.getTargetTriple()), ConstantInt::get(I32, 1),
+        ConstantInt::get(I32, 0x7FE),
+        B.CreateInBoundsGEP(ArrayTy, Masks, {Zero, Zero}), Count,
+        B.CreateInBoundsGEP(ArrayTy, Handlers, {Zero, Zero}),
+        B.CreateInBoundsGEP(ArrayTy, Behaviors, {Zero, Zero}),
+        B.CreateInBoundsGEP(ArrayTy, Flavors, {Zero, Zero}),
+        "morok.test.exc");
+    B.CreateRet(Rc);
+
+    CHECK(M.getFunction("task_get_exception_ports") == nullptr);
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countNamedInstructions(*F, "morok.test.exc.mig.message") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.reply_port") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.mach_msg") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.msg2.ports") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.direct.rc") >= 1u);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime direct_syscalls=never keeps Darwin exception-port "
+          "import fallback") {
+    LLVMContext ctx;
+    Module M("platform-runtime-darwin-exc-never", ctx);
+    M.setTargetTriple(Triple("x86_64-apple-macosx13.0.0"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *ArrayTy = ArrayType::get(I32, 32);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+    AllocaInst *Masks = B.CreateAlloca(ArrayTy, nullptr, "masks");
+    AllocaInst *Handlers = B.CreateAlloca(ArrayTy, nullptr, "handlers");
+    AllocaInst *Behaviors = B.CreateAlloca(ArrayTy, nullptr, "behaviors");
+    AllocaInst *Flavors = B.CreateAlloca(ArrayTy, nullptr, "flavors");
+    AllocaInst *Count = B.CreateAlloca(I32, nullptr, "count");
+    Value *Zero = ConstantInt::get(Type::getInt64Ty(ctx), 0);
+
+    morok::runtime::setDirectSyscallPolicy(M, "never");
+    Value *Rc = morok::runtime::emitDarwinTaskGetExceptionPorts(
+        B, M, Triple(M.getTargetTriple()), ConstantInt::get(I32, 1),
+        ConstantInt::get(I32, 0x7FE),
+        B.CreateInBoundsGEP(ArrayTy, Masks, {Zero, Zero}), Count,
+        B.CreateInBoundsGEP(ArrayTy, Handlers, {Zero, Zero}),
+        B.CreateInBoundsGEP(ArrayTy, Behaviors, {Zero, Zero}),
+        B.CreateInBoundsGEP(ArrayTy, Flavors, {Zero, Zero}),
+        "morok.test.exc");
+    B.CreateRet(Rc);
+
+    REQUIRE(M.getFunction("task_get_exception_ports") != nullptr);
+    CHECK(countCallsTo(*F, "task_get_exception_ports") == 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.exc.import") == 1u);
+    CHECK_FALSE(hasInlineAsmCall(*F));
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
 // Regression for the #102 reopen: applying the policy more than once (a
 // repeated Morok run, or input IR that already carries the flag) must REPLACE
 // the flag, not append a duplicate.  Duplicate llvm.module.flags entries are
@@ -18028,13 +18140,16 @@ entry:
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("sysctl") == nullptr);
     CHECK(M->getFunction("csops") == nullptr);
-    CHECK(M->getFunction("task_get_exception_ports") != nullptr);
+    CHECK(M->getFunction("task_get_exception_ports") == nullptr);
     CHECK(M->getFunction("getpid") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.exc.task_ports") >= 1u);
     CHECK(countNamedInstructions(*Ctor,
-                                 "morok.antidbg.exc.task_ports.import") >= 1u);
+                                 "morok.antidbg.exc.task_ports.import") == 0u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.exc.task_ports.mach_msg") >=
+          1u);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antidbg.exc.handler.nonnull") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.exc.any") >= 1u);
@@ -18200,7 +18315,7 @@ entry:
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("sysctl") == nullptr);
     CHECK(M->getFunction("csops") == nullptr);
-    CHECK(M->getFunction("task_get_exception_ports") != nullptr);
+    CHECK(M->getFunction("task_get_exception_ports") == nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
     // M2 direct syscall fallback: no imported MAP_JIT/icache helper can
     // interpose or patch a mutable syscall thunk before checks execute.
@@ -18217,7 +18332,10 @@ entry:
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
                                  "morok.antidbg.exc.task_ports") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
-                                 "morok.antidbg.exc.task_ports.import") >= 1u);
+                                 "morok.antidbg.exc.task_ports.import") == 0u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
+                                 "morok.antidbg.exc.task_ports.mach_msg") >=
+          1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
                                  "morok.antidbg.exc.handler.nonnull") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),

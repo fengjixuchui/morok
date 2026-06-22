@@ -308,6 +308,105 @@ static Value *emitArm64SvcInlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
                         Name);
 }
 
+static Value *emitArm64Svc7InlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
+                                     const std::array<Value *, 7> &A,
+                                     const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    std::vector<Type *> Params(8, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *Svc = InlineAsm::get(
+        AsmTy, "svc #0x80",
+        "={x0},{x16},0,{x1},{x2},{x3},{x4},{x5},{x6},~{memory},~{cc}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(
+        AsmTy, Svc, {Nr, A[0], A[1], A[2], A[3], A[4], A[5], A[6]}, Name);
+}
+
+static Value *emitArm64Svc8InlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
+                                     const std::array<Value *, 8> &A,
+                                     const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    std::vector<Type *> Params(9, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *Svc = InlineAsm::get(
+        AsmTy, "svc #0x80",
+        "={x0},{x16},0,{x1},{x2},{x3},{x4},{x5},{x6},{x7},~{memory},~{cc}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(AsmTy, Svc,
+                        {Nr, A[0], A[1], A[2], A[3], A[4], A[5], A[6], A[7]},
+                        Name);
+}
+
+static Value *emitX86DarwinMachTrap0(IRBuilder<> &B, Module &M,
+                                     std::int32_t Trap, const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    auto *AsmTy = FunctionType::get(IP, {IP}, false);
+    InlineAsm *TrapAsm = InlineAsm::get(
+        AsmTy, "syscall\nsbbq %r11, %r11\norq %r11, %rax",
+        "={rax},{rax},~{rcx},~{r11},~{memory},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(AsmTy, TrapAsm, {ConstantInt::getSigned(IP, Trap)},
+                        Name);
+}
+
+static Value *emitX86DarwinMachTrap7(IRBuilder<> &B, Module &M,
+                                     std::int32_t Trap,
+                                     const std::array<Value *, 7> &A,
+                                     const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    std::vector<Type *> Params(8, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *TrapAsm = InlineAsm::get(
+        AsmTy,
+        "subq $$8, %rsp\nmovq $8, (%rsp)\nsyscall\naddq $$8, %rsp\n"
+        "sbbq %r11, %r11\norq %r11, %rax",
+        "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},r,~{rcx},~{r11},"
+        "~{memory},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(
+        AsmTy, TrapAsm,
+        {ConstantInt::getSigned(IP, Trap), A[0], A[1], A[2], A[3], A[4],
+         A[5], A[6]},
+        Name);
+}
+
+static bool useDirectDarwinMachTraps(const Module &M, const Triple &TT) {
+    if (directSyscallPolicy(M) == 2u)
+        return false;
+    return TT.isOSDarwin() &&
+           (TT.getArch() == Triple::x86_64 || TT.getArch() == Triple::aarch64);
+}
+
+static Value *emitDarwinMachTrap0(IRBuilder<> &B, Module &M, const Triple &TT,
+                                  std::int32_t Trap, const Twine &Name) {
+    if (useDirectDarwinSyscalls(M, TT))
+        return emitX86DarwinMachTrap0(B, M, Trap, Name);
+    if (TT.isOSDarwin() && TT.getArch() == Triple::aarch64 &&
+        directSyscallPolicy(M) != 2u) {
+        auto *IP = platformWordTy(M);
+        std::array<Value *, 6> A = {
+            ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+            ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+            ConstantInt::get(IP, 0), ConstantInt::get(IP, 0)};
+        return emitArm64SvcInlineAsm(B, M, ConstantInt::getSigned(IP, Trap), A,
+                                     Name);
+    }
+    return nullptr;
+}
+
+static Value *emitDarwinMachTrap7(IRBuilder<> &B, Module &M, const Triple &TT,
+                                  std::int32_t Trap,
+                                  const std::array<Value *, 7> &A,
+                                  const Twine &Name) {
+    if (useDirectDarwinSyscalls(M, TT))
+        return emitX86DarwinMachTrap7(B, M, Trap, A, Name);
+    if (TT.isOSDarwin() && TT.getArch() == Triple::aarch64 &&
+        directSyscallPolicy(M) != 2u)
+        return emitArm64Svc7InlineAsm(
+            B, M, ConstantInt::getSigned(platformWordTy(M), Trap), A, Name);
+    return nullptr;
+}
+
 static Function *getOrCreateSvcFallback(Module &M) {
     if (auto *F = M.getFunction("morok.svc.fallback"))
         return F;
@@ -460,9 +559,202 @@ Value *emitDarwinCsops(IRBuilder<> &B, Module &M, const Triple &TT, Value *Pid,
 }
 
 Value *emitDarwinTaskGetExceptionPorts(
-    IRBuilder<> &B, Module &M, const Triple &, Value *Task,
+    IRBuilder<> &B, Module &M, const Triple &TT, Value *Task,
     Value *ExceptionMask, Value *Masks, Value *MaskCount, Value *Handlers,
     Value *Behaviors, Value *Flavors, const Twine &Name) {
+    if (useDirectDarwinMachTraps(M, TT)) {
+        LLVMContext &Ctx = M.getContext();
+        auto *I8 = Type::getInt8Ty(Ctx);
+        auto *I32 = Type::getInt32Ty(Ctx);
+        auto *IP = platformWordTy(M);
+        auto *HeaderTy =
+            StructType::get(Ctx, {I32, I32, I32, I32, I32, I32});
+        auto *NdrTy = ArrayType::get(I8, 8);
+        auto *ReqTy = StructType::get(Ctx, {HeaderTy, NdrTy, I32});
+        auto *PortDescTy = StructType::get(Ctx, {I32, I32, I32});
+        auto *PortDescArrayTy = ArrayType::get(PortDescTy, 32);
+        auto *I32ArrayTy = ArrayType::get(I32, 32);
+        auto *ReplyTy =
+            StructType::get(Ctx, {HeaderTy, I32, PortDescArrayTy, NdrTy, I32,
+                                  I32ArrayTy, I32ArrayTy, I32ArrayTy});
+        auto *MsgTy = ArrayType::get(I8, 816);
+
+        constexpr std::uint32_t kRequestSize = 36;
+        constexpr std::uint32_t kMessageBufferSize = 816;
+        constexpr std::uint32_t kTaskGetExceptionPortsId = 3414;
+        constexpr std::uint32_t kTaskGetExceptionPortsReplyId = 3514;
+        constexpr std::uint32_t kMachMsgBitsCopySendMakeSendOnce =
+            19U | (21U << 8);
+        constexpr std::uint32_t kMachMsgBitsComplex = 0x80000000U;
+        constexpr std::int32_t kMigReplyMismatch = -301;
+
+        AllocaInst *Msg =
+            B.CreateAlloca(MsgTy, nullptr, Name + ".mig.message");
+        B.CreateMemSet(Msg, ConstantInt::get(I8, 0),
+                       ConstantInt::get(IP, kMessageBufferSize), MaybeAlign(4));
+
+        Value *ReplyPort =
+            emitDarwinMachTrap0(B, M, TT, -26, Name + ".reply_port");
+        Value *ReplyPort32 = B.CreateTruncOrBitCast(
+            ReplyPort, I32, Name + ".reply_port.name");
+        Value *Task32 = B.CreateTruncOrBitCast(Task, I32, Name + ".task.name");
+
+        Value *ReqHeader = B.CreateStructGEP(ReqTy, Msg, 0);
+        B.CreateStore(ConstantInt::get(I32, kMachMsgBitsCopySendMakeSendOnce),
+                      B.CreateStructGEP(HeaderTy, ReqHeader, 0));
+        B.CreateStore(ConstantInt::get(I32, kRequestSize),
+                      B.CreateStructGEP(HeaderTy, ReqHeader, 1));
+        B.CreateStore(Task32, B.CreateStructGEP(HeaderTy, ReqHeader, 2));
+        B.CreateStore(ReplyPort32, B.CreateStructGEP(HeaderTy, ReqHeader, 3));
+        B.CreateStore(ConstantInt::get(I32, 0),
+                      B.CreateStructGEP(HeaderTy, ReqHeader, 4));
+        B.CreateStore(ConstantInt::get(I32, kTaskGetExceptionPortsId),
+                      B.CreateStructGEP(HeaderTy, ReqHeader, 5));
+
+        Value *Ndr = B.CreateStructGEP(ReqTy, Msg, 1);
+        constexpr std::array<std::uint8_t, 8> kNdrRecord = {0, 0, 0, 0,
+                                                            1, 0, 0, 0};
+        for (std::uint32_t I = 0; I < kNdrRecord.size(); ++I) {
+            Value *Slot = B.CreateInBoundsGEP(
+                NdrTy, Ndr, {ConstantInt::get(IP, 0), ConstantInt::get(IP, I)},
+                Name + ".ndr");
+            B.CreateStore(ConstantInt::get(I8, kNdrRecord[I]), Slot);
+        }
+        B.CreateStore(B.CreateTruncOrBitCast(ExceptionMask, I32),
+                      B.CreateStructGEP(ReqTy, Msg, 2));
+
+        Value *ReplyPortIP =
+            B.CreateZExtOrTrunc(ReplyPort32, IP, Name + ".reply_port.ip");
+        Value *MsgRc = nullptr;
+        if (TT.getArch() == Triple::aarch64) {
+            Value *RemoteLocal = B.CreateOr(
+                B.CreateShl(ReplyPortIP, ConstantInt::get(IP, 32),
+                            Name + ".msg2.local"),
+                B.CreateZExtOrTrunc(Task32, IP), Name + ".msg2.ports");
+            Value *TimeoutReceive = B.CreateShl(
+                ReplyPortIP, ConstantInt::get(IP, 32), Name + ".msg2.receive");
+            std::array<Value *, 8> Args = {
+                toSyscallArg(B, Msg),
+                ConstantInt::get(IP, (std::uint64_t{0x2} << 32) |
+                                         (0x00000001U | 0x00000002U)),
+                ConstantInt::get(IP, (std::uint64_t{kRequestSize} << 32) |
+                                         kMachMsgBitsCopySendMakeSendOnce),
+                RemoteLocal,
+                ConstantInt::get(IP,
+                                 std::uint64_t{kTaskGetExceptionPortsId}
+                                     << 32),
+                TimeoutReceive,
+                ConstantInt::get(IP, kMessageBufferSize),
+                ConstantInt::get(IP, 0),
+            };
+            MsgRc = emitArm64Svc8InlineAsm(
+                B, M, ConstantInt::getSigned(IP, -47), Args, Name + ".mach_msg");
+        } else {
+            std::array<Value *, 7> Args = {
+                toSyscallArg(B, Msg),
+                ConstantInt::get(IP, 0x00000001U | 0x00000002U),
+                ConstantInt::get(IP, kRequestSize),
+                ConstantInt::get(IP, kMessageBufferSize),
+                ReplyPortIP,
+                ConstantInt::get(IP, 0),
+                ConstantInt::get(IP, 0),
+            };
+            MsgRc = emitDarwinMachTrap7(B, M, TT, -31, Args,
+                                        Name + ".mach_msg");
+        }
+        Value *MsgRc32 = B.CreateTruncOrBitCast(MsgRc, I32, Name + ".rc");
+
+        Value *ReplyHeader = B.CreateStructGEP(ReplyTy, Msg, 0);
+        Value *ReplyBits = B.CreateLoad(
+            I32, B.CreateStructGEP(HeaderTy, ReplyHeader, 0),
+            Name + ".reply.bits");
+        Value *ReplyId = B.CreateLoad(
+            I32, B.CreateStructGEP(HeaderTy, ReplyHeader, 5),
+            Name + ".reply.id");
+        Value *DescriptorCount = B.CreateLoad(
+            I32, B.CreateStructGEP(ReplyTy, Msg, 1),
+            Name + ".reply.descriptors");
+        Value *ReplyCount = B.CreateLoad(I32, B.CreateStructGEP(ReplyTy, Msg, 4),
+                                         Name + ".reply.count");
+
+        Value *MsgOk =
+            B.CreateICmpEQ(MsgRc32, ConstantInt::get(I32, 0), Name + ".msg.ok");
+        Value *IdOk = B.CreateICmpEQ(ReplyId,
+                                     ConstantInt::get(I32,
+                                                      kTaskGetExceptionPortsReplyId),
+                                     Name + ".reply.id.ok");
+        Value *ComplexOk = B.CreateICmpNE(
+            B.CreateAnd(ReplyBits, ConstantInt::get(I32, kMachMsgBitsComplex),
+                        Name + ".reply.complex.bit"),
+            ConstantInt::get(I32, 0), Name + ".reply.complex.ok");
+        Value *CountBounded = B.CreateICmpULE(
+            ReplyCount, ConstantInt::get(I32, 32), Name + ".reply.count.ok");
+        Value *DescriptorCountOk = B.CreateICmpEQ(
+            DescriptorCount, ReplyCount, Name + ".reply.descriptors.ok");
+        Value *Ok = B.CreateAnd(MsgOk, IdOk, Name + ".ok.id");
+        Ok = B.CreateAnd(Ok, ComplexOk, Name + ".ok.complex");
+        Ok = B.CreateAnd(Ok, CountBounded, Name + ".ok.count");
+        Ok = B.CreateAnd(Ok, DescriptorCountOk, Name + ".ok.descriptors");
+
+        Function *Fn = B.GetInsertBlock()->getParent();
+        BasicBlock *StartBB = B.GetInsertBlock();
+        BasicBlock *CopyBB =
+            BasicBlock::Create(Ctx, (Name + ".copy").str(), Fn);
+        BasicBlock *DoneBB =
+            BasicBlock::Create(Ctx, (Name + ".done").str(), Fn);
+        Value *FailureRc = B.CreateSelect(
+            B.CreateICmpNE(MsgRc32, ConstantInt::get(I32, 0)),
+            MsgRc32, ConstantInt::getSigned(I32, kMigReplyMismatch),
+            Name + ".failure");
+        B.CreateCondBr(Ok, CopyBB, DoneBB);
+
+        IRBuilder<> CB(CopyBB);
+        CB.CreateStore(ReplyCount, MaskCount);
+        for (std::uint32_t I = 0; I < 32; ++I) {
+            Value *Zero = ConstantInt::get(IP, 0);
+            Value *Idx = ConstantInt::get(IP, I);
+            Value *OutIdx[] = {Zero, Idx};
+
+            Value *Mask = CB.CreateLoad(
+                I32, CB.CreateInBoundsGEP(I32ArrayTy,
+                                          CB.CreateStructGEP(ReplyTy, Msg, 5),
+                                          OutIdx),
+                Name + ".copy.mask");
+            CB.CreateStore(Mask, CB.CreateInBoundsGEP(I32ArrayTy, Masks, OutIdx));
+
+            Value *Desc = CB.CreateInBoundsGEP(
+                PortDescArrayTy, CB.CreateStructGEP(ReplyTy, Msg, 2), OutIdx);
+            Value *Handler = CB.CreateLoad(
+                I32, CB.CreateStructGEP(PortDescTy, Desc, 0),
+                Name + ".copy.handler");
+            CB.CreateStore(Handler,
+                           CB.CreateInBoundsGEP(I32ArrayTy, Handlers, OutIdx));
+
+            Value *Behavior = CB.CreateLoad(
+                I32, CB.CreateInBoundsGEP(I32ArrayTy,
+                                          CB.CreateStructGEP(ReplyTy, Msg, 6),
+                                          OutIdx),
+                Name + ".copy.behavior");
+            CB.CreateStore(
+                Behavior, CB.CreateInBoundsGEP(I32ArrayTy, Behaviors, OutIdx));
+
+            Value *Flavor = CB.CreateLoad(
+                I32, CB.CreateInBoundsGEP(I32ArrayTy,
+                                          CB.CreateStructGEP(ReplyTy, Msg, 7),
+                                          OutIdx),
+                Name + ".copy.flavor");
+            CB.CreateStore(Flavor,
+                           CB.CreateInBoundsGEP(I32ArrayTy, Flavors, OutIdx));
+        }
+        CB.CreateBr(DoneBB);
+
+        B.SetInsertPoint(DoneBB);
+        PHINode *Result = B.CreatePHI(I32, 2, Name + ".direct.rc");
+        Result->addIncoming(ConstantInt::get(I32, 0), CopyBB);
+        Result->addIncoming(FailureRc, StartBB);
+        return Result;
+    }
+
     auto *I32 = Type::getInt32Ty(M.getContext());
     auto *Ptr = PointerType::getUnqual(M.getContext());
     FunctionCallee TaskGetExceptionPorts = M.getOrInsertFunction(
