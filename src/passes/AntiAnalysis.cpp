@@ -5124,11 +5124,16 @@ void emitRetDiff(IRBuilder<> &B, AllocaInst *Diff) {
 
 void emitByteDiffLoop(IRBuilder<> &B, Module &M, Function *Fn, Value *MemAddr,
                       Value *CleanPtr, Value *Len, AllocaInst *Diff,
-                      BasicBlock *Done) {
+                      const Triple &TT, BasicBlock *Done) {
     LLVMContext &ctx = M.getContext();
     auto *i8 = Type::getInt8Ty(ctx);
     auto *ip = intPtrTy(M);
     auto *ptr = PointerType::getUnqual(ctx);
+    bool scanX86LongInt3 =
+        TT.isOSLinux() &&
+        (TT.getArch() == Triple::x86 || TT.getArch() == Triple::x86_64);
+    bool scanAarch64Brk =
+        TT.isOSLinux() && TT.getArch() == Triple::aarch64;
 
     auto *loopBB = BasicBlock::Create(ctx, "morok.clean.byte.loop", Fn);
     auto *bodyBB = BasicBlock::Create(ctx, "morok.clean.byte.body", Fn);
@@ -5137,6 +5142,28 @@ void emitByteDiffLoop(IRBuilder<> &B, Module &M, Function *Fn, Value *MemAddr,
     IRBuilder<> LB(loopBB);
     auto *idx = LB.CreatePHI(ip, 2, "morok.clean.byte.idx");
     idx->addIncoming(ConstantInt::get(ip, 0), B.GetInsertBlock());
+    PHINode *prevMem1 = nullptr;
+    PHINode *prevMem2 = nullptr;
+    PHINode *prevMem3 = nullptr;
+    PHINode *prevClean1 = nullptr;
+    PHINode *prevClean2 = nullptr;
+    PHINode *prevClean3 = nullptr;
+    if (scanX86LongInt3 || scanAarch64Brk) {
+        prevMem1 = LB.CreatePHI(i8, 2, "morok.clean.mem.prev1");
+        prevClean1 = LB.CreatePHI(i8, 2, "morok.clean.file.prev1");
+        prevMem1->addIncoming(ConstantInt::get(i8, 0), B.GetInsertBlock());
+        prevClean1->addIncoming(ConstantInt::get(i8, 0), B.GetInsertBlock());
+    }
+    if (scanAarch64Brk) {
+        prevMem2 = LB.CreatePHI(i8, 2, "morok.clean.mem.prev2");
+        prevMem3 = LB.CreatePHI(i8, 2, "morok.clean.mem.prev3");
+        prevClean2 = LB.CreatePHI(i8, 2, "morok.clean.file.prev2");
+        prevClean3 = LB.CreatePHI(i8, 2, "morok.clean.file.prev3");
+        prevMem2->addIncoming(ConstantInt::get(i8, 0), B.GetInsertBlock());
+        prevMem3->addIncoming(ConstantInt::get(i8, 0), B.GetInsertBlock());
+        prevClean2->addIncoming(ConstantInt::get(i8, 0), B.GetInsertBlock());
+        prevClean3->addIncoming(ConstantInt::get(i8, 0), B.GetInsertBlock());
+    }
     LB.CreateCondBr(LB.CreateICmpULT(idx, Len), bodyBB, Done);
 
     IRBuilder<> BB(bodyBB);
@@ -5153,12 +5180,81 @@ void emitByteDiffLoop(IRBuilder<> &B, Module &M, Function *Fn, Value *MemAddr,
         BB.CreateICmpNE(cleanByte, ConstantInt::get(i8, 0xCC)),
         "morok.negative.text.int3");
     incrementDiff(BB, Diff, foreignInt3, "morok.negative.text.int3.hit");
+    if (scanX86LongInt3) {
+        Value *havePrev =
+            BB.CreateICmpUGT(idx, ConstantInt::get(ip, 0),
+                             "morok.negative.text.int3.long.ready");
+        Value *liveLongInt3 = BB.CreateAnd(
+            BB.CreateICmpEQ(prevMem1, ConstantInt::get(i8, 0xCD),
+                            "morok.negative.text.int3.long.live.cd"),
+            BB.CreateICmpEQ(memByte, ConstantInt::get(i8, 0x03),
+                            "morok.negative.text.int3.long.live.03"),
+            "morok.negative.text.int3.long.live");
+        Value *cleanLongInt3 = BB.CreateAnd(
+            BB.CreateICmpEQ(prevClean1, ConstantInt::get(i8, 0xCD),
+                            "morok.negative.text.int3.long.clean.cd"),
+            BB.CreateICmpEQ(cleanByte, ConstantInt::get(i8, 0x03),
+                            "morok.negative.text.int3.long.clean.03"),
+            "morok.negative.text.int3.long.clean");
+        Value *foreignLongInt3 =
+            BB.CreateAnd(BB.CreateAnd(havePrev, liveLongInt3),
+                         BB.CreateNot(cleanLongInt3),
+                         "morok.negative.text.int3.long");
+        incrementDiff(BB, Diff, foreignLongInt3,
+                      "morok.negative.text.int3.long.hit");
+    }
+    if (scanAarch64Brk) {
+        Value *haveWindow =
+            BB.CreateICmpUGE(idx, ConstantInt::get(ip, 3),
+                             "morok.negative.text.brk0.ready");
+        Value *livePrefix = BB.CreateAnd(
+            BB.CreateAnd(BB.CreateICmpEQ(prevMem3, ConstantInt::get(i8, 0x00),
+                                         "morok.negative.text.brk0.live.b0"),
+                         BB.CreateICmpEQ(prevMem2, ConstantInt::get(i8, 0x00),
+                                         "morok.negative.text.brk0.live.b1")),
+            BB.CreateICmpEQ(prevMem1, ConstantInt::get(i8, 0x20),
+                            "morok.negative.text.brk0.live.b2"),
+            "morok.negative.text.brk0.live.prefix");
+        Value *liveBrk0 = BB.CreateAnd(
+            livePrefix,
+            BB.CreateICmpEQ(memByte, ConstantInt::get(i8, 0xD4),
+                            "morok.negative.text.brk0.live.b3"),
+            "morok.negative.text.brk0.live");
+        Value *cleanPrefix = BB.CreateAnd(
+            BB.CreateAnd(BB.CreateICmpEQ(prevClean3, ConstantInt::get(i8, 0x00),
+                                         "morok.negative.text.brk0.clean.b0"),
+                         BB.CreateICmpEQ(prevClean2, ConstantInt::get(i8, 0x00),
+                                         "morok.negative.text.brk0.clean.b1")),
+            BB.CreateICmpEQ(prevClean1, ConstantInt::get(i8, 0x20),
+                            "morok.negative.text.brk0.clean.b2"),
+            "morok.negative.text.brk0.clean.prefix");
+        Value *cleanBrk0 = BB.CreateAnd(
+            cleanPrefix,
+            BB.CreateICmpEQ(cleanByte, ConstantInt::get(i8, 0xD4),
+                            "morok.negative.text.brk0.clean.b3"),
+            "morok.negative.text.brk0.clean");
+        Value *foreignBrk0 =
+            BB.CreateAnd(BB.CreateAnd(haveWindow, liveBrk0),
+                         BB.CreateNot(cleanBrk0), "morok.negative.text.brk0");
+        incrementDiff(BB, Diff, foreignBrk0,
+                      "morok.negative.text.brk0.hit");
+    }
     incrementDiff(BB, Diff, BB.CreateICmpNE(memByte, cleanByte),
                   "morok.clean.byte.diff");
     Value *next =
         BB.CreateAdd(idx, ConstantInt::get(ip, 1), "morok.clean.byte.next");
     BB.CreateBr(loopBB);
     idx->addIncoming(next, bodyBB);
+    if (prevMem1) {
+        prevMem1->addIncoming(memByte, bodyBB);
+        prevClean1->addIncoming(cleanByte, bodyBB);
+    }
+    if (prevMem2) {
+        prevMem2->addIncoming(prevMem1, bodyBB);
+        prevMem3->addIncoming(prevMem2, bodyBB);
+        prevClean2->addIncoming(prevClean1, bodyBB);
+        prevClean3->addIncoming(prevClean2, bodyBB);
+    }
 }
 
 void emitFunctionMacLoop(IRBuilder<> &B, Module &M, Function *Fn,
@@ -5336,7 +5432,8 @@ Function *linuxCleanCopyProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     emitFunctionMacLoop(PCB, M, fn, memAddr, cleanPtr, pFilesz, diff,
                         macTargets, macKey, afterMacBB);
     IRBuilder<> AMB(afterMacBB);
-    emitByteDiffLoop(AMB, M, fn, memAddr, cleanPtr, pFilesz, diff, phNextBB);
+    emitByteDiffLoop(AMB, M, fn, memAddr, cleanPtr, pFilesz, diff, TT,
+                     phNextBB);
 
     IRBuilder<> PNB(phNextBB);
     Value *phNext =
@@ -5494,7 +5591,8 @@ Function *darwinCleanCopyProbe(Module &M, ir::IRRandom &rng) {
     emitFunctionMacLoop(CCB, M, fn, memAddr, cleanPtr, filesize, diff,
                         macTargets, macKey, afterMacBB);
     IRBuilder<> AMB(afterMacBB);
-    emitByteDiffLoop(AMB, M, fn, memAddr, cleanPtr, filesize, diff, cmdNextBB);
+    emitByteDiffLoop(AMB, M, fn, memAddr, cleanPtr, filesize, diff, TT,
+                     cmdNextBB);
 
     IRBuilder<> CNB(cmdNextBB);
     Value *nextCmdIdx =

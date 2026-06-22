@@ -16882,6 +16882,9 @@ entry:
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.mem.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.antihook.mac.file.mix") >= 1u);
     CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3") >= 1u);
+    CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3.long") >=
+          1u);
+    CHECK(countNamedInstructions(*Clean, "morok.negative.text.brk0") == 0u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rel.offset") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.rel.info") >= 1u);
     CHECK(countNamedInstructions(*Got, "morok.antihook.got.sym.name") >= 1u);
@@ -17361,7 +17364,12 @@ entry:
     REQUIRE(Kernel58 != nullptr);
     Function *Ctor = M->getFunction("morok.antihook");
     REQUIRE(Ctor != nullptr);
+    Function *Clean = M->getFunction("morok.antihook.clean.elf");
+    REQUIRE(Clean != nullptr);
 
+    CHECK(countNamedInstructions(*Clean, "morok.negative.text.brk0") >= 1u);
+    CHECK(countNamedInstructions(*Clean, "morok.negative.text.int3.long") ==
+          0u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.antihook.mprotect.mprotect.none") >=
           1u);
