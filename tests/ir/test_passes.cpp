@@ -13882,6 +13882,44 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("format boundary lowering removes recovered trace snprintf shapes") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+@msg2 = private constant [9 x i8] c"%s$%s&%s\00"
+@pass1 = private constant [10 x i8] c"%s::%s:%s\00"
+@pass2 = private constant [7 x i8] c"%s::%s\00"
+
+declare i32 @snprintf(ptr, i64, ptr, ...)
+
+define i32 @canon(ptr %buf, ptr %mathid, ptr %expiry, ptr %mathnum, ptr %act, ptr %body) {
+entry:
+  %a = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 256, ptr @msg2, ptr %mathid, ptr %mathnum, ptr %act)
+  %b = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 64, ptr @pass1, ptr %body, ptr %mathnum, ptr %expiry)
+  %c = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 64, ptr @pass2, ptr %body, ptr %mathnum)
+  %ab = add i32 %a, %b
+  %r = add i32 %ab, %c
+  ret i32 %r
+}
+)ir");
+    REQUIRE(M);
+    CHECK(morok::passes::inlineConstantFormatCalls(*M));
+
+    Function *Canon = M->getFunction("canon");
+    REQUIRE(Canon);
+    CHECK(countCallsTo(*Canon, "snprintf") == 0u);
+    CHECK(countFunctions(*M, "morok.fmt.") == 3u);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(6108);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::stringEncryptModule(*M, morok::passes::StrEncParams{},
+                                             rng));
+    CHECK_FALSE(hasReadableByteString(*M, "%s$%s&%s"));
+    CHECK_FALSE(hasReadableByteString(*M, "%s::%s:%s"));
+    CHECK_FALSE(hasReadableByteString(*M, "%s::%s"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("format boundary lowering handles numeric sprintf") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
