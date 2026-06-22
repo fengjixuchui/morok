@@ -17867,11 +17867,13 @@ entry:
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("sysctl") == nullptr);
     CHECK(M->getFunction("csops") == nullptr);
-    CHECK(M->getFunction("task_get_exception_ports") == nullptr);
+    CHECK(M->getFunction("task_get_exception_ports") != nullptr);
     CHECK(M->getFunction("getpid") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.exc.task_ports") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.exc.task_ports.import") >= 1u);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antidbg.exc.handler.nonnull") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.exc.any") >= 1u);
@@ -18037,7 +18039,7 @@ entry:
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("sysctl") == nullptr);
     CHECK(M->getFunction("csops") == nullptr);
-    CHECK(M->getFunction("task_get_exception_ports") == nullptr);
+    CHECK(M->getFunction("task_get_exception_ports") != nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
     // M2 direct syscall fallback: no imported MAP_JIT/icache helper can
     // interpose or patch a mutable syscall thunk before checks execute.
@@ -18053,6 +18055,8 @@ entry:
                        "morok.svc.fallback") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
                                  "morok.antidbg.exc.task_ports") >= 1u);
+    CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
+                                 "morok.antidbg.exc.task_ports.import") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
                                  "morok.antidbg.exc.handler.nonnull") >= 1u);
     CHECK(countNamedInstructions(*M->getFunction("morok.antidbg"),
