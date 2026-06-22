@@ -18152,6 +18152,8 @@ entry:
     CHECK(M->getGlobalVariable("morok.antidbg.sigtrap.sentinel", true) !=
           nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.sigtrap.token", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.antidbg.sigtrap.enabled", true) !=
+          nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.faultcf.enabled", true) !=
           nullptr);
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
@@ -18371,6 +18373,12 @@ entry:
     CHECK(namedInstructionPrecedes(
         *AntiDbg, "morok.antidbg.ptrace.init.faultcf.disabled",
         "morok.antidbg.ptrace.init.chain.raw.first"));
+    CHECK(storesNamedValueToGlobalPrefix(
+        *AntiDbg, "morok.antidbg.sigtrap.enabled",
+        "morok.antidbg.ptrace.init.sigtrap.disabled"));
+    CHECK(namedInstructionPrecedes(
+        *AntiDbg, "morok.antidbg.ptrace.init.sigtrap.disabled",
+        "morok.antidbg.ptrace.init.chain.raw.first"));
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.ptrace.init") >= 1u);
     CHECK(countNamedInstructions(
               *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.first") >= 1u);
@@ -18528,6 +18536,8 @@ entry:
     CHECK(countNamedInstructions(
               *FaultCfHandler, "morok.antidbg.faultcf.si.addr") >= 1u);
     CHECK(countNamedInstructions(*Sigtrap,
+                                 "morok.antidbg.sigtrap.enabled.load") >= 1u);
+    CHECK(countNamedInstructions(*Sigtrap,
                                  "morok.antidbg.sigtrap.rt_sigaction") >= 1u);
     CHECK(countNamedInstructions(
               *Sigtrap, "morok.antidbg.sigtrap.rt_sigaction.restore") >= 1u);
@@ -18634,6 +18644,8 @@ define i32 @main() { ret i32 0 }
     CHECK(countInlineAsmBodies(*Sigreturn, "173") >= 1u);
     CHECK(countCallsTo(*Sigtrap, "syscall") == 0u);
     CHECK(countCallsTo(*Sigtrap, "sigaction") == 0u);
+    CHECK(countNamedInstructions(*Sigtrap,
+                                 "morok.antidbg.sigtrap.enabled.load") >= 1u);
     CHECK(countNamedInstructions(*Sigtrap,
                                  "morok.antidbg.sigtrap.rt_sigaction") >= 1u);
     CHECK(countNamedInstructions(

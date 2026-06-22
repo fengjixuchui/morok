@@ -134,6 +134,15 @@ IntegerType *intPtrTy(Module &M) {
     return IntegerType::get(M.getContext(), bits);
 }
 
+bool linuxSigtrapRoutingCandidate(Module &M, const Triple &TT) {
+    if (!TT.isOSLinux())
+        return false;
+    const bool x64 = TT.getArch() == Triple::x86_64;
+    const bool x86 = TT.getArch() == Triple::x86;
+    const unsigned wordBits = intPtrTy(M)->getBitWidth();
+    return (x64 && wordBits == 64) || (x86 && wordBits == 32);
+}
+
 GlobalVariable *guardWindowsTlsTargetOnce(Module &M, Function *Target,
                                           const Twine &Prefix) {
     LLVMContext &ctx = M.getContext();
@@ -927,6 +936,19 @@ GlobalVariable *linuxFaultFlowEnabled(Module &M) {
     return gv;
 }
 
+GlobalVariable *linuxSigtrapRoutingEnabled(Module &M) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antidbg.sigtrap.enabled",
+                                /*AllowInternal=*/true))
+        return existing;
+    auto *i1 = Type::getInt1Ty(M.getContext());
+    auto *gv = new GlobalVariable(
+        M, i1, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::getTrue(M.getContext()), "morok.antidbg.sigtrap.enabled");
+    gv->setAlignment(Align(1));
+    return gv;
+}
+
 void disableLinuxFaultFlowAfterSelfTrace(IRBuilder<> &B, Module &M,
                                          const Twine &Name) {
     GlobalVariable *enabled = linuxFaultFlowEnabled(M);
@@ -942,6 +964,24 @@ void disableLinuxFaultFlowAfterSelfTrace(IRBuilder<> &B, Module &M,
     store->setAlignment(Align(1));
 }
 
+void disableLinuxSigtrapRoutingAfterSelfTrace(IRBuilder<> &B, Module &M,
+                                              const Triple &TT,
+                                              const Twine &Name) {
+    if (!linuxSigtrapRoutingCandidate(M, TT))
+        return;
+    GlobalVariable *enabled = linuxSigtrapRoutingEnabled(M);
+    auto *i1 = Type::getInt1Ty(M.getContext());
+    Value *previous =
+        B.CreateLoad(i1, enabled, Name + ".sigtrap.enabled.prev");
+    cast<LoadInst>(previous)->setVolatile(true);
+    cast<LoadInst>(previous)->setAlignment(Align(1));
+    Value *disabled = B.CreateAnd(previous, ConstantInt::getFalse(M.getContext()),
+                                  Name + ".sigtrap.disabled");
+    auto *store = B.CreateStore(disabled, enabled);
+    store->setVolatile(true);
+    store->setAlignment(Align(1));
+}
+
 void emitLinuxSelfTraceFallback(IRBuilder<> &B, Module &M,
                                 GlobalVariable *State,
                                 GlobalVariable *SentinelActive,
@@ -949,6 +989,7 @@ void emitLinuxSelfTraceFallback(IRBuilder<> &B, Module &M,
                                 std::uint64_t Salt) {
     auto trace = [&]() {
         disableLinuxFaultFlowAfterSelfTrace(B, M, Name);
+        disableLinuxSigtrapRoutingAfterSelfTrace(B, M, TT, Name);
         emitLinuxPtraceTraceMeChain(B, M, State, TT, Name, Salt);
     };
     if (!SentinelActive) {
@@ -3947,11 +3988,7 @@ Value *emitLinuxSigtrapRoutingSyscall(IRBuilder<> &B, Module &M,
 
 Function *linuxSigtrapRoutingProbe(Module &M, ir::IRRandom &rng,
                                    const Triple &TT) {
-    const bool x64 = TT.getArch() == Triple::x86_64;
-    const bool x86 = TT.getArch() == Triple::x86;
-    const unsigned wordBits = intPtrTy(M)->getBitWidth();
-    if (!TT.isOSLinux() || (!x64 && !x86) || (x64 && wordBits != 64) ||
-        (x86 && wordBits != 32))
+    if (!linuxSigtrapRoutingCandidate(M, TT))
         return nullptr;
     LinuxRawSigactionLayout rawLayout;
     if (!linuxRawSigactionLayout(TT, rawLayout))
@@ -3963,6 +4000,7 @@ Function *linuxSigtrapRoutingProbe(Module &M, ir::IRRandom &rng,
         return existing;
 
     LLVMContext &ctx = M.getContext();
+    auto *i1 = Type::getInt1Ty(ctx);
     auto *i8 = Type::getInt8Ty(ctx);
     auto *i32 = Type::getInt32Ty(ctx);
     auto *i64 = Type::getInt64Ty(ctx);
@@ -3984,12 +4022,21 @@ Function *linuxSigtrapRoutingProbe(Module &M, ir::IRRandom &rng,
         return nullptr;
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *enabledBB = BasicBlock::Create(ctx, "enabled", fn);
     auto *armedBB = BasicBlock::Create(ctx, "armed", fn);
     auto *restoreBB = BasicBlock::Create(ctx, "restore", fn);
     auto *retInstalledBB = BasicBlock::Create(ctx, "ret.installed", fn);
     auto *ret0BB = BasicBlock::Create(ctx, "ret0", fn);
 
-    IRBuilder<> B(entry);
+    IRBuilder<> GB(entry);
+    Value *enabled =
+        GB.CreateLoad(i1, linuxSigtrapRoutingEnabled(M),
+                      "morok.antidbg.sigtrap.enabled.load");
+    cast<LoadInst>(enabled)->setVolatile(true);
+    cast<LoadInst>(enabled)->setAlignment(Align(1));
+    GB.CreateCondBr(enabled, enabledBB, ret0BB);
+
+    IRBuilder<> B(enabledBB);
     auto *actionTy = ArrayType::get(i8, rawLayout.actionSize);
     AllocaInst *action =
         B.CreateAlloca(actionTy, nullptr, "morok.antidbg.sigtrap.sa");
