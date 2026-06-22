@@ -17307,8 +17307,10 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     TB.CreateStore(nextCount, debugObjectCount)->setVolatile(true);
     foldState(TB, State, typeHash, rng.next(),
               "morok.win.dbgobj.object.type.hash.mix");
-    foldEnforcedFlag(TB, State, debugObjectTypeHit, 0xCC7E31A04B962D85ULL,
-                     "morok.win.dbgobj.object.debug");
+    // DebugObject object counts are host-wide: another debugged process can
+    // trip this on a clean run, so keep it as telemetry/soft score only.
+    foldFlag(TB, State, debugObjectTypeHit, 0xCC7E31A04B962D85ULL,
+             "morok.win.dbgobj.object.debug", /*ScoreSoftSignal=*/true);
     TB.CreateBr(objectNextBB);
 
     IRBuilder<> NB(objectNextBB);
@@ -17337,11 +17339,12 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     cast<LoadInst>(finalCount)->setVolatile(true);
     foldState(RetB, State, finalCount, rng.next(),
               "morok.win.dbgobj.object.debug.count.mix");
-    foldEnforcedFlag(
-        RetB, State,
-        RetB.CreateICmpNE(finalCount, ConstantInt::get(i32, 0),
-                          "morok.win.dbgobj.object.debug.count.hit"),
-        0xE019A8C35F7B62D4ULL, "morok.win.dbgobj.object.debug.count");
+    foldFlag(RetB, State,
+             RetB.CreateICmpNE(finalCount, ConstantInt::get(i32, 0),
+                               "morok.win.dbgobj.object.debug.count.hit"),
+             0xE019A8C35F7B62D4ULL,
+             "morok.win.dbgobj.object.debug.count",
+             /*ScoreSoftSignal=*/true);
     RetB.CreateBr(handleGateBB);
 
     IRBuilder<> HGB(handleGateBB);

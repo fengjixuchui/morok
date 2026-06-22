@@ -18525,6 +18525,10 @@ define i32 @main() { ret i32 0 }
           1u);
     CHECK(countNamedInstructions(
               *Probe, "morok.win.dbgobj.object.debug.count.final") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.object.debug.score") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.dbgobj.object.debug.count.score") >= 1u);
     CHECK(namedInstructionUsesConstant(
         *Probe, "morok.win.dbgobj.object.fixed.next", 0x68));
     CHECK_FALSE(namedInstructionUsesConstant(
@@ -18553,6 +18557,16 @@ define i32 @main() { ret i32 0 }
         findNamedInstruction(*Probe, "morok.win.dbgobj.handle.ipc.telemetry");
     REQUIRE(IpcTelemetry != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(IpcTelemetry,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *ObjectDebugHit =
+        findNamedInstruction(*Probe, "morok.win.dbgobj.object.debug.hit");
+    REQUIRE(ObjectDebugHit != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(ObjectDebugHit,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *ObjectDebugCountHit =
+        findNamedInstruction(*Probe, "morok.win.dbgobj.object.debug.count.hit");
+    REQUIRE(ObjectDebugCountHit != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(ObjectDebugCountHit,
                                            "morok.seal.fold.anti_debug"));
     Instruction *DirectPortHit =
         findNamedInstruction(*Probe, "morok.win.dbgobj.debug.port.direct.hit");
