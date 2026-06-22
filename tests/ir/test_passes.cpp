@@ -18407,20 +18407,26 @@ define i32 @main() { ret i32 0 }
     Function *PatchRet = M->getFunction("morok.win.attach.patch.ret");
     Function *PatchRemote = M->getFunction("morok.win.attach.patch.remote");
     Function *Invalid = M->getFunction("morok.win.attach.invalid");
+    Function *Uef = M->getFunction("morok.win.attach.uef.filter");
     Function *Resolve = M->getFunction("morok.win.pe.resolve");
     REQUIRE(Ctor != nullptr);
     REQUIRE(Probe != nullptr);
     REQUIRE(PatchRet != nullptr);
     REQUIRE(PatchRemote != nullptr);
     REQUIRE(Invalid != nullptr);
+    REQUIRE(Uef != nullptr);
     REQUIRE(Resolve != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.attach.uef.reached", true) !=
+          nullptr);
     checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("DbgUiRemoteBreakin") == nullptr);
     CHECK(M->getFunction("DbgBreakPoint") == nullptr);
     CHECK(M->getFunction("ExitProcess") == nullptr);
     CHECK(M->getFunction("CloseHandle") == nullptr);
     CHECK(M->getFunction("NtClose") == nullptr);
+    CHECK(M->getFunction("SetUnhandledExceptionFilter") == nullptr);
+    CHECK(M->getFunction("RaiseException") == nullptr);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.remote.breakin") >=
           1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.dbg.breakpoint") >=
@@ -18435,12 +18441,33 @@ define i32 @main() { ret i32 0 }
               *Probe, "morok.win.attach.kernelbase.closehandle") >= 1u);
     CHECK(countNamedInstructions(
               *Probe, "morok.win.attach.kernel32.closehandle") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.attach.kernelbase.setuef") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.kernel32.setuef") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.attach.kernelbase.raiseexception") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.attach.kernel32.raiseexception") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.exitprocess") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.closehandle") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.uef.set") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.uef.raise") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.uef.previous") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.attach.uef.restore") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.attach.patch.remote.status") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.attach.patch.ret.status") >=
           1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.attach.uef.routing.missed") >= 1u);
+    CHECK(countNamedInstructions(*Uef,
+                                 "morok.win.attach.uef.reached.marker") >= 1u);
+    Instruction *UefMissed =
+        findNamedInstruction(*Probe, "morok.win.attach.uef.routing.missed");
+    REQUIRE(UefMissed != nullptr);
+    CHECK(valueFeedsNamedInstruction(UefMissed, "morok.seal.fold.anti_debug"));
     CHECK(countNamedInstructions(*Invalid,
                                  "morok.win.attach.ntclose.invalid") >= 1u);
     CHECK(countNamedInstructions(*Invalid,

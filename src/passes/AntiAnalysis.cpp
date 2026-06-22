@@ -17691,6 +17691,49 @@ Function *windowsInvalidHandleProbeHelper(Module &M) {
     return fn;
 }
 
+GlobalVariable *windowsUefReachedFlag(Module &M) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.win.attach.uef.reached",
+                                /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(
+        M, i32, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i32, 0), "morok.win.attach.uef.reached");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+Function *windowsUnhandledExceptionFilter(Module &M) {
+    if (Function *existing = M.getFunction("morok.win.attach.uef.filter"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(i32, {ptr}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.attach.uef.filter", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *exceptionPtrs = fn->arg_begin();
+    exceptionPtrs->setName("morok.win.attach.uef.exception.ptrs");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    Value *ptrBits =
+        B.CreatePtrToInt(exceptionPtrs, intPtrTy(M),
+                         "morok.win.attach.uef.exception.bits");
+    Value *marker = B.CreateOr(
+        B.CreateTrunc(ptrBits, i32, "morok.win.attach.uef.exception.low"),
+        ConstantInt::get(i32, 1), "morok.win.attach.uef.reached.marker");
+    StoreInst *hit =
+        B.CreateStore(marker, windowsUefReachedFlag(M));
+    hit->setVolatile(true);
+    B.CreateRet(ConstantInt::getSigned(i32, -1));
+    return fn;
+}
+
 Function *windowsAntiAttachProbe(Module &M, GlobalVariable *State,
                                  ir::IRRandom &rng, const Triple &TT) {
     if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
@@ -17703,6 +17746,7 @@ Function *windowsAntiAttachProbe(Module &M, GlobalVariable *State,
     auto *i32 = Type::getInt32Ty(ctx);
     auto *i64 = Type::getInt64Ty(ctx);
     auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
     auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
                                 GlobalValue::PrivateLinkage,
                                 "morok.win.attach.probe", &M);
@@ -17715,12 +17759,17 @@ Function *windowsAntiAttachProbe(Module &M, GlobalVariable *State,
     Function *patchRet = windowsPatchRetHelper(M);
     Function *patchRemote = windowsPatchRemoteBreakinHelper(M);
     Function *invalidProbe = windowsInvalidHandleProbeHelper(M);
+    Function *uefFilter = windowsUnhandledExceptionFilter(M);
+    GlobalVariable *uefReached = windowsUefReachedFlag(M);
     if (!pebReader || !moduleByHash || !resolver || !patchRet ||
-        !patchRemote || !invalidProbe)
+        !patchRemote || !invalidProbe || !uefFilter || !uefReached)
         return nullptr;
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
     auto *resolveBB = BasicBlock::Create(ctx, "resolve", fn);
+    auto *uefGateBB = BasicBlock::Create(ctx, "uef.gate", fn);
+    auto *uefBB = BasicBlock::Create(ctx, "uef", fn);
+    auto *uefDoneBB = BasicBlock::Create(ctx, "uef.done", fn);
     auto *retBB = BasicBlock::Create(ctx, "ret", fn);
 
     IRBuilder<> B(entry);
@@ -17781,10 +17830,37 @@ Function *windowsAntiAttachProbe(Module &M, GlobalVariable *State,
                         "morok.win.attach.kernelbase.closehandle.ready"),
         kernelbaseCloseHandle, kernel32CloseHandle,
         "morok.win.attach.closehandle");
+    Value *kernelbaseSetUef = RB.CreateCall(
+        resolver,
+        {kernelbase, ConstantInt::get(i64,
+                                      fnv1aName("SetUnhandledExceptionFilter"))},
+        "morok.win.attach.kernelbase.setuef");
+    Value *kernel32SetUef = RB.CreateCall(
+        resolver,
+        {kernel32, ConstantInt::get(i64,
+                                    fnv1aName("SetUnhandledExceptionFilter"))},
+        "morok.win.attach.kernel32.setuef");
+    Value *setUef = RB.CreateSelect(
+        RB.CreateICmpNE(kernelbaseSetUef, ConstantInt::get(ip, 0),
+                        "morok.win.attach.kernelbase.setuef.ready"),
+        kernelbaseSetUef, kernel32SetUef, "morok.win.attach.uef.set");
+    Value *kernelbaseRaise = RB.CreateCall(
+        resolver, {kernelbase, ConstantInt::get(i64, fnv1aName("RaiseException"))},
+        "morok.win.attach.kernelbase.raiseexception");
+    Value *kernel32Raise = RB.CreateCall(
+        resolver, {kernel32, ConstantInt::get(i64, fnv1aName("RaiseException"))},
+        "morok.win.attach.kernel32.raiseexception");
+    Value *raiseException = RB.CreateSelect(
+        RB.CreateICmpNE(kernelbaseRaise, ConstantInt::get(ip, 0),
+                        "morok.win.attach.kernelbase.raiseexception.ready"),
+        kernelbaseRaise, kernel32Raise, "morok.win.attach.uef.raise");
     foldState(RB, State, remoteBreakin, rng.next(),
               "morok.win.attach.remote.breakin.mix");
     foldState(RB, State, dbgBreak, rng.next(),
               "morok.win.attach.dbg.breakpoint.mix");
+    foldState(RB, State, setUef, rng.next(), "morok.win.attach.uef.set.mix");
+    foldState(RB, State, raiseException, rng.next(),
+              "morok.win.attach.uef.raise.mix");
     Value *remoteStatus = RB.CreateCall(
         patchRemote, {remoteBreakin, exitProcess, ntProtect},
         "morok.win.attach.patch.remote.status");
@@ -17806,7 +17882,57 @@ Function *windowsAntiAttachProbe(Module &M, GlobalVariable *State,
         "morok.win.attach.patch.failed");
     foldEnforcedFlag(RB, State, patchFailed, 0xE57B1490C6A32D8FULL,
                      "morok.win.attach.patch.failed");
-    RB.CreateBr(retBB);
+    RB.CreateStore(ConstantInt::get(i32, 0), uefReached)->setVolatile(true);
+    RB.CreateBr(uefGateBB);
+
+    IRBuilder<> UG(uefGateBB);
+    Value *uefReady = UG.CreateAnd(
+        UG.CreateICmpNE(setUef, ConstantInt::get(ip, 0),
+                        "morok.win.attach.uef.set.ready"),
+        UG.CreateICmpNE(raiseException, ConstantInt::get(ip, 0),
+                        "morok.win.attach.uef.raise.ready"),
+        "morok.win.attach.uef.ready");
+    UG.CreateCondBr(uefReady, uefBB, uefDoneBB);
+
+    IRBuilder<> UB(uefBB);
+    auto *setUefTy = FunctionType::get(ptr, {ptr}, false);
+    auto *raiseTy = FunctionType::get(Type::getVoidTy(ctx),
+                                      {i32, i32, i32, ptr}, false);
+    Value *setUefPtr =
+        UB.CreateIntToPtr(setUef, ptr, "morok.win.attach.uef.set.ptr");
+    Value *previousFilter =
+        UB.CreateCall(setUefTy, setUefPtr, {uefFilter},
+                      "morok.win.attach.uef.previous");
+    UB.CreateCall(raiseTy,
+                  UB.CreateIntToPtr(raiseException, ptr,
+                                    "morok.win.attach.uef.raise.ptr"),
+                  {ConstantInt::get(i32, 0xE0424D4F), ConstantInt::get(i32, 0),
+                   ConstantInt::get(i32, 0), ConstantPointerNull::get(ptr)});
+    Value *restoredFilter =
+        UB.CreateCall(setUefTy, setUefPtr, {previousFilter},
+                      "morok.win.attach.uef.restore");
+    foldState(UB, State, previousFilter, rng.next(),
+              "morok.win.attach.uef.previous.mix");
+    foldState(UB, State, restoredFilter, rng.next(),
+              "morok.win.attach.uef.restore.mix");
+    UB.CreateBr(uefDoneBB);
+
+    IRBuilder<> UD(uefDoneBB);
+    Value *uefReachedValue =
+        UD.CreateLoad(i32, uefReached, "morok.win.attach.uef.reached.value");
+    cast<LoadInst>(uefReachedValue)->setVolatile(true);
+    Value *uefMissed = UD.CreateAnd(
+        uefReady,
+        UD.CreateICmpEQ(uefReachedValue, ConstantInt::get(i32, 0),
+                        "morok.win.attach.uef.not.reached"),
+        "morok.win.attach.uef.routing.missed");
+    foldState(UD, State, uefReachedValue, rng.next(),
+              "morok.win.attach.uef.reached.mix");
+    foldFlag(UD, State, UD.CreateNot(uefReady, "morok.win.attach.uef.missing"),
+             0x5C9D21E8A70F43B6ULL, "morok.win.attach.uef.missing");
+    foldEnforcedFlag(UD, State, uefMissed, 0xF1386C24D9E0A57BULL,
+                     "morok.win.attach.uef.routing");
+    UD.CreateBr(retBB);
 
     IRBuilder<> RetB(retBB);
     RetB.CreateRetVoid();
