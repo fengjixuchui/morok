@@ -16459,6 +16459,172 @@ Function *negativeTimingProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
     return fn;
 }
 
+void emitDbiOverheadLinearSpan(IRBuilder<> &B, AllocaInst *Acc,
+                               std::uint64_t Salt, const Twine &Name) {
+    auto *i64 = B.getInt64Ty();
+    for (unsigned i = 0; i < 24; ++i) {
+        auto *old = B.CreateLoad(i64, Acc, Name + ".load");
+        old->setVolatile(true);
+        Value *rot =
+            B.CreateOr(B.CreateShl(old, ConstantInt::get(i64, (i % 11) + 3)),
+                       B.CreateLShr(old, ConstantInt::get(i64, 64 - ((i % 11) + 3))),
+                       Name + ".rot");
+        Value *mixed = B.CreateMul(
+            B.CreateXor(rot, ConstantInt::get(i64, Salt + 0xD1B54A32D192ED03ULL * i),
+                        Name + ".xor"),
+            ConstantInt::get(i64, (Salt ^ (0x9E3779B97F4A7C15ULL * (i + 1))) | 1ULL),
+            Name + ".mix");
+        B.CreateStore(mixed, Acc)->setVolatile(true);
+    }
+}
+
+void emitDbiOverheadBranchSpan(IRBuilder<> &B, Module &M, AllocaInst *Acc,
+                               std::uint64_t Salt, const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    Function *fn = B.GetInsertBlock()->getParent();
+    for (unsigned i = 0; i < 18; ++i) {
+        auto *old = B.CreateLoad(i64, Acc, Name + ".load");
+        old->setVolatile(true);
+        Value *bit = B.CreateAnd(
+            B.CreateXor(B.CreateLShr(old, ConstantInt::get(i64, (i % 13) + 1)),
+                        old, Name + ".selector.mix"),
+            ConstantInt::get(i64, 1), Name + ".selector.bit");
+        auto *thenBB = BasicBlock::Create(ctx, (Name + ".then").str(), fn);
+        auto *elseBB = BasicBlock::Create(ctx, (Name + ".else").str(), fn);
+        auto *joinBB = BasicBlock::Create(ctx, (Name + ".join").str(), fn);
+        B.CreateCondBr(B.CreateICmpNE(bit, ConstantInt::get(i64, 0),
+                                      Name + ".take"),
+                       thenBB, elseBB);
+
+        IRBuilder<> TB(thenBB);
+        Value *thenMix = TB.CreateAdd(
+            TB.CreateMul(old,
+                         ConstantInt::get(
+                             i64, (Salt ^ (0xA0761D6478BD642FULL * (i + 1))) | 1ULL),
+                         Name + ".then.mul"),
+            ConstantInt::get(i64, Salt + 0xE7037ED1A0B428DBULL * (i + 3)),
+            Name + ".then.mix");
+        TB.CreateStore(thenMix, Acc)->setVolatile(true);
+        TB.CreateBr(joinBB);
+
+        IRBuilder<> EB(elseBB);
+        Value *elseMix =
+            EB.CreateXor(EB.CreateAdd(old,
+                                      ConstantInt::get(
+                                          i64, Salt ^ 0x8EBC6AF09C88C6E3ULL ^ i),
+                                      Name + ".else.add"),
+                         EB.CreateLShr(old, ConstantInt::get(i64, (i % 17) + 1)),
+                         Name + ".else.mix");
+        EB.CreateStore(elseMix, Acc)->setVolatile(true);
+        EB.CreateBr(joinBB);
+
+        B.SetInsertPoint(joinBB);
+    }
+}
+
+Function *dbiOverheadProbe(Module &M, ir::IRRandom &rng, const Triple &TT) {
+    if (!isX86Target(TT))
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.dbi.overhead"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.dbi.overhead", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *acc = B.CreateAlloca(i64, nullptr, "morok.antihook.dbi.overhead.acc");
+    const std::uint64_t seed = rng.next();
+    auto derive = [seed](std::uint64_t tag) {
+        std::uint64_t x = seed + 0x9E3779B97F4A7C15ULL * (tag + 1);
+        x ^= x >> 30;
+        x *= 0xBF58476D1CE4E5B9ULL;
+        x ^= x >> 27;
+        x *= 0x94D049BB133111EBULL;
+        return x ^ (x >> 31);
+    };
+    B.CreateStore(ConstantInt::get(i64, derive(0x10)), acc)->setVolatile(true);
+
+    Value *anomalousSamples = ConstantInt::get(i32, 0);
+    Value *mix = ConstantInt::get(i64, derive(0x20));
+    const bool hasCycleClock = isX86Target(TT);
+    const std::uint64_t branchFloor = hasCycleClock ? 50000ULL : 500000ULL;
+
+    for (unsigned sample = 0; sample < 4; ++sample) {
+        Value *linearStart = emitTimingPrimaryClock(
+            B, M, TT, "morok.antihook.dbi.overhead.linear.start");
+        emitDbiOverheadLinearSpan(
+            B, acc, derive(0x100 + sample * 5),
+            "morok.antihook.dbi.overhead.linear");
+        Value *linearEnd = emitTimingPrimaryClock(
+            B, M, TT, "morok.antihook.dbi.overhead.linear.end");
+        emitDbiOverheadLinearSpan(
+            B, acc, derive(0x101 + sample * 5),
+            "morok.antihook.dbi.overhead.cooldown");
+        Value *branchStart = emitTimingPrimaryClock(
+            B, M, TT, "morok.antihook.dbi.overhead.branch.start");
+        emitDbiOverheadBranchSpan(
+            B, M, acc, derive(0x102 + sample * 5),
+            "morok.antihook.dbi.overhead.branch");
+        Value *branchEnd = emitTimingPrimaryClock(
+            B, M, TT, "morok.antihook.dbi.overhead.branch.end");
+
+        Value *linearDelta = B.CreateSub(
+            linearEnd, linearStart, "morok.antihook.dbi.overhead.linear.delta");
+        Value *branchDelta = B.CreateSub(
+            branchEnd, branchStart, "morok.antihook.dbi.overhead.branch.delta");
+        Value *ratioLimit = B.CreateAdd(
+            B.CreateShl(linearDelta, ConstantInt::get(i64, 4),
+                        "morok.antihook.dbi.overhead.linear.scaled"),
+            ConstantInt::get(i64, branchFloor),
+            "morok.antihook.dbi.overhead.branch.limit");
+        Value *ratioSlow = B.CreateICmpUGT(
+            branchDelta, ratioLimit, "morok.antihook.dbi.overhead.ratio.slow");
+        Value *floorSlow = B.CreateICmpUGT(
+            branchDelta, ConstantInt::get(i64, branchFloor),
+            "morok.antihook.dbi.overhead.floor.slow");
+        Value *sampleAnomaly = B.CreateAnd(
+            ratioSlow, floorSlow, "morok.antihook.dbi.overhead.sample.anomaly");
+        anomalousSamples =
+            B.CreateAdd(anomalousSamples, B.CreateZExt(sampleAnomaly, i32),
+                        "morok.antihook.dbi.overhead.anomalous.n");
+        mix = B.CreateXor(
+            B.CreateAdd(mix,
+                        B.CreateMul(linearDelta,
+                                    ConstantInt::get(
+                                        i64, derive(0x103 + sample * 5) | 1ULL))),
+            B.CreateMul(branchDelta,
+                        ConstantInt::get(i64,
+                                         derive(0x104 + sample * 5) | 1ULL)),
+            "morok.antihook.dbi.overhead.mix");
+    }
+
+    Value *distribution = B.CreateICmpUGE(
+        anomalousSamples, ConstantInt::get(i32, 2),
+        "morok.antihook.dbi.overhead.distribution");
+    Value *packed = B.CreateZExt(anomalousSamples, i64,
+                                 "morok.antihook.dbi.overhead.count");
+    packed = B.CreateOr(
+        packed,
+        B.CreateShl(B.CreateZExt(distribution, i64), ConstantInt::get(i64, 8),
+                    "morok.antihook.dbi.overhead.distribution.bit"),
+        "morok.antihook.dbi.overhead.pack.flags");
+    Value *mixBits = B.CreateShl(
+        B.CreateAnd(mix, ConstantInt::get(i64, 0x0000ffffffffffffULL),
+                    "morok.antihook.dbi.overhead.mix.low"),
+        ConstantInt::get(i64, 16), "morok.antihook.dbi.overhead.mix.pack");
+    packed = B.CreateOr(packed, mixBits, "morok.antihook.dbi.overhead.pack");
+    B.CreateRet(packed);
+    return fn;
+}
+
 GlobalVariable *trapOracleState(Module &M, ir::IRRandom &rng) {
     if (auto *existing =
             M.getGlobalVariable("morok.trap.state", /*AllowInternal=*/true))
@@ -29990,6 +30156,21 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng,
     if (gotProbe)
         insertAntiHookGotRecheckSites(M, linuxGotRecheckProbe(M, gotProbe, state),
                                       rng);
+    if (Function *dbiOverhead = dbiOverheadProbe(M, rng, tt)) {
+        Value *sample = B.CreateCall(dbiOverhead, {},
+                                     "morok.antihook.dbi.overhead.sample");
+        Value *changed = B.CreateICmpNE(
+            B.CreateAnd(sample, ConstantInt::get(B.getInt64Ty(), 1ULL << 8),
+                        "morok.antihook.dbi.overhead.distribution.bits"),
+            ConstantInt::get(B.getInt64Ty(), 0),
+            "morok.corroborate.dbi.overhead.changed");
+        addSoftGateSignal(B, gate, changed, 1, 0xA4C91D6E37B2508FULL,
+                          "morok.gate.dbi.overhead");
+        foldState(B, state, sample, 0x6D37A91C5E208B4FULL,
+                  "morok.antihook.dbi.overhead");
+        foldFlag(B, state, changed, 0xB8E41C73A5D0296FULL,
+                 "morok.antihook.dbi.overhead.changed");
+    }
 
     if (tt.isOSDarwin()) {
         addGateCoherencePenalties(B, gate);

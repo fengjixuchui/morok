@@ -16904,6 +16904,8 @@ entry:
     REQUIRE(Sandbox != nullptr);
     Function *Dbi = M->getFunction("morok.antihook.dbi.linux");
     REQUIRE(Dbi != nullptr);
+    Function *DbiOverhead = M->getFunction("morok.antihook.dbi.overhead");
+    REQUIRE(DbiOverhead != nullptr);
     Function *Smc = M->getFunction("morok.antihook.dbi.smc");
     REQUIRE(Smc != nullptr);
     Function *MprotectSmc = M->getFunction("morok.antihook.mprotect.smc");
@@ -17440,6 +17442,17 @@ entry:
     CHECK(countNamedInstructions(*AntiDump, "morok.antidump.elf.shoff") >= 1u);
     CHECK(countNamedInstructions(
               *AntiDump, "morok.antidump.guard.elf.mprotect.none") >= 1u);
+    CHECK(countCallsTo(*DbiOverhead, "morok.timing.tsc.read") >= 2u);
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.linear.delta") >= 1u);
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.branch.delta") >= 1u);
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.ratio.slow") >= 1u);
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.sample.anomaly") >= 1u);
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.distribution") >= 1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antihook.dynamic.present") >=
@@ -17453,6 +17466,7 @@ entry:
     CHECK(countNamedInstructions(*Ctor, "morok.gate.sandbox.soft") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.gate.negative.timing.soft") >=
           1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.gate.dbi.overhead.soft") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.gate.dbi.jit.soft") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.gate.loader.bias.soft") >= 1u);
     CHECK(countNamedInstructions(*Ctor,
@@ -17473,6 +17487,11 @@ entry:
         findNamedInstruction(*Ctor, "morok.corroborate.sandbox.changed");
     REQUIRE(SandboxChanged != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(SandboxChanged,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *DbiOverheadChanged = findNamedInstruction(
+        *Ctor, "morok.corroborate.dbi.overhead.changed");
+    REQUIRE(DbiOverheadChanged != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(DbiOverheadChanged,
                                            "morok.seal.fold.anti_debug"));
     Instruction *NegativeTimingChanged = findNamedInstruction(
         *Ctor, "morok.corroborate.negative.timing.changed");
@@ -17889,6 +17908,8 @@ entry:
     REQUIRE(SchroHandler != nullptr);
     Function *AntiDump = M->getFunction("morok.antihook.antidump.macho");
     REQUIRE(AntiDump != nullptr);
+    Function *DbiOverhead = M->getFunction("morok.antihook.dbi.overhead");
+    REQUIRE(DbiOverhead != nullptr);
     Function *NegativeTiming = M->getFunction("morok.negative.timing");
     REQUIRE(NegativeTiming != nullptr);
     Function *Ctor = M->getFunction("morok.antihook");
@@ -18030,6 +18051,9 @@ entry:
                                  "morok.antidump.macho.sizeofcmds") >= 1u);
     CHECK(countNamedInstructions(*AntiDump, "morok.antidump.macho.protlen") >=
           1u);
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.branch.delta") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.gate.dbi.overhead.soft") >= 1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
@@ -18043,6 +18067,11 @@ entry:
         findNamedInstruction(*Ctor, "morok.corroborate.sandbox.changed");
     REQUIRE(SandboxChanged != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(SandboxChanged,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *DbiOverheadChanged = findNamedInstruction(
+        *Ctor, "morok.corroborate.dbi.overhead.changed");
+    REQUIRE(DbiOverheadChanged != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(DbiOverheadChanged,
                                            "morok.seal.fold.anti_debug"));
     Instruction *NegativeTimingChanged = findNamedInstruction(
         *Ctor, "morok.corroborate.negative.timing.changed");
@@ -18066,6 +18095,38 @@ entry:
     CHECK(M->getFunction("getpagesize") != nullptr);
     CHECK(M->getGlobalVariable("mach_task_self_") != nullptr);
     CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiHookingModule skips DBI overhead probe on Darwin arm64") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "arm64-apple-macosx13.0.0"
+define i32 @work(i32 %x) {
+entry:
+  %y = add i32 %x, 11
+  ret i32 %y
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 31)
+  ret i32 %v
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8803);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiHookingModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.antihook");
+    REQUIRE(Ctor != nullptr);
+    CHECK(M->getFunction("morok.antihook.schro") != nullptr);
+    CHECK(M->getFunction("morok.antihook.schro.handler") != nullptr);
+    CHECK(M->getFunction("morok.negative.timing") != nullptr);
+    CHECK(M->getFunction("morok.antihook.dbi.overhead") == nullptr);
+    CHECK(countNamedInstructions(*Ctor, "morok.gate.dbi.overhead.soft") == 0u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.corroborate.dbi.overhead.changed") == 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -18111,6 +18172,8 @@ entry:
     REQUIRE(Direct6 != nullptr);
     Function *Direct7 = M->getFunction("morok.win.sys.direct7");
     REQUIRE(Direct7 != nullptr);
+    Function *DbiOverhead = M->getFunction("morok.antihook.dbi.overhead");
+    REQUIRE(DbiOverhead != nullptr);
     Function *NegativeTiming = M->getFunction("morok.negative.timing");
     REQUIRE(NegativeTiming != nullptr);
     Function *Ctor = M->getFunction("morok.antihook");
@@ -18170,6 +18233,11 @@ entry:
         findNamedInstruction(*Ctor, "morok.corroborate.sandbox.changed");
     REQUIRE(SandboxChanged != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(SandboxChanged,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *DbiOverheadChanged = findNamedInstruction(
+        *Ctor, "morok.corroborate.dbi.overhead.changed");
+    REQUIRE(DbiOverheadChanged != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(DbiOverheadChanged,
                                            "morok.seal.fold.anti_debug"));
     Instruction *NegativeTimingChanged = findNamedInstruction(
         *Ctor, "morok.corroborate.negative.timing.changed");
@@ -18234,6 +18302,9 @@ entry:
     REQUIRE(WriteWatchUnavailable != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(WriteWatchUnavailable,
                                            "morok.seal.fold.anti_debug"));
+    CHECK(countNamedInstructions(
+              *DbiOverhead, "morok.antihook.dbi.overhead.sample.anomaly") >= 1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.gate.dbi.overhead.soft") >= 1u);
     CHECK(countNamedInstructions(*NegativeTiming,
                                  "morok.negative.timing.slow") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.negative.modules.extra") >= 1u);
