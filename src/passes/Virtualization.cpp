@@ -28,6 +28,7 @@
 
 #include "morok/passes/Virtualization.hpp"
 
+#include "morok/ir/Annotations.hpp"
 #include "morok/ir/InstUtil.hpp"
 #include "morok/ir/Reg2Mem.hpp"
 #include "morok/passes/RuntimeSeal.hpp"
@@ -239,6 +240,14 @@ bool candidateFunctionAllowed(const Function &F,
     if (!generatedFunction(F))
         return true;
     return Params.include_protection_helpers && generatedProtectionFunction(F);
+}
+
+bool markedUserVmPriority(const Function &F) {
+    if (generatedFunction(F))
+        return false;
+    return ir::hasAnnotation(F, "morok.vm.priority") ||
+           ir::hasAnnotation(F, "sensitive") || ir::hasAnnotation(F, "vm") ||
+           ir::hasAnnotation(F, "virtualization");
 }
 
 bool hasNaturalLoop(Function &F) {
@@ -2669,6 +2678,13 @@ bool virtualizeModule(Module &M, const VirtualizationParams &Params,
     for (Function &F : M)
         if (!F.isDeclaration() && candidateFunctionAllowed(F, Params))
             Worklist.push_back(&F);
+    if (Params.prioritize_marked_user_functions)
+        std::stable_sort(Worklist.begin(), Worklist.end(),
+                         [](const Function *A, const Function *B) {
+                             const bool APriority = markedUserVmPriority(*A);
+                             const bool BPriority = markedUserVmPriority(*B);
+                             return APriority && !BPriority;
+                         });
 
     // When user-call lifting is enabled, never lift a function that is part of
     // a recursion cycle — recursion through the interpreter traps.  Computed

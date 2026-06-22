@@ -35,6 +35,9 @@ struct VirtualizationParams {
     /// previously rejected outright for containing any call, while staying clear
     /// of the ABI/indirect-dispatch surface that is risky to virtualize.
     bool allow_internal_user_calls = false;
+    /// Prefer user functions explicitly marked for VM priority before ordinary
+    /// candidates consume the per-module lifting budget.
+    bool prioritize_marked_user_functions = false;
 };
 
 /// Lift a single eligible function into a private threaded bytecode VM helper.

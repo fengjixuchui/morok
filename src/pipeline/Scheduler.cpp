@@ -275,6 +275,89 @@ bool isUserSensitiveFunction(const Function &F) {
     return ir::hasAnnotation(F, "sensitive");
 }
 
+bool virtualizationConfigDiffers(const config::VirtualizationConfig &A,
+                                 const config::VirtualizationConfig &B) {
+    return A.enabled != B.enabled || A.probability != B.probability ||
+           A.max_functions != B.max_functions ||
+           A.max_instructions != B.max_instructions ||
+           A.max_registers != B.max_registers;
+}
+
+bool vmEnabledForFunction(const Function &F,
+                          const config::VirtualizationConfig &C) {
+    if (ir::hasAnnotation(F, "novm") ||
+        ir::hasAnnotation(F, "novirtualization"))
+        return false;
+    if (ir::hasAnnotation(F, "vm") || ir::hasAnnotation(F, "virtualization"))
+        return true;
+    return C.enabled.value_or(false);
+}
+
+struct UserVmPriorityPlan {
+    bool has_target = false;
+    std::uint32_t target_count = 0;
+    std::uint32_t probability = 0;
+    std::uint32_t max_functions = 0;
+    std::uint32_t max_instructions = 0;
+    std::uint32_t max_registers = 0;
+};
+
+UserVmPriorityPlan
+markUserVmPriorityFunctions(Module &M, const config::Config &Config,
+                            StringRef ModuleName,
+                            const config::Demangler &Demangle) {
+    UserVmPriorityPlan Plan;
+
+    for (Function &F : M) {
+        if (F.isDeclaration() || F.getName().starts_with("morok."))
+            continue;
+
+        const config::PassConfig Eff =
+            config::resolve(Config, ModuleName, F.getName(), Demangle);
+        if (!vmEnabledForFunction(F, Eff.virtualization))
+            continue;
+
+        const bool PolicyTargetsVm = virtualizationConfigDiffers(
+            Eff.virtualization, Config.passes.virtualization);
+        const bool SourceTargetsVm = isUserSensitiveFunction(F) ||
+                                     ir::hasAnnotation(F, "vm") ||
+                                     ir::hasAnnotation(F, "virtualization");
+        if (!PolicyTargetsVm && !SourceTargetsVm)
+            continue;
+
+        const std::uint32_t TargetProbability =
+            Eff.virtualization.probability.value_or(20);
+        const std::uint32_t TargetMaxFunctions =
+            Eff.virtualization.max_functions.value_or(1);
+        if (TargetProbability == 0 || TargetMaxFunctions == 0)
+            continue;
+
+        ir::addAnnotation(F, "morok.vm.priority");
+        Plan.has_target = true;
+        ++Plan.target_count;
+        Plan.probability = std::max(Plan.probability, TargetProbability);
+        Plan.max_functions = std::max(Plan.max_functions, TargetMaxFunctions);
+        Plan.max_instructions =
+            std::max(Plan.max_instructions,
+                     Eff.virtualization.max_instructions.value_or(
+                         passes::VirtualizationParams{}.max_instructions));
+        Plan.max_registers =
+            std::max(Plan.max_registers,
+                     Eff.virtualization.max_registers.value_or(
+                         passes::VirtualizationParams{}.max_registers));
+    }
+
+    if (Plan.has_target) {
+        Plan.probability = std::max<std::uint32_t>(Plan.probability, 100);
+        Plan.max_functions =
+            std::max<std::uint32_t>(Plan.max_functions, Plan.target_count);
+        Plan.max_instructions =
+            std::max<std::uint32_t>(Plan.max_instructions, 1024);
+        Plan.max_registers = std::max<std::uint32_t>(Plan.max_registers, 255);
+    }
+    return Plan;
+}
+
 std::uint32_t raised(std::uint32_t Value, std::uint32_t Floor, bool Sensitive) {
     return Sensitive ? std::max(Value, Floor) : Value;
 }
@@ -450,6 +533,10 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     const ModuleSize InitialSize = measureModule(M);
     const bool InitialModuleGrowthOk = moduleGrowthOk(InitialSize);
     bool changed = false;
+    const UserVmPriorityPlan InitialVmPriority =
+        InitialModuleGrowthOk
+            ? markUserVmPriorityFunctions(M, config_, moduleName, demangle)
+            : UserVmPriorityPlan{};
 
     if (InitialModuleGrowthOk &&
         config_.passes.external_secret_binding.enabled.value_or(false)) {
@@ -509,7 +596,8 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
     // generated checker helpers once the anti-analysis/integrity passes have
     // emitted them.
     if (InitialModuleGrowthOk &&
-        config_.passes.virtualization.enabled.value_or(false)) {
+        (config_.passes.virtualization.enabled.value_or(false) ||
+         InitialVmPriority.has_target)) {
         passes::VirtualizationParams p;
         p.probability = config_.passes.virtualization.probability.value_or(20);
         p.max_functions =
@@ -518,6 +606,17 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             config_.passes.virtualization.max_instructions.value_or(64);
         p.max_registers =
             config_.passes.virtualization.max_registers.value_or(96);
+        if (InitialVmPriority.has_target) {
+            p.probability =
+                std::max(p.probability, InitialVmPriority.probability);
+            p.max_functions =
+                std::max(p.max_functions, InitialVmPriority.max_functions);
+            p.max_instructions = std::max(p.max_instructions,
+                                          InitialVmPriority.max_instructions);
+            p.max_registers =
+                std::max(p.max_registers, InitialVmPriority.max_registers);
+            p.prioritize_marked_user_functions = true;
+        }
         // Lift trust-boundary functions that contain only DIRECT calls to
         // defined internal helpers (e.g. a license verdict computer), not just
         // pure leaf math.  virtualizeModule guards this with a call-graph SCC

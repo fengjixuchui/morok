@@ -1795,6 +1795,48 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("MorokPass prioritizes policy-marked keygen cores for VM lifting") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+define i32 @decoy_math(i32 %x) {
+entry:
+  %a = add i32 %x, 17
+  %b = xor i32 %a, 1431655765
+  %c = mul i32 %b, 3
+  ret i32 %c
+}
+
+define i32 @generate_keys(i32 %seed, i32 %tier) {
+entry:
+  %mix0 = add i32 %seed, -1640531527
+  %mix1 = xor i32 %mix0, %tier
+  %mix2 = mul i32 %mix1, 1103515245
+  %mix3 = lshr i32 %mix2, 7
+  %out = xor i32 %mix2, %mix3
+  ret i32 %out
+}
+)ir");
+
+    morok::config::Config cfg;
+    cfg.seed = 715;
+    morok::config::Policy keygenPolicy;
+    keygenPolicy.func_regex = "^generate_keys$";
+    keygenPolicy.overrides.virtualization.enabled = true;
+    cfg.policies.push_back(std::move(keygenPolicy));
+
+    ModuleAnalysisManager AM;
+    morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+    Function *Core = M->getFunction("generate_keys");
+    REQUIRE(Core);
+    CHECK(M->getFunction("morok.vm.generate_keys.exec") != nullptr);
+    CHECK(countCallsTo(*Core, "morok.vm.generate_keys.exec") == 1u);
+    CHECK(M->getFunction("morok.vm.decoy_math.exec") == nullptr);
+    CHECK(countGlobals(*M, "morok.vm.bytecode.generate_keys") == 1u);
+    CHECK(countGlobals(*M, "morok.vm.bytecode.decoy_math") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("MorokPass keeps anti-debug and checksum helpers native") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
