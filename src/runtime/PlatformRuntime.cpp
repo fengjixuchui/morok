@@ -14,6 +14,8 @@
 #include "llvm/IR/Type.h"
 
 #include <array>
+#include <atomic>
+#include <string>
 #include <vector>
 
 using namespace llvm;
@@ -22,8 +24,10 @@ namespace morok::runtime {
 
 IntegerType *platformWordTy(Module &M) {
     unsigned Bits = M.getDataLayout().getPointerSizeInBits(0);
-    if (Bits == 0)
-        Bits = 64;
+    if (Bits == 0) {
+        Triple TT(M.getTargetTriple());
+        Bits = TT.isArch32Bit() ? 32 : 64;
+    }
     return IntegerType::get(M.getContext(), Bits);
 }
 
@@ -146,7 +150,227 @@ unsigned directSyscallPolicy(const Module &M) {
 bool useDirectLinuxSyscalls(const Module &M, const Triple &TT) {
     if (directSyscallPolicy(M) == 2u)
         return false;
-    return TT.isOSLinux() && TT.getArch() == Triple::x86_64;
+    if (!TT.isOSLinux())
+        return false;
+    return TT.getArch() == Triple::x86_64 ||
+           TT.getArch() == Triple::aarch64 || TT.getArch() == Triple::arm;
+}
+
+static std::uint64_t mix64(std::uint64_t X) {
+    X ^= X >> 30;
+    X *= 0xbf58476d1ce4e5b9ULL;
+    X ^= X >> 27;
+    X *= 0x94d049bb133111ebULL;
+    X ^= X >> 31;
+    return X;
+}
+
+static std::uint64_t hashString(StringRef S) {
+    std::uint64_t H = 0xcbf29ce484222325ULL;
+    for (char C : S) {
+        H ^= static_cast<unsigned char>(C);
+        H *= 0x100000001b3ULL;
+    }
+    return H;
+}
+
+static std::uint64_t wordMask(IntegerType *IP) {
+    unsigned Bits = IP->getBitWidth();
+    return Bits >= 64 ? ~0ULL : ((1ULL << Bits) - 1ULL);
+}
+
+static ConstantInt *wordConstant(IntegerType *IP, std::uint64_t V) {
+    return ConstantInt::get(IP, V & wordMask(IP));
+}
+
+static unsigned nextLinuxRawSyscallSite(Module &M) {
+    static std::atomic_uint SiteCounter{0};
+    (void)M;
+    return SiteCounter.fetch_add(1, std::memory_order_relaxed);
+}
+
+static std::string rawSysName(unsigned Site, StringRef Role) {
+    return (Twine("morok.linux.rawsys.") + Role + "." + Twine(Site)).str();
+}
+
+static AllocaInst *emitVolatileWordSlot(IRBuilder<> &B, IntegerType *IP,
+                                        std::uint64_t V,
+                                        const Twine &Name) {
+    auto *Slot = B.CreateAlloca(IP, nullptr, Name);
+    Slot->setMetadata(LLVMContext::MD_dbg, nullptr);
+    auto *Store = B.CreateStore(wordConstant(IP, V), Slot);
+    Store->setMetadata(LLVMContext::MD_dbg, nullptr);
+    Store->setVolatile(true);
+    return Slot;
+}
+
+static LoadInst *emitVolatileWordLoad(IRBuilder<> &B, IntegerType *IP,
+                                      AllocaInst *Slot, const Twine &Name) {
+    auto *Load = B.CreateLoad(IP, Slot, Name);
+    Load->setMetadata(LLVMContext::MD_dbg, nullptr);
+    Load->setVolatile(true);
+    return Load;
+}
+
+template <typename InstT> static InstT *stripDbg(InstT *I) {
+    if (I)
+        I->setMetadata(LLVMContext::MD_dbg, nullptr);
+    return I;
+}
+
+static Value *stripDbgValue(Value *V) {
+    if (auto *I = dyn_cast<Instruction>(V))
+        I->setMetadata(LLVMContext::MD_dbg, nullptr);
+    return V;
+}
+
+static Function *createLinuxNrMaterializer(Module &M, IntegerType *IP,
+                                           std::uint64_t Enc,
+                                           std::uint64_t Key,
+                                           std::uint64_t Guard,
+                                           std::uint64_t Check,
+                                           unsigned Site) {
+    LLVMContext &Ctx = M.getContext();
+    auto *Fn = Function::Create(FunctionType::get(IP, false),
+                                GlobalValue::InternalLinkage,
+                                rawSysName(Site, "nr.materialize"), &M);
+    Fn->setDSOLocal(true);
+
+    BasicBlock *Entry = BasicBlock::Create(Ctx, rawSysName(Site, "entry"), Fn);
+    BasicBlock *Decode =
+        BasicBlock::Create(Ctx, rawSysName(Site, "decode"), Fn);
+    BasicBlock *Real = BasicBlock::Create(Ctx, rawSysName(Site, "real"), Fn);
+    BasicBlock *Noise = BasicBlock::Create(Ctx, rawSysName(Site, "noise"), Fn);
+
+    IRBuilder<> EB(Entry);
+    EB.SetCurrentDebugLocation(DebugLoc());
+    AllocaInst *EncSlot =
+        emitVolatileWordSlot(EB, IP, Enc, rawSysName(Site, "nr.enc"));
+    AllocaInst *KeySlot =
+        emitVolatileWordSlot(EB, IP, Key, rawSysName(Site, "nr.key"));
+    AllocaInst *GuardSlot =
+        emitVolatileWordSlot(EB, IP, Guard, rawSysName(Site, "nr.guard"));
+    stripDbg(EB.CreateBr(Decode));
+
+    IRBuilder<> DB(Decode);
+    DB.SetCurrentDebugLocation(DebugLoc());
+    Value *EncV =
+        emitVolatileWordLoad(DB, IP, EncSlot, rawSysName(Site, "enc"));
+    Value *KeyV =
+        emitVolatileWordLoad(DB, IP, KeySlot, rawSysName(Site, "key"));
+    Value *GuardV =
+        emitVolatileWordLoad(DB, IP, GuardSlot, rawSysName(Site, "guard"));
+    Value *Nr =
+        stripDbgValue(DB.CreateXor(EncV, KeyV, rawSysName(Site, "nr.dec")));
+    Value *OpaqueNr = stripDbgValue(
+        DB.CreateXor(EncV, KeyV, rawSysName(Site, "opaque.nr")));
+    Value *Opaque = stripDbgValue(
+        DB.CreateXor(OpaqueNr, GuardV, rawSysName(Site, "opaque.mix")));
+    Value *Ok = stripDbgValue(DB.CreateICmpEQ(
+        Opaque, wordConstant(IP, Check), rawSysName(Site, "opaque.ok")));
+    stripDbg(DB.CreateCondBr(Ok, Real, Noise));
+
+    IRBuilder<> RB(Real);
+    RB.SetCurrentDebugLocation(DebugLoc());
+    stripDbg(RB.CreateRet(Nr));
+
+    IRBuilder<> NB(Noise);
+    NB.SetCurrentDebugLocation(DebugLoc());
+    Value *NoiseRc =
+        stripDbgValue(NB.CreateXor(Nr, GuardV, rawSysName(Site, "noise.rc")));
+    stripDbg(NB.CreateRet(NoiseRc));
+    return Fn;
+}
+
+static Value *emitLinuxDirectSyscallAsm(IRBuilder<> &B, Module &M,
+                                        const Triple &TT, Value *Nr,
+                                        const std::array<Value *, 6> &A,
+                                        unsigned Variant,
+                                        const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    std::vector<Type *> Params(7, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *Syscall = nullptr;
+    switch (TT.getArch()) {
+    case Triple::x86_64: {
+        StringRef Body = "syscall";
+        if (Variant % 3 == 1)
+            Body = "movq %r10, %r10\nsyscall";
+        else if (Variant % 3 == 2)
+            Body = "leaq 0(%r8), %r8\nsyscall";
+        Syscall = InlineAsm::get(
+            AsmTy, Body,
+            "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
+            "~{memory},~{dirflag},~{fpsr},~{flags}",
+            /*hasSideEffects=*/true);
+        break;
+    }
+    case Triple::aarch64: {
+        StringRef Body = "svc #0";
+        if (Variant % 3 == 1)
+            Body = "mov x0, x0\nsvc #0";
+        else if (Variant % 3 == 2)
+            Body = "orr x1, x1, xzr\nsvc #0";
+        Syscall = InlineAsm::get(
+            AsmTy, Body,
+            "={x0},{x8},0,{x1},{x2},{x3},{x4},{x5},~{memory},~{cc}",
+            /*hasSideEffects=*/true);
+        break;
+    }
+    case Triple::arm: {
+        StringRef Body = "svc #0";
+        if (Variant % 3 == 1)
+            Body = "mov r0, r0\nsvc #0";
+        else if (Variant % 3 == 2)
+            Body = "nop\nsvc #0";
+        Syscall = InlineAsm::get(
+            AsmTy, Body,
+            "={r0},{r7},0,{r1},{r2},{r3},{r4},{r5},~{memory},~{cc}",
+            /*hasSideEffects=*/true);
+        break;
+    }
+    default:
+        return nullptr;
+    }
+    return stripDbgValue(B.CreateCall(
+        AsmTy, Syscall, {Nr, A[0], A[1], A[2], A[3], A[4], A[5]}, Name));
+}
+
+static Value *emitHardenedLinuxSyscall(IRBuilder<> &B, Module &M,
+                                       const Triple &TT, std::uint32_t Number,
+                                       const std::array<Value *, 6> &SysArgs,
+                                       const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    DebugLoc SavedDL = B.getCurrentDebugLocation();
+    B.SetCurrentDebugLocation(DebugLoc());
+    unsigned Site = nextLinuxRawSyscallSite(M);
+    std::string PublicName = Name.str();
+    std::uint64_t Mask = wordMask(IP);
+    std::uint64_t Plain = static_cast<std::uint64_t>(Number) & Mask;
+    std::uint64_t Seed = mix64(static_cast<std::uint64_t>(Site) ^
+                               (Plain << 17) ^
+                               hashString(PublicName) ^
+                               hashString(M.getModuleIdentifier()));
+    std::uint64_t Key = mix64(Seed ^ 0xa0761d6478bd642fULL) & Mask;
+    if (Key == 0 || Key == Plain)
+        Key = (Key ^ 0x7f4a7c159e3779b9ULL) & Mask;
+    if (Key == 0 || Key == Plain)
+        Key = (Key + 0x9e3779b97f4a7c15ULL) & Mask;
+    std::uint64_t Enc = (Plain ^ Key) & Mask;
+    std::uint64_t Check = mix64(Seed ^ 0xe7037ed1a0b428dbULL) & Mask;
+    if (Check == Plain)
+        Check = (Check ^ 0xd1b54a32d192ed03ULL) & Mask;
+    std::uint64_t Guard = (Enc ^ Key ^ Check) & Mask;
+
+    Function *Materializer =
+        createLinuxNrMaterializer(M, IP, Enc, Key, Guard, Check, Site);
+    Value *Nr = stripDbgValue(B.CreateCall(Materializer->getFunctionType(),
+                                           Materializer, {},
+                                           rawSysName(Site, "nr.call")));
+    Value *Result =
+        emitLinuxDirectSyscallAsm(B, M, TT, Nr, SysArgs, Site, PublicName);
+    B.SetCurrentDebugLocation(SavedDL);
+    return Result;
 }
 
 bool lookupLinuxCoreSyscalls(const Triple &TT, LinuxCoreSyscalls &Out) {
@@ -217,20 +441,8 @@ Value *emitLinuxSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
         SysArgs[I++] = toSyscallArg(B, Arg);
     }
 
-    if (useDirectLinuxSyscalls(M, TT)) {
-        std::vector<Type *> Params(7, IP);
-        auto *AsmTy = FunctionType::get(IP, Params, false);
-        InlineAsm *Syscall = InlineAsm::get(
-            AsmTy, "syscall",
-            "={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},"
-            "~{memory},~{dirflag},~{fpsr},~{flags}",
-            /*hasSideEffects=*/true);
-        return B.CreateCall(AsmTy, Syscall,
-                            {ConstantInt::get(IP, Number), SysArgs[0],
-                             SysArgs[1], SysArgs[2], SysArgs[3], SysArgs[4],
-                             SysArgs[5]},
-                            Name);
-    }
+    if (useDirectLinuxSyscalls(M, TT))
+        return emitHardenedLinuxSyscall(B, M, TT, Number, SysArgs, Name);
 
     return B.CreateCall(syscallDecl(M),
                         {ConstantInt::get(IP, Number), SysArgs[0], SysArgs[1],

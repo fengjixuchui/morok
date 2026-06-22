@@ -155,6 +155,14 @@ std::size_t countNamedAllocas(Function &F, StringRef prefix) {
     return n;
 }
 
+std::size_t countNamedAllocas(Module &M, StringRef prefix) {
+    std::size_t n = 0;
+    for (Function &F : M)
+        if (!F.isDeclaration())
+            n += countNamedAllocas(F, prefix);
+    return n;
+}
+
 std::size_t countNamedAllocas(BasicBlock &BB, StringRef prefix) {
     std::size_t n = 0;
     for (Instruction &I : BB)
@@ -197,6 +205,14 @@ std::size_t countNamedInstructions(Function &F, StringRef prefix) {
     for (Instruction &I : instructions(F))
         if (I.getName().starts_with(prefix))
             ++n;
+    return n;
+}
+
+std::size_t countNamedInstructions(Module &M, StringRef prefix) {
+    std::size_t n = 0;
+    for (Function &F : M)
+        if (!F.isDeclaration())
+            n += countNamedInstructions(F, prefix);
     return n;
 }
 
@@ -613,19 +629,24 @@ bool namedInstructionUsesConstant(Function &F, StringRef name,
     return false;
 }
 
-std::vector<std::uint64_t> namedCallFirstArgConstants(Function &F,
-                                                      StringRef name) {
+std::vector<std::uint64_t> namedCallArgConstants(Function &F, StringRef name,
+                                                 unsigned ArgIndex) {
     std::vector<std::uint64_t> values;
     for (Instruction &I : instructions(F)) {
         if (!I.getName().starts_with(name))
             continue;
         auto *CB = dyn_cast<CallBase>(&I);
-        if (!CB || CB->arg_size() == 0)
+        if (!CB || CB->arg_size() <= ArgIndex)
             continue;
-        if (auto *CI = dyn_cast<ConstantInt>(CB->getArgOperand(0)))
+        if (auto *CI = dyn_cast<ConstantInt>(CB->getArgOperand(ArgIndex)))
             values.push_back(CI->getZExtValue());
     }
     return values;
+}
+
+std::vector<std::uint64_t> namedCallFirstArgConstants(Function &F,
+                                                      StringRef name) {
+    return namedCallArgConstants(F, name, 0);
 }
 
 bool constantContainsInt(const Constant *C, std::uint64_t value) {
@@ -1516,6 +1537,10 @@ TEST_CASE("PlatformRuntime emits direct Linux syscalls without libc import") {
     CHECK(countInlineAsmBodies(*F, "syscall") == 1u);
     CHECK(countInlineAsmConstraints(*F, "~{rcx}") == 1u);
     CHECK(countNamedInstructions(*F, "morok.platform.getpid") == 1u);
+    CHECK(countNamedAllocas(M, "morok.linux.rawsys.nr.") == 3u);
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.nr.dec") == 1u);
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.opaque.ok") == 1u);
+    CHECK_FALSE(functionHasConstantInt(*F, 39));
     CHECK(M.getFunction("syscall") == nullptr);
     CHECK_FALSE(verifyModule(M, &errs()));
 }
@@ -1562,6 +1587,55 @@ TEST_CASE("PlatformRuntime direct_syscalls=auto keeps the direct path") {
     B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
 
     CHECK(hasInlineAsmCall(*F));
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.nr.dec") == 1u);
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime emits direct Linux svc syscall on aarch64") {
+    LLVMContext ctx;
+    Module M("platform-runtime-linux-aarch64", ctx);
+    M.setTargetTriple(Triple("aarch64-unknown-linux-gnu"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 172, {}, "morok.platform.getpid");
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countInlineAsmBodies(*F, "svc #0") == 1u);
+    CHECK(countInlineAsmConstraints(*F, "{x8}") == 1u);
+    CHECK(countNamedInstructions(*F, "morok.platform.getpid") == 1u);
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.nr.dec") == 1u);
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.opaque.ok") == 1u);
+    CHECK_FALSE(functionHasConstantInt(*F, 172));
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime emits direct Linux svc syscall on arm") {
+    LLVMContext ctx;
+    Module M("platform-runtime-linux-arm", ctx);
+    M.setTargetTriple(Triple("armv7-unknown-linux-gnueabihf"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+
+    Value *Rc = morok::runtime::emitLinuxSyscall(
+        B, M, Triple(M.getTargetTriple()), 20, {}, "morok.platform.getpid");
+    B.CreateRet(B.CreateTruncOrBitCast(Rc, I32));
+
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countInlineAsmBodies(*F, "svc #0") == 1u);
+    CHECK(countInlineAsmConstraints(*F, "{r7}") == 1u);
+    CHECK(countNamedInstructions(*F, "morok.platform.getpid") == 1u);
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.nr.dec") == 1u);
+    CHECK(countNamedInstructions(M, "morok.linux.rawsys.opaque.ok") == 1u);
+    CHECK_FALSE(functionHasConstantInt(*F, 20));
     CHECK(M.getFunction("syscall") == nullptr);
     CHECK_FALSE(verifyModule(M, &errs()));
 }
@@ -1813,7 +1887,7 @@ TEST_CASE(
     "PlatformRuntime falls back to libc syscall on unsupported Linux arch") {
     LLVMContext ctx;
     Module M("platform-runtime-linux-fallback", ctx);
-    M.setTargetTriple(Triple("aarch64-unknown-linux-gnu"));
+    M.setTargetTriple(Triple("riscv64-unknown-linux-gnu"));
     auto *IP = morok::runtime::platformWordTy(M);
     auto *F = Function::Create(FunctionType::get(IP, false),
                                GlobalValue::ExternalLinkage, "probe", M);
@@ -16987,7 +17061,8 @@ entry:
                                      "morok.antihook.loader.e_entry.ptr",
                                      24u));
     CHECK(functionHasConstantInt(*Loader, 9u)); // AT_ENTRY
-    CHECK(functionHasConstantInt(*Loader, 135u)); // x86_64 personality
+    CHECK_FALSE(functionHasConstantInt(*Loader,
+                                       135u)); // x86_64 personality syscall NR
     CHECK(functionHasConstantInt(*Loader, 0x40000u)); // ADDR_NO_RANDOMIZE
     CHECK(countNamedInstructions(*GotRecheck,
                                  "morok.antihook.got.recheck.diff") >= 1u);
@@ -17571,7 +17646,8 @@ entry:
         CHECK(namedGepUsesConstantOffset(*Loader,
                                          "morok.antihook.loader.e_entry.ptr",
                                          24u));
-        CHECK(functionHasConstantInt(*Loader, 136u)); // ARM personality
+        CHECK_FALSE(functionHasConstantInt(*Loader,
+                                           136u)); // ARM personality syscall NR
         CHECK_FALSE(verifyModule(*M, &errs()));
     }
 }
@@ -17615,7 +17691,8 @@ entry:
     CHECK(countCallsTo(*Ctor, "morok.antihook.loader.auxv") == 1u);
     CHECK(countNamedInstructions(*Loader,
                                  "morok.antihook.loader.atentry") >= 1u);
-    CHECK(functionHasConstantInt(*Loader, 92u)); // aarch64 personality
+    CHECK_FALSE(functionHasConstantInt(*Loader,
+                                       92u)); // aarch64 personality syscall NR
     CHECK(functionHasConstantInt(*Loader, 0x40000u)); // ADDR_NO_RANDOMIZE
     CHECK(M->getFunction("personality") == nullptr);
     CHECK(countNamedInstructions(*Probe,
@@ -18316,7 +18393,7 @@ entry:
     CHECK(countNamedInstructions(*Stat, "morok.antidbg.stat.coherence.anomaly") >=
           1u);
     CHECK(countNamedInstructions(*Stat, "morok.seal.fold.anti_debug") == 0u);
-    CHECK(functionHasConstantInt(*Stat, 110u)); // getppid
+    CHECK_FALSE(functionHasConstantInt(*Stat, 110u)); // getppid syscall NR
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.readlink") >= 1u);
     CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.enough",
                                    7u));
@@ -18490,9 +18567,9 @@ entry:
               *Parent, "morok.antidbg.parent.status.ppid.value") >= 1u);
     CHECK(countNamedInstructions(*Parent,
                                  "morok.antidbg.parent.ancestry.hit") >= 1u);
-    CHECK(functionHasConstantInt(*Parent, 110u)); // getppid
-    CHECK(functionHasConstantInt(*Parent, 257u)); // openat
-    CHECK(functionHasConstantInt(*Parent, 267u)); // readlinkat
+    CHECK(countNamedInstructions(*M, "morok.linux.rawsys.nr.dec") >= 1u);
+    CHECK_FALSE(functionHasConstantInt(*Parent, 257u)); // openat syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 267u)); // readlinkat syscall NR
     CHECK(countNamedInstructions(*AntiDbg,
                                  "morok.antidbg.harden.dumpable") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg,
@@ -18514,8 +18591,8 @@ entry:
     CHECK(countNamedInstructions(*Rr, "morok.antidbg.rr.parent.comm.rr") >= 1u);
     CHECK(countNamedInstructions(*Rr,
                                  "morok.antidbg.rr.parent.comm.detach") >= 1u);
-    CHECK(functionHasConstantInt(*Rr, 298u)); // perf_event_open
-    CHECK(functionHasConstantInt(*Rr, 228u)); // clock_gettime
+    CHECK_FALSE(functionHasConstantInt(*Rr, 298u)); // perf_event_open syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Rr, 228u)); // clock_gettime syscall NR
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.ptracer.old") ==
           0u);
     CHECK(storesNamedValueToGlobalPrefix(*AntiDbg, "morok.antidbg.dr.active",
@@ -18671,15 +18748,12 @@ entry:
               *AntiDbg, "morok.antidbg.seccomp.sigsys.delta") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg,
                                  "morok.antidbg.seccomp.trace.raise") >= 1u);
-    auto X86SigsysSentinels = namedCallFirstArgConstants(
-        *AntiDbg, "morok.antidbg.seccomp.sigsys.raise");
-    auto X86TraceSentinels = namedCallFirstArgConstants(
-        *AntiDbg, "morok.antidbg.seccomp.trace.raise");
-    REQUIRE(X86SigsysSentinels.size() == 1u);
-    REQUIRE(X86TraceSentinels.size() == 1u);
-    CHECK(X86SigsysSentinels[0] == X86TraceSentinels[0]);
-    CHECK(X86SigsysSentinels[0] >= 0x3fff0000u);
-    CHECK(X86SigsysSentinels[0] < 0x3fff1000u);
+    CHECK(namedCallFirstArgConstants(
+              *AntiDbg, "morok.antidbg.seccomp.sigsys.raise")
+              .empty());
+    CHECK(namedCallFirstArgConstants(*AntiDbg,
+                                     "morok.antidbg.seccomp.trace.raise")
+              .empty());
     CHECK(countNamedInstructions(*AntiDbg,
                                  "morok.antidbg.seccomp.traced") >= 1u);
     CHECK(namedInstructionPrecedes(*AntiDbg,
@@ -18749,7 +18823,7 @@ entry:
     CHECK(functionHasConstantInt(*AntiDbg, 31u));       // SIGSYS
     CHECK(functionHasConstantInt(*AntiDbg, 0x00030000)); // SECCOMP_RET_TRAP
     CHECK(functionHasConstantInt(*AntiDbg, 0x7ff00000)); // SECCOMP_RET_TRACE
-    CHECK(functionHasConstantInt(*AntiDbg, 317u));       // seccomp syscall
+    CHECK_FALSE(functionHasConstantInt(*AntiDbg, 317u)); // seccomp syscall NR
     CHECK(functionHasConstantInt(*AntiDbg, 0xC000003E)); // AUDIT_ARCH_X86_64
     CHECK(functionHasConstantInt(*AntiDbg, 0x40000000)); // __X32_SYSCALL_BIT
     BasicBlock *DrChild = nullptr;
@@ -18966,26 +19040,23 @@ define i32 @main() { ret i32 0 }
           1u);
     CHECK(countNamedInstructions(*Stat, "morok.antidbg.stat.coherence.anomaly") >=
           1u);
-    CHECK(functionHasConstantInt(*Stat, 173u));   // getppid
-    CHECK(functionHasConstantInt(*Parent, 173u)); // getppid
-    CHECK(functionHasConstantInt(*Parent, 56u));  // openat
-    CHECK(functionHasConstantInt(*Parent, 78u));  // readlinkat
+    CHECK_FALSE(functionHasConstantInt(*Stat, 173u));   // getppid syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 173u)); // getppid syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 56u));  // openat syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 78u));  // readlinkat syscall NR
     CHECK(countNamedInstructions(*Rr,
                                  "morok.antidbg.rr.perf.hw.denied.lowpolicy") >=
           1u);
     CHECK(countNamedInstructions(*Rr, "morok.antidbg.rr.clock.raw.delta") >= 1u);
     CHECK(countNamedInstructions(*Rr, "morok.antidbg.rr.parent.comm.hit") >= 1u);
-    CHECK(functionHasConstantInt(*Rr, 241u)); // perf_event_open
-    CHECK(functionHasConstantInt(*Rr, 113u)); // clock_gettime
-    auto Aarch64SigsysSentinels = namedCallFirstArgConstants(
-        *Ctor, "morok.antidbg.seccomp.sigsys.raise");
-    auto Aarch64TraceSentinels = namedCallFirstArgConstants(
-        *Ctor, "morok.antidbg.seccomp.trace.raise");
-    REQUIRE(Aarch64SigsysSentinels.size() == 1u);
-    REQUIRE(Aarch64TraceSentinels.size() == 1u);
-    CHECK(Aarch64SigsysSentinels[0] == Aarch64TraceSentinels[0]);
-    CHECK(Aarch64SigsysSentinels[0] >= 0x3fff0000u);
-    CHECK(Aarch64SigsysSentinels[0] < 0x3fff1000u);
+    CHECK_FALSE(functionHasConstantInt(*Rr, 241u)); // perf_event_open syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Rr, 113u)); // clock_gettime syscall NR
+    CHECK(namedCallFirstArgConstants(
+              *Ctor, "morok.antidbg.seccomp.sigsys.raise")
+              .empty());
+    CHECK(namedCallFirstArgConstants(*Ctor,
+                                     "morok.antidbg.seccomp.trace.raise")
+              .empty());
     CHECK(countNamedInstructions(
               *Ctor, "morok.antidbg.seccomp.sigsys.anti_debug.next") >= 1u);
     CHECK(countNamedInstructions(
@@ -19017,14 +19088,17 @@ define i32 @main() { ret i32 0 }
                                  "morok.antidbg.harden.dumpable.get") >= 1u);
     CHECK(countNamedInstructions(
               *Ctor, "morok.antidbg.harden.dumpable.rlimit_core") >= 1u);
-    CHECK(functionHasConstantInt(*Ctor, 134u));       // rt_sigaction syscall
-    CHECK(functionHasConstantInt(*Ctor, 164u));       // aarch64 setrlimit syscall
+    CHECK_FALSE(functionHasConstantInt(*Ctor, 134u)); // rt_sigaction syscall NR
+    CHECK(countNamedInstructions(*M, "morok.linux.rawsys.nr.dec") >= 1u);
     CHECK(functionHasConstantInt(*Ctor, 92u));        // personality syscall
     CHECK(functionHasConstantInt(*Ctor, 0x00040000)); // ADDR_NO_RANDOMIZE
-    CHECK(functionHasConstantInt(*Sigmask, 135u));    // rt_sigprocmask syscall
-    CHECK(functionHasConstantInt(*PtraceStop, 160u)); // aarch64 uname syscall
-    CHECK(functionHasConstantInt(*Ctor, 277u));       // seccomp syscall
-    CHECK(functionHasConstantInt(*FaultCf, 132u));    // sigaltstack syscall
+    CHECK_FALSE(functionHasConstantInt(*Sigmask,
+                                       135u)); // rt_sigprocmask syscall NR
+    CHECK_FALSE(functionHasConstantInt(*PtraceStop,
+                                       160u)); // aarch64 uname syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Ctor, 277u)); // seccomp syscall NR
+    CHECK_FALSE(functionHasConstantInt(*FaultCf,
+                                       132u)); // sigaltstack syscall NR
     CHECK(functionHasConstantInt(*Ctor, 0xC00000B7)); // AUDIT_ARCH_AARCH64
     CHECK(functionHasConstantInt(*Ctor, 0x00030000)); // SECCOMP_RET_TRAP
     CHECK(functionHasConstantInt(*Ctor, 0x7ff00000)); // SECCOMP_RET_TRACE
@@ -19034,7 +19108,7 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("prctl") == nullptr);
     CHECK(M->getFunction("personality") == nullptr);
     CHECK(M->getFunction("setrlimit") == nullptr);
-    CHECK(M->getFunction("syscall") != nullptr);
+    CHECK(M->getFunction("syscall") == nullptr);
     Instruction *Aarch64AslrOff = findNamedInstruction(
         *Ctor, "morok.antidbg.personality.aslr.off");
     REQUIRE(Aarch64AslrOff != nullptr);
@@ -19075,7 +19149,7 @@ define i32 @main() { ret i32 0 }
     CHECK(functionHasConstantInt(*Ctor, 117u)); // aarch64 ptrace syscall
     CHECK(M->getFunction("ptrace") != nullptr);
     CHECK(M->getFunction("__errno_location") != nullptr);
-    CHECK(M->getFunction("syscall") != nullptr);
+    CHECK(M->getFunction("syscall") == nullptr);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.yama.harden.value") >=
           1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.yama.ptracer.rc") >= 1u);
@@ -19127,17 +19201,17 @@ define i32 @main() { ret i32 0 }
           1u);
     CHECK(countNamedInstructions(
               *Parent, "morok.antidbg.parent.status.ppid.value") >= 1u);
-    CHECK(functionHasConstantInt(*Stat, 64u));    // getppid
-    CHECK(functionHasConstantInt(*Parent, 64u));  // getppid
-    CHECK(functionHasConstantInt(*Parent, 322u)); // openat
-    CHECK(functionHasConstantInt(*Parent, 332u)); // readlinkat
+    CHECK_FALSE(functionHasConstantInt(*Stat, 64u));    // getppid syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 64u));  // getppid syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 322u)); // openat syscall NR
+    CHECK_FALSE(functionHasConstantInt(*Parent, 332u)); // readlinkat syscall NR
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.status.enforced") >=
           1u);
     CHECK(countNamedInstructions(*Watch,
                                  "morok.antidbg.watch.status.enforced") >= 1u);
     CHECK(countNamedInstructions(*HotProbe,
                                  "morok.antidbg.probe.status.enforced") >= 1u);
-    CHECK(M->getFunction("syscall") != nullptr);
+    CHECK(M->getFunction("syscall") == nullptr);
     checkNoSealEnforcement(*Parent);
     CHECK_FALSE(hasReadableByteString(*M, "/proc/%ld/comm"));
     CHECK_FALSE(hasReadableByteString(*M, "/proc/%ld/exe"));
@@ -21367,7 +21441,8 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("getrusage") != nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(hasInlineAsmCall(*Oracle));
-    CHECK(functionHasConstantInt(*Oracle, 298u)); // perf_event_open syscall
+    CHECK_FALSE(functionHasConstantInt(*Oracle,
+                                       298u)); // perf_event_open syscall NR
     CHECK(
         functionHasConstantInt(*Oracle, 3u)); // PERF_COUNT_SW_CONTEXT_SWITCHES
     CHECK(functionHasConstantInt(*Oracle, 0x2400u)); // PERF_EVENT_IOC_ENABLE
