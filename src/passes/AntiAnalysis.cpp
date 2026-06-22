@@ -16018,6 +16018,40 @@ Function *windowsDirectSyscallThunk(Module &M) {
     return fn;
 }
 
+Function *windowsDirectSyscall5Thunk(Module &M) {
+    if (Function *existing = M.getFunction("morok.win.sys.direct5"))
+        return existing;
+    const Triple TT(M.getTargetTriple());
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64)
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *fn = Function::Create(
+        FunctionType::get(ip, {i32, ip, ip, ip, ip, ip}, false),
+        GlobalValue::PrivateLinkage, "morok.win.sys.direct5", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *asmTy =
+        FunctionType::get(ip, {i32, ip, ip, ip, ip, ip}, false);
+    InlineAsm *IA = InlineAsm::get(
+        asmTy,
+        "subq $$0x30, %rsp\nmovq $6, 0x28(%rsp)\nmovq %rcx, %r10\n"
+        "syscall\naddq $$0x30, %rsp",
+        "={rax},{eax},{rcx},{rdx},{r8},{r9},r,~{r10},~{r11},~{memory},"
+        "~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    SmallVector<Value *, 6> args;
+    for (Argument &A : fn->args())
+        args.push_back(&A);
+    B.CreateRet(B.CreateCall(asmTy, IA, args, "morok.win.sys.direct5.ret"));
+    return fn;
+}
+
 Function *windowsIndirectSyscallThunk(Module &M) {
     if (Function *existing = M.getFunction("morok.win.sys.indirect"))
         return existing;
@@ -16705,12 +16739,19 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     Function *moduleByHash = windowsLdrModuleByHash(M);
     Function *resolver = windowsPeExportResolver(M);
     Function *wideHash = windowsWideNameHash(M);
-    if (!pebReader || !moduleByHash || !resolver || !wideHash)
+    Function *scanner = windowsSyscallStubScanner(M);
+    Function *direct5 = windowsDirectSyscall5Thunk(M);
+    if (!pebReader || !moduleByHash || !resolver || !wideHash || !scanner ||
+        !direct5)
         return nullptr;
 
     auto *entry = BasicBlock::Create(ctx, "entry", fn);
     auto *resolveBB = BasicBlock::Create(ctx, "resolve", fn);
     auto *queryProcessBB = BasicBlock::Create(ctx, "query.process", fn);
+    auto *queryProcessDirectBB =
+        BasicBlock::Create(ctx, "query.process.direct", fn);
+    auto *queryProcessDoneBB =
+        BasicBlock::Create(ctx, "query.process.done", fn);
     auto *objectGateBB = BasicBlock::Create(ctx, "object.gate", fn);
     auto *queryObjectBB = BasicBlock::Create(ctx, "query.object", fn);
     auto *objectLoopBB = BasicBlock::Create(ctx, "object.loop", fn);
@@ -16728,6 +16769,9 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
     AllocaInst *retLen = B.CreateAlloca(i32, nullptr, "morok.win.dbgobj.retlen");
     AllocaInst *debugPort =
         B.CreateAlloca(ip, nullptr, "morok.win.dbgobj.debug.port.slot");
+    AllocaInst *debugPortDirect =
+        B.CreateAlloca(ip, nullptr,
+                       "morok.win.dbgobj.debug.port.direct.slot");
     AllocaInst *debugObject =
         B.CreateAlloca(ip, nullptr, "morok.win.dbgobj.debug.object.slot");
     AllocaInst *debugFlags =
@@ -16748,6 +16792,8 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
         B.CreateAlloca(handleBufTy, nullptr, "morok.win.dbgobj.handle.buf");
     B.CreateStore(ConstantInt::get(i32, 0), retLen)->setVolatile(true);
     B.CreateStore(ConstantInt::get(ip, 0), debugPort)->setVolatile(true);
+    B.CreateStore(ConstantInt::get(ip, 0), debugPortDirect)
+        ->setVolatile(true);
     B.CreateStore(ConstantInt::get(ip, 0), debugObject)->setVolatile(true);
     B.CreateStore(ConstantInt::get(i32, 1), debugFlags)->setVolatile(true);
     B.CreateStore(ConstantInt::get(i32, 0), debugObjectCount)
@@ -16780,8 +16826,17 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
         resolver,
         {ntdll, ConstantInt::get(i64, fnv1aName("NtQuerySystemInformation"))},
         "morok.win.dbgobj.ntqsi");
+    Value *qipPack = RB.CreateCall(
+        scanner,
+        {RB.CreateIntToPtr(qip, ptr, "morok.win.dbgobj.ntqip.scan.ptr"),
+         ConstantInt::getTrue(ctx)},
+        "morok.win.dbgobj.ntqip.pack");
+    Value *qipSsn = RB.CreateTrunc(qipPack, i32,
+                                   "morok.win.dbgobj.ntqip.ssn");
     RB.CreateStore(qsi, qsiSlot)->setVolatile(true);
     foldState(RB, State, qip, rng.next(), "morok.win.dbgobj.ntqip.mix");
+    foldState(RB, State, qipPack, rng.next(),
+              "morok.win.dbgobj.ntqip.pack.mix");
     foldState(RB, State, qo, rng.next(), "morok.win.dbgobj.ntqo.mix");
     foldState(RB, State, qsi, rng.next(), "morok.win.dbgobj.ntqsi.mix");
     RB.CreateCondBr(RB.CreateAnd(RB.CreateICmpNE(ntdll, ConstantInt::get(ip, 0)),
@@ -16862,7 +16917,50 @@ Function *windowsDebugObjectProbe(Module &M, GlobalVariable *State,
               "morok.win.dbgobj.debug.flags.mix");
     foldEnforcedFlag(QB, State, debugFlagsHit, 0x58C6E3B19A2D704FULL,
                      "morok.win.dbgobj.debug.flags");
-    QB.CreateBr(objectGateBB);
+    Value *qipDirectReady =
+        QB.CreateICmpNE(qipSsn, ConstantInt::get(i32, 0),
+                        "morok.win.dbgobj.ntqip.direct.ready");
+    foldFlag(QB, State,
+             QB.CreateNot(qipDirectReady,
+                          "morok.win.dbgobj.ntqip.direct.missing"),
+             0xC7048AD51E63B2F9ULL, "morok.win.dbgobj.ntqip.direct.missing");
+    QB.CreateCondBr(qipDirectReady, queryProcessDirectBB, queryProcessDoneBB);
+
+    IRBuilder<> DB(queryProcessDirectBB);
+    DB.CreateStore(ConstantInt::get(ip, 0), debugPortDirect)
+        ->setVolatile(true);
+    Value *debugPortDirectIp = DB.CreatePtrToInt(
+        debugPortDirect, ip, "morok.win.dbgobj.debug.port.direct.ip");
+    auto *direct5Ty = direct5->getFunctionType();
+    Value *debugPortDirectStatus = DB.CreateCall(
+        direct5Ty, direct5,
+        {qipSsn, ConstantInt::getSigned(ip, -1), ConstantInt::get(ip, 7),
+         debugPortDirectIp, ConstantInt::get(ip, 8), ConstantInt::get(ip, 0)},
+        "morok.win.dbgobj.debug.port.direct.status");
+    Value *debugPortDirectStatus32 =
+        DB.CreateTrunc(debugPortDirectStatus, i32,
+                       "morok.win.dbgobj.debug.port.direct.status.i32");
+    Value *debugPortDirectValue = DB.CreateLoad(
+        ip, debugPortDirect, "morok.win.dbgobj.debug.port.direct");
+    cast<LoadInst>(debugPortDirectValue)->setVolatile(true);
+    Value *debugPortDirectOk =
+        DB.CreateICmpSGE(debugPortDirectStatus32, ConstantInt::get(i32, 0),
+                         "morok.win.dbgobj.debug.port.direct.ok");
+    Value *debugPortDirectHit = DB.CreateAnd(
+        debugPortDirectOk,
+        DB.CreateICmpNE(debugPortDirectValue, ConstantInt::get(ip, 0),
+                        "morok.win.dbgobj.debug.port.direct.nonzero"),
+        "morok.win.dbgobj.debug.port.direct.hit");
+    foldState(DB, State, debugPortDirectStatus, rng.next(),
+              "morok.win.dbgobj.debug.port.direct.status.mix");
+    foldState(DB, State, debugPortDirectValue, rng.next(),
+              "morok.win.dbgobj.debug.port.direct.mix");
+    foldEnforcedFlag(DB, State, debugPortDirectHit, 0xEA92BD4F18C07635ULL,
+                     "morok.win.dbgobj.debug.port.direct");
+    DB.CreateBr(queryProcessDoneBB);
+
+    IRBuilder<> QD(queryProcessDoneBB);
+    QD.CreateBr(objectGateBB);
 
     IRBuilder<> GB(objectGateBB);
     GB.CreateCondBr(GB.CreateAnd(GB.CreateICmpNE(qo, ConstantInt::get(ip, 0)),

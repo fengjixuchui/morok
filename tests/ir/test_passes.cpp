@@ -18317,26 +18317,39 @@ define i32 @main() { ret i32 0 }
     Function *Resolve = M->getFunction("morok.win.pe.resolve");
     Function *Ldr = M->getFunction("morok.win.ldr.module");
     Function *WideHash = M->getFunction("morok.win.wide.hash");
+    Function *SysScan = M->getFunction("morok.win.sys.scan");
+    Function *Direct5 = M->getFunction("morok.win.sys.direct5");
     REQUIRE(Ctor != nullptr);
     REQUIRE(Probe != nullptr);
     REQUIRE(Peb != nullptr);
     REQUIRE(Resolve != nullptr);
     REQUIRE(Ldr != nullptr);
     REQUIRE(WideHash != nullptr);
+    REQUIRE(SysScan != nullptr);
+    REQUIRE(Direct5 != nullptr);
     CHECK(M->getGlobalVariable("morok.win.state", true) != nullptr);
     checkSealEnforcement(*M, *Probe);
     CHECK(M->getFunction("NtQueryInformationProcess") == nullptr);
     CHECK(M->getFunction("NtQueryObject") == nullptr);
     CHECK(M->getFunction("NtQuerySystemInformation") == nullptr);
     CHECK(hasInlineAsmCall(*Peb));
+    CHECK(hasInlineAsmCall(*Direct5));
     CHECK(countNamedInstructions(*Ldr, "morok.win.ldr.name.hash") >= 1u);
     CHECK(countNamedInstructions(*WideHash, "morok.win.wide.lower") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntdll") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqip") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqip.pack") >= 1u);
+    CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqip.ssn") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.dbgobj.ntqip.direct.ready") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqo") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.dbgobj.ntqsi") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.dbgobj.debug.port.status") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.dbgobj.debug.port.direct.status") >= 1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.dbgobj.debug.port.direct.hit") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.dbgobj.debug.object.status") >= 1u);
     CHECK(countNamedInstructions(*Probe,
@@ -18376,6 +18389,11 @@ define i32 @main() { ret i32 0 }
     REQUIRE(IpcTelemetry != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(IpcTelemetry,
                                            "morok.seal.fold.anti_debug"));
+    Instruction *DirectPortHit =
+        findNamedInstruction(*Probe, "morok.win.dbgobj.debug.port.direct.hit");
+    REQUIRE(DirectPortHit != nullptr);
+    CHECK(valueFeedsNamedInstruction(DirectPortHit,
+                                     "morok.seal.fold.anti_debug"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

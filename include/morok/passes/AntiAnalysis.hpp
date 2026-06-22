@@ -75,10 +75,11 @@ bool windowsPebHeapDebugModule(llvm::Module &M, morok::ir::IRRandom &rng);
 
 /// Inject Windows x86_64 debug-object checks.  The emitted startup probe
 /// resolves ntdll from PEB.Ldr, resolves NtQueryInformationProcess,
-/// NtQueryObject, and NtQuerySystemInformation by export hash, and folds
-/// ProcessDebugPort, DebugObjectHandle, DebugFlags, ObjectTypesInformation
-/// DebugObject evidence, plus bounded handle-census telemetry into hidden
-/// Windows state.  Returns true if code was added.
+/// NtQueryObject, and NtQuerySystemInformation by export hash, scans NtQIP for
+/// a direct-syscall DebugPort path, and folds ProcessDebugPort,
+/// DebugObjectHandle, DebugFlags, ObjectTypesInformation DebugObject evidence,
+/// plus bounded handle-census telemetry into hidden Windows state.  Returns
+/// true if code was added.
 bool windowsDebugObjectModule(llvm::Module &M, morok::ir::IRRandom &rng);
 
 /// Inject Windows x86_64 thread-hide checks.  The emitted startup probe resolves
