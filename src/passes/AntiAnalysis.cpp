@@ -812,6 +812,30 @@ bool linuxPersonalitySyscall(const Triple &TT, std::uint32_t &Personality) {
     }
 }
 
+bool linuxSetrlimitSyscall(const Triple &TT, std::uint32_t &Setrlimit) {
+    if (!TT.isOSLinux())
+        return false;
+    switch (TT.getArch()) {
+    case Triple::x86_64:
+        Setrlimit = 160;
+        return true;
+    case Triple::x86:
+        Setrlimit = 75;
+        return true;
+    case Triple::aarch64:
+        Setrlimit = 164;
+        return true;
+    case Triple::arm:
+    case Triple::armeb:
+    case Triple::thumb:
+    case Triple::thumbeb:
+        Setrlimit = 75;
+        return true;
+    default:
+        return false;
+    }
+}
+
 Value *emitLinuxPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
                        int request) {
     return runtime::emitLinuxPtrace(B, M, TT, request);
@@ -1022,11 +1046,24 @@ void emitLinuxSelfTraceFallback(IRBuilder<> &B, Module &M,
     B.SetInsertPoint(contBB);
 }
 
-Value *emitLinuxPrctl(IRBuilder<> &B, Module &M, const Triple &TT,
-                      std::int64_t Option, std::int64_t A2 = 0,
-                      std::int64_t A3 = 0, std::int64_t A4 = 0,
-                      std::int64_t A5 = 0) {
-    return runtime::emitLinuxPrctl(B, M, TT, Option, A2, A3, A4, A5);
+Value *emitLinuxPrctlDirect(IRBuilder<> &B, Module &M, const Triple &TT,
+                            std::int64_t Option, std::int64_t A2,
+                            std::int64_t A3, std::int64_t A4,
+                            std::int64_t A5, const Twine &Name) {
+    std::uint32_t ptraceNr = 0;
+    std::uint32_t prctlNr = 0;
+    std::uint32_t openatNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    auto *ip = intPtrTy(M);
+    if (!linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr))
+        return ConstantInt::getSigned(ip, -38);
+    return emitLinuxStaticRawSyscall(
+        B, M, TT, prctlNr,
+        {ConstantInt::getSigned(ip, Option), ConstantInt::getSigned(ip, A2),
+         ConstantInt::getSigned(ip, A3), ConstantInt::getSigned(ip, A4),
+         ConstantInt::getSigned(ip, A5)},
+        Name);
 }
 
 GlobalVariable *elfDynamicWeakSymbol(Module &M) {
@@ -2810,6 +2847,50 @@ Function *linuxPtraceStopCoherenceCheck(Module &M, ir::IRRandom &rng,
 bool linuxBuddyLivenessSyscalls(const Triple &TT, std::uint32_t &Kill,
                                 std::uint32_t &Wait4);
 
+Value *emitLinuxCoreLimitZero(IRBuilder<> &B, Module &M, const Triple &TT,
+                              const Twine &Name) {
+    std::uint32_t setrlimitNr = 0;
+    auto *ip = intPtrTy(M);
+    if (!linuxSetrlimitSyscall(TT, setrlimitNr))
+        return ConstantInt::getSigned(ip, -38);
+
+    LLVMContext &ctx = M.getContext();
+    auto *limitTy = StructType::get(ctx, {ip, ip});
+    auto *limit = B.CreateAlloca(limitTy, nullptr, Name + ".limit");
+    limit->setAlignment(Align(ip->getBitWidth() / 8));
+    auto *zero = ConstantInt::get(ip, 0);
+    auto *cur = B.CreateStore(
+        zero, B.CreateStructGEP(limitTy, limit, 0, Name + ".cur.ptr"));
+    cur->setAlignment(Align(ip->getBitWidth() / 8));
+    auto *max = B.CreateStore(
+        zero, B.CreateStructGEP(limitTy, limit, 1, Name + ".max.ptr"));
+    max->setAlignment(Align(ip->getBitWidth() / 8));
+
+    constexpr std::uint32_t kRlimitCore = 4;
+    return emitLinuxStaticRawSyscall(
+        B, M, TT, setrlimitNr, {ConstantInt::get(ip, kRlimitCore), limit},
+        Name);
+}
+
+void emitLinuxDumpableHardening(IRBuilder<> &B, Module &M,
+                                GlobalVariable *State, const Triple &TT,
+                                const Twine &Name, std::uint64_t Salt) {
+    Value *setRc = emitLinuxPrctlDirect(B, M, TT, 4, 0, 0, 0, 0, Name);
+    Value *limitRc = emitLinuxCoreLimitZero(B, M, TT, Name + ".rlimit_core");
+    Value *getRc =
+        emitLinuxPrctlDirect(B, M, TT, 3, 0, 0, 0, 0, Name + ".get");
+
+    foldState(B, State, setRc, Salt ^ 0xA91E4C72D503B68FULL, Name + ".set");
+    foldState(B, State, limitRc, Salt ^ 0x5E7B2186C49AD03FULL,
+              Name + ".rlimit_core");
+    foldState(B, State, getRc, Salt ^ 0xC38D6F10A2495BE7ULL, Name + ".get");
+    Value *dumpable =
+        B.CreateICmpNE(getRc, ConstantInt::get(getRc->getType(), 0),
+                       Name + ".get.enabled");
+    foldFlag(B, State, dumpable, Salt ^ 0x76D4A90E3B15C28FULL,
+             Name + ".enabled");
+}
+
 Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
                            Function *SignalMaskFn, Function *PtraceStopFn,
                            GlobalVariable *State, GlobalVariable *BuddyPid,
@@ -2862,6 +2943,9 @@ Function *linuxWatchThread(Module &M, Function *StatusFn, Function *StatFn,
     FunctionCallee sleepFn =
         M.getOrInsertFunction("sleep", FunctionType::get(i32, {i32}, false));
     BB.CreateCall(sleepFn, {ConstantInt::get(i32, 1)});
+    emitLinuxDumpableHardening(BB, M, State, TT,
+                               "morok.antidbg.watch.dumpable",
+                               0x4E6A1D93B827C05FULL);
     if (AllowSelfTrace)
         emitLinuxSelfTraceFallback(BB, M, State, SentinelActive, TT,
                                    "morok.antidbg.watch.ptrace",
@@ -3438,13 +3522,13 @@ bool emitLinuxDrSentinelStart(IRBuilder<> &B, Module &M, GlobalVariable *State,
                    parentBB);
 
     IRBuilder<> ChildB(childBB);
-    Value *childDumpable = emitLinuxPrctl(ChildB, M, TT, 4, 0, 0, 0, 0);
-    childDumpable->setName("morok.antidbg.dr.child.dumpable");
-    Value *childPtracer =
-        emitLinuxPrctl(ChildB, M, TT, 0x59616D61, 0, 0, 0, 0);
-    childPtracer->setName("morok.antidbg.dr.child.ptracer");
-    Value *childNoNewPrivs = emitLinuxPrctl(ChildB, M, TT, 38, 1, 0, 0, 0);
-    childNoNewPrivs->setName("morok.antidbg.dr.child.no_new_privs");
+    emitLinuxDumpableHardening(ChildB, M, State, TT,
+                               "morok.antidbg.dr.child.dumpable",
+                               0x2C5B81D6F407A39EULL);
+    emitLinuxPrctlDirect(ChildB, M, TT, 0x59616D61, 0, 0, 0, 0,
+                         "morok.antidbg.dr.child.ptracer");
+    emitLinuxPrctlDirect(ChildB, M, TT, 38, 1, 0, 0, 0,
+                         "morok.antidbg.dr.child.no_new_privs");
     ChildB.CreateCall(helper->getFunctionType(), helper, {});
     emitLinuxSyscall(ChildB, M, TT, exitNr, {ConstantInt::get(ip, 0)});
     ChildB.CreateUnreachable();
@@ -3502,7 +3586,9 @@ bool emitLinuxDrSentinelStart(IRBuilder<> &B, Module &M, GlobalVariable *State,
 void emitLinuxHardening(IRBuilder<> &B, Module &M, GlobalVariable *State,
                         ir::IRRandom &rng, const Triple &TT,
                         bool PreservePtracer = false) {
-    emitLinuxPrctl(B, M, TT, 4, 0, 0, 0, 0);          // PR_SET_DUMPABLE
+    emitLinuxDumpableHardening(B, M, State, TT,
+                               "morok.antidbg.harden.dumpable",
+                               0xE41B63D79A2508CFULL);
     if (!PreservePtracer) {
         LinuxYamaScopeSample yama = emitLinuxYamaPtraceScopeRead(
             B, M, rng, TT, "morok.antidbg.yama.harden");
@@ -3516,13 +3602,13 @@ void emitLinuxHardening(IRBuilder<> &B, Module &M, GlobalVariable *State,
         B.CreateCondBr(yama.mode1, setPtracerBB, contBB);
 
         IRBuilder<> PB(setPtracerBB);
-        Value *ptracerRc =
-            emitLinuxPrctl(PB, M, TT, 0x59616D61, 0, 0, 0, 0);
-        ptracerRc->setName("morok.antidbg.yama.ptracer.rc");
+        emitLinuxPrctlDirect(PB, M, TT, 0x59616D61, 0, 0, 0, 0,
+                             "morok.antidbg.yama.ptracer.rc");
         PB.CreateBr(contBB);
         B.SetInsertPoint(contBB);
     }
-    emitLinuxPrctl(B, M, TT, 38, 1, 0, 0, 0);         // PR_SET_NO_NEW_PRIVS
+    emitLinuxPrctlDirect(B, M, TT, 38, 1, 0, 0, 0,
+                         "morok.antidbg.harden.no_new_privs");
 }
 
 bool linuxSyscallNumbers(const Triple &TT, std::uint32_t &Ptrace,
@@ -6373,6 +6459,19 @@ Value *emitLinuxStaticRawSyscall(IRBuilder<> &B, Module &M, const Triple &TT,
 
     std::vector<Type *> params(7, ip);
     auto *asmTy = FunctionType::get(ip, params, false);
+    if (TT.getArch() == Triple::x86) {
+        std::vector<Type *> params5(6, ip);
+        auto *asmTy5 = FunctionType::get(ip, params5, false);
+        InlineAsm *int80 = InlineAsm::get(
+            asmTy5, "int $$0x80",
+            "={eax},{eax},{ebx},{ecx},{edx},{esi},{edi},~{memory},~{dirflag},"
+            "~{fpsr},~{flags}",
+            /*hasSideEffects=*/true);
+        return B.CreateCall(asmTy5, int80,
+                            {ConstantInt::get(ip, Number), sysArgs[0],
+                             sysArgs[1], sysArgs[2], sysArgs[3], sysArgs[4]},
+                            Name);
+    }
     if (TT.getArch() == Triple::x86_64) {
         InlineAsm *syscall = InlineAsm::get(
             asmTy, "syscall",

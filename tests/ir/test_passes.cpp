@@ -18273,6 +18273,12 @@ entry:
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.kill") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.wait") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.keep") >= 1u);
+    CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.dumpable") >=
+          1u);
+    CHECK(countNamedInstructions(*Watch,
+                                 "morok.antidbg.watch.dumpable.get") >= 1u);
+    CHECK(countNamedInstructions(
+              *Watch, "morok.antidbg.watch.dumpable.rlimit_core") >= 1u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.sigmask") >=
           1u);
     Instruction *SigmaskUnblockable = findNamedInstruction(
@@ -18402,6 +18408,12 @@ entry:
     CHECK(functionHasConstantInt(*Parent, 110u)); // getppid
     CHECK(functionHasConstantInt(*Parent, 257u)); // openat
     CHECK(functionHasConstantInt(*Parent, 267u)); // readlinkat
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.harden.dumpable") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.harden.dumpable.get") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.harden.dumpable.rlimit_core") >= 1u);
     CHECK(countCallsTo(*AntiDbg, "morok.antidbg.rr") == 1u);
     CHECK(countNamedInstructions(*Rr,
                                  "morok.antidbg.rr.perf.paranoid.value") >= 1u);
@@ -18425,6 +18437,10 @@ entry:
                                          "morok.antidbg.dr.ptracer.ok"));
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.child.dumpable") >=
           1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.dr.child.dumpable.get") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.dr.child.dumpable.rlimit_core") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.dr.child.ptracer") >=
           1u);
     CHECK(countNamedInstructions(*AntiDbg,
@@ -18460,6 +18476,8 @@ entry:
               *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.libc.xor") >=
           1u);
     CHECK(functionHasConstantInt(*AntiDbg, 101u)); // x86_64 ptrace syscall
+    CHECK(functionHasConstantInt(*AntiDbg, 160u)); // x86_64 setrlimit syscall
+    CHECK(functionHasConstantInt(*Watch, 160u));   // x86_64 setrlimit syscall
     CHECK(functionHasConstantInt(*PtraceStop, 63u)); // x86_64 uname syscall
     Instruction *PtraceFirstEperm = findNamedInstruction(
         *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.first.eperm");
@@ -18519,6 +18537,16 @@ entry:
         findNamedInstruction(*AntiDbg, "morok.antidbg.aslr.load.bad");
     REQUIRE(LoadBad != nullptr);
     CHECK_FALSE(valueFeedsNamedInstruction(LoadBad,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *DumpableEnabled =
+        findNamedInstruction(*AntiDbg, "morok.antidbg.harden.dumpable.get.enabled");
+    REQUIRE(DumpableEnabled != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(DumpableEnabled,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *WatchDumpableEnabled =
+        findNamedInstruction(*Watch, "morok.antidbg.watch.dumpable.get.enabled");
+    REQUIRE(WatchDumpableEnabled != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(WatchDumpableEnabled,
                                            "morok.seal.fold.anti_debug"));
     CHECK(maxStaticAllocaArrayElements(*AntiDbg,
                                        "morok.antidbg.seccomp.filters") == 17u);
@@ -18646,6 +18674,7 @@ entry:
     CHECK(M->getFunction("readlink") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("personality") == nullptr);
+    CHECK(M->getFunction("setrlimit") == nullptr);
     CHECK(M->getFunction("sleep") != nullptr);
 
     CHECK_FALSE(hasReadableByteString(*M, "/proc/self/exe"));
@@ -18718,6 +18747,15 @@ define i32 @main() { ret i32 0 }
     CHECK(functionHasConstantInt(*Sigtrap, 174u)); // i386 rt_sigaction
     CHECK(countNamedInstructions(
               *SigtrapHandler, "morok.antidbg.sigtrap.sig.match") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.harden.dumpable") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.harden.dumpable.get") >= 1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.harden.dumpable.rlimit_core") >= 1u);
+    CHECK(functionHasConstantInt(*Ctor, 75u)); // i386 setrlimit syscall
+    CHECK(M->getFunction("prctl") == nullptr);
+    CHECK(M->getFunction("setrlimit") == nullptr);
 
     Instruction *SigtrapCoherence =
         findNamedInstruction(*Ctor, "morok.antidbg.sigtrap.coherence");
@@ -18726,6 +18764,33 @@ define i32 @main() { ret i32 0 }
                                      "morok.seal.fold.anti_debug"));
     CHECK(countCallsTo(*Ctor, "morok.antidbg.sigtrap") == 1u);
     CHECK(countCallsTo(*HotProbe, "morok.antidbg.sigtrap") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiDebuggingModule emits arm Linux dumpable hardening") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "armv7-unknown-linux-gnueabihf"
+define i32 @main() { ret i32 0 }
+)ir");
+    M->setDataLayout("e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8814);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng,
+                                             /*allowSelfTrace=*/false));
+
+    Function *Ctor = M->getFunction("morok.antidbg");
+    REQUIRE(Ctor != nullptr);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.harden.dumpable") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.harden.dumpable.get") >= 1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.harden.dumpable.rlimit_core") >= 1u);
+    CHECK(functionHasConstantInt(*Ctor, 75u)); // arm setrlimit syscall
+    CHECK(M->getFunction("prctl") == nullptr);
+    CHECK(M->getFunction("setrlimit") == nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -18825,7 +18890,14 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.ptrace.init.chain") ==
           0u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.harden.dumpable") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.harden.dumpable.get") >= 1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.harden.dumpable.rlimit_core") >= 1u);
     CHECK(functionHasConstantInt(*Ctor, 134u));       // rt_sigaction syscall
+    CHECK(functionHasConstantInt(*Ctor, 164u));       // aarch64 setrlimit syscall
     CHECK(functionHasConstantInt(*Ctor, 92u));        // personality syscall
     CHECK(functionHasConstantInt(*Ctor, 0x00040000)); // ADDR_NO_RANDOMIZE
     CHECK(functionHasConstantInt(*Sigmask, 135u));    // rt_sigprocmask syscall
@@ -18840,6 +18912,7 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("sigaction") == nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
     CHECK(M->getFunction("personality") == nullptr);
+    CHECK(M->getFunction("setrlimit") == nullptr);
     CHECK(M->getFunction("syscall") != nullptr);
     Instruction *Aarch64AslrOff = findNamedInstruction(
         *Ctor, "morok.antidbg.personality.aslr.off");
