@@ -11812,18 +11812,27 @@ struct SchedulerCounterSample {
     Value *ready;
 };
 
+struct LinuxPerfParanoidSample {
+    Value *value;
+    Value *ready;
+    Value *high;
+};
+
 bool linuxSchedulerStepSyscalls(const Triple &TT, std::uint32_t &PerfOpen,
-                                std::uint32_t &Read, std::uint32_t &Close) {
+                                std::uint32_t &Read, std::uint32_t &Close,
+                                std::uint32_t &Ioctl) {
     switch (TT.getArch()) {
     case Triple::x86_64:
         PerfOpen = 298;
         Read = 0;
         Close = 3;
+        Ioctl = 16;
         return true;
     case Triple::aarch64:
         PerfOpen = 241;
         Read = 63;
         Close = 57;
+        Ioctl = 29;
         return true;
     default:
         return false;
@@ -11866,36 +11875,48 @@ LoadInst *loadI64AtOffset(IRBuilder<> &B, Module &M, Value *Base,
     return li;
 }
 
-Value *emitLinuxPerfContextSwitchOpen(IRBuilder<> &B, Module &M,
-                                      const Triple &TT, Value *&Ready) {
+Value *emitLinuxPerfOpen(IRBuilder<> &B, Module &M, const Triple &TT,
+                         std::uint32_t Type, std::uint64_t Config,
+                         std::uint64_t AttrFlags, std::uint64_t OpenFlags,
+                         const Twine &Name, Value *&Ready) {
     LLVMContext &ctx = M.getContext();
     auto *i8 = Type::getInt8Ty(ctx);
     auto *ip = intPtrTy(M);
     auto *attrTy = ArrayType::get(i8, 128);
-    auto *attr = B.CreateAlloca(attrTy, nullptr, "morok.step.perf.attr");
+    auto *attr = B.CreateAlloca(attrTy, nullptr, Name + ".attr");
     B.CreateMemSet(attr, ConstantInt::get(i8, 0), ConstantInt::get(ip, 128),
                    MaybeAlign(1));
-    // struct perf_event_attr: type, size, config.
-    storeI32AtOffset(B, M, attr, 0, 1, "morok.step.perf.type");
-    storeI32AtOffset(B, M, attr, 4, 128, "morok.step.perf.size");
-    storeI64AtOffset(B, M, attr, 8, 3, "morok.step.perf.config.ctxsw");
+    // struct perf_event_attr: type, size, config, then packed flag bits.
+    storeI32AtOffset(B, M, attr, 0, Type, Name + ".type");
+    storeI32AtOffset(B, M, attr, 4, 128, Name + ".size");
+    storeI64AtOffset(B, M, attr, 8, Config, Name + ".config");
+    if (AttrFlags != 0)
+        storeI64AtOffset(B, M, attr, 40, AttrFlags, Name + ".flags");
 
     std::uint32_t perfNr = 0;
     std::uint32_t readNr = 0;
     std::uint32_t closeNr = 0;
-    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr)) {
+    std::uint32_t ioctlNr = 0;
+    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr, ioctlNr)) {
         Ready = ConstantInt::getFalse(ctx);
         return ConstantInt::getSigned(ip, -1);
     }
 
-    // pid=0,cpu=-1 scopes the software event to the current thread on any CPU.
+    // pid=0,cpu=-1 scopes the event to the current thread on any CPU.
     Value *fd = emitLinuxSyscall(
         B, M, TT, perfNr,
         {attr, ConstantInt::getSigned(ip, 0), ConstantInt::getSigned(ip, -1),
-         ConstantInt::getSigned(ip, -1), ConstantInt::get(ip, 0)});
-    Ready = B.CreateICmpSGE(fd, ConstantInt::getSigned(ip, 0),
-                            "morok.step.perf.open.ready");
+         ConstantInt::getSigned(ip, -1), ConstantInt::get(ip, OpenFlags)});
+    fd->setName(Name + ".fd");
+    Ready = B.CreateICmpSGE(fd, ConstantInt::getSigned(ip, 0), Name + ".ready");
     return fd;
+}
+
+Value *emitLinuxPerfContextSwitchOpen(IRBuilder<> &B, Module &M,
+                                      const Triple &TT, Value *&Ready) {
+    return emitLinuxPerfOpen(B, M, TT, /*Type=*/1, /*Config=*/3,
+                             /*AttrFlags=*/0, /*OpenFlags=*/0,
+                             "morok.step.perf.open", Ready);
 }
 
 SchedulerCounterSample emitLinuxPerfRead(IRBuilder<> &B, Module &M,
@@ -11907,7 +11928,8 @@ SchedulerCounterSample emitLinuxPerfRead(IRBuilder<> &B, Module &M,
     std::uint32_t perfNr = 0;
     std::uint32_t readNr = 0;
     std::uint32_t closeNr = 0;
-    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr))
+    std::uint32_t ioctlNr = 0;
+    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr, ioctlNr))
         return {ConstantInt::get(i64, 0), ConstantInt::getFalse(ctx)};
 
     auto *slot = B.CreateAlloca(i64, nullptr, Name + ".slot");
@@ -11927,9 +11949,112 @@ void emitLinuxPerfClose(IRBuilder<> &B, Module &M, const Triple &TT,
     std::uint32_t perfNr = 0;
     std::uint32_t readNr = 0;
     std::uint32_t closeNr = 0;
-    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr))
+    std::uint32_t ioctlNr = 0;
+    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr, ioctlNr))
         return;
     emitLinuxSyscall(B, M, TT, closeNr, {Fd});
+}
+
+Value *emitLinuxPerfIoctl(IRBuilder<> &B, Module &M, const Triple &TT,
+                          Value *Fd, std::uint64_t Cmd, const Twine &Name) {
+    auto *ip = intPtrTy(M);
+    std::uint32_t perfNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    std::uint32_t ioctlNr = 0;
+    if (!linuxSchedulerStepSyscalls(TT, perfNr, readNr, closeNr, ioctlNr))
+        return ConstantInt::getSigned(ip, -38);
+    Value *rc = emitLinuxSyscall(
+        B, M, TT, ioctlNr,
+        {Fd, ConstantInt::get(ip, Cmd), ConstantInt::get(ip, 0)});
+    rc->setName(Name);
+    return rc;
+}
+
+LinuxPerfParanoidSample emitLinuxPerfParanoidRead(IRBuilder<> &B, Module &M,
+                                                  ir::IRRandom &rng,
+                                                  const Triple &TT,
+                                                  const Twine &Name) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    constexpr std::uint64_t kBufBytes = 16;
+
+    std::uint32_t ptraceNr = 0;
+    std::uint32_t prctlNr = 0;
+    std::uint32_t openatNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    if (!linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
+        Value *zero = ConstantInt::get(i32, 0);
+        Value *notReady = ConstantInt::getFalse(ctx);
+        return {zero, notReady, notReady};
+    }
+
+    auto *bufTy = ArrayType::get(i8, kBufBytes);
+    AllocaInst *buf = B.CreateAlloca(bufTy, nullptr, Name + ".buf");
+    B.CreateMemSet(buf, ConstantInt::get(i8, 0),
+                   ConstantInt::get(ip, kBufBytes), MaybeAlign(1));
+    Value *path =
+        ir::emitCloakedSymbol(B, M, "/proc/sys/kernel/perf_event_paranoid", rng);
+    Value *fd = emitLinuxSyscall(B, M, TT, openatNr,
+                                 {ConstantInt::getSigned(ip, -100), path,
+                                  ConstantInt::get(ip, 0),
+                                  ConstantInt::get(ip, 0)});
+    fd->setName(Name + ".fd");
+    Value *bufPtr = B.CreateInBoundsGEP(
+        bufTy, buf, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        Name + ".ptr");
+    Value *nread = emitLinuxSyscall(
+        B, M, TT, readNr, {fd, bufPtr, ConstantInt::get(ip, kBufBytes - 1)});
+    nread->setName(Name + ".read.n");
+    emitLinuxSyscall(B, M, TT, closeNr, {fd});
+
+    Value *c0 = loadAt(B, M, i8, buf, 0ULL, Name + ".c0");
+    Value *c1 = loadAt(B, M, i8, buf, 1ULL, Name + ".c1");
+    Value *c2 = loadAt(B, M, i8, buf, 2ULL, Name + ".c2");
+    Value *minus =
+        B.CreateICmpEQ(c0, ConstantInt::get(i8, '-'), Name + ".minus");
+    Value *first = B.CreateSelect(minus, c1, c0, Name + ".first");
+    Value *second = B.CreateSelect(minus, c2, c1, Name + ".second");
+
+    auto digit = [&](Value *Ch, const Twine &Prefix) {
+        Value *ge0 = B.CreateICmpUGE(Ch, ConstantInt::get(i8, '0'),
+                                     Prefix + ".ge0");
+        Value *le9 = B.CreateICmpULE(Ch, ConstantInt::get(i8, '9'),
+                                     Prefix + ".le9");
+        return B.CreateAnd(ge0, le9, Prefix + ".digit");
+    };
+    Value *firstDigit = digit(first, Name + ".first");
+    Value *secondDigit = digit(second, Name + ".second");
+    Value *firstVal = B.CreateZExt(
+        B.CreateSub(first, ConstantInt::get(i8, '0'), Name + ".first.raw"),
+        i32, Name + ".first.val");
+    Value *secondVal = B.CreateZExt(
+        B.CreateSub(second, ConstantInt::get(i8, '0'), Name + ".second.raw"),
+        i32, Name + ".second.val");
+    Value *twoDigit =
+        B.CreateAdd(B.CreateMul(firstVal, ConstantInt::get(i32, 10),
+                                Name + ".tens"),
+                    secondVal, Name + ".two");
+    Value *parsed = B.CreateSelect(secondDigit, twoDigit, firstVal,
+                                   Name + ".parsed");
+    Value *readOk = B.CreateICmpSGT(nread, ConstantInt::get(ip, 0),
+                                    Name + ".read.ok");
+    Value *ready = B.CreateAnd(readOk, firstDigit, Name + ".ready");
+    Value *nonNegative = B.CreateNot(minus, Name + ".nonnegative");
+    Value *value = B.CreateSelect(B.CreateAnd(ready, nonNegative),
+                                  parsed, ConstantInt::get(i32, 0),
+                                  Name + ".value");
+    Value *high = B.CreateAnd(
+        ready,
+        B.CreateAnd(nonNegative,
+                    B.CreateICmpUGE(value, ConstantInt::get(i32, 2),
+                                    Name + ".ge2"),
+                    Name + ".policy"),
+        Name + ".high");
+    return {value, ready, high};
 }
 
 SchedulerCounterSample emitLinuxRusageSwitches(IRBuilder<> &B, Module &M,
@@ -12100,6 +12225,7 @@ Function *schedulerStepOracleProbe(Module &M, GlobalVariable *State,
     LLVMContext &ctx = M.getContext();
     auto *i32 = Type::getInt32Ty(ctx);
     auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
     auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
                                 GlobalValue::PrivateLinkage,
                                 "morok.step.oracle", &M);
@@ -12116,6 +12242,98 @@ Function *schedulerStepOracleProbe(Module &M, GlobalVariable *State,
     Value *mix = ConstantInt::get(i64, rng.next());
 
     if (TT.isOSLinux()) {
+        constexpr std::uint64_t kPerfFlagFdCloexec = 8;
+        constexpr std::uint64_t kPerfAttrDisabledExcludeKernelHv =
+            (1ULL << 0) | (1ULL << 5) | (1ULL << 6);
+        constexpr std::uint64_t kPerfEventIocEnable = 0x2400;
+        constexpr std::uint64_t kPerfEventIocDisable = 0x2401;
+        constexpr std::uint64_t kPerfEventIocReset = 0x2403;
+
+        LinuxPerfParanoidSample paranoid = emitLinuxPerfParanoidRead(
+            B, M, rng, TT, "morok.step.perf.paranoid");
+        const std::uint64_t hwConfig = rng.next() & 1ULL;
+        Value *hwReady = nullptr;
+        Value *hwFd = emitLinuxPerfOpen(
+            B, M, TT, /*Type=*/0, hwConfig,
+            kPerfAttrDisabledExcludeKernelHv, kPerfFlagFdCloexec,
+            "morok.step.perf.hw.open", hwReady);
+        Value *hwDenied = B.CreateOr(
+            B.CreateICmpEQ(hwFd, ConstantInt::getSigned(ip, -1),
+                           "morok.step.perf.hw.eperm"),
+            B.CreateICmpEQ(hwFd, ConstantInt::getSigned(ip, -13),
+                           "morok.step.perf.hw.eacces"),
+            "morok.step.perf.hw.denied");
+        Value *hwReset = emitLinuxPerfIoctl(B, M, TT, hwFd, kPerfEventIocReset,
+                                            "morok.step.perf.hw.reset");
+        Value *hwEnable = emitLinuxPerfIoctl(B, M, TT, hwFd, kPerfEventIocEnable,
+                                             "morok.step.perf.hw.enable");
+        emitSchedulerStepSpan(B, acc, rng);
+        Value *hwDisable = emitLinuxPerfIoctl(
+            B, M, TT, hwFd, kPerfEventIocDisable,
+            "morok.step.perf.hw.disable");
+        SchedulerCounterSample hwCount =
+            emitLinuxPerfRead(B, M, TT, hwFd, "morok.step.perf.hw.count");
+        emitLinuxPerfClose(B, M, TT, hwFd);
+
+        auto ioctlOk = [&](Value *Rc, const Twine &Name) {
+            return B.CreateICmpEQ(Rc, ConstantInt::get(ip, 0), Name);
+        };
+        Value *hwFlowOk = B.CreateAnd(
+            hwReady,
+            B.CreateAnd(ioctlOk(hwReset, "morok.step.perf.hw.reset.ok"),
+                        B.CreateAnd(
+                            ioctlOk(hwEnable, "morok.step.perf.hw.enable.ok"),
+                            B.CreateAnd(ioctlOk(hwDisable,
+                                                "morok.step.perf.hw.disable.ok"),
+                                        hwCount.ready,
+                                        "morok.step.perf.hw.read.path"),
+                            "morok.step.perf.hw.enabled.path"),
+                        "morok.step.perf.hw.ioctl.path"),
+            "morok.step.perf.hw.flow.ok");
+        Value *hwFlowBad =
+            B.CreateAnd(hwReady, B.CreateNot(hwFlowOk),
+                        "morok.step.perf.hw.flow.bad");
+        Value *hwZeroCount = B.CreateAnd(
+            hwFlowOk,
+            B.CreateICmpEQ(hwCount.value, ConstantInt::get(i64, 0),
+                           "morok.step.perf.hw.count.zero.raw"),
+            "morok.step.perf.hw.count.zero");
+        Value *deniedExpected =
+            B.CreateAnd(hwDenied, paranoid.high,
+                        "morok.step.perf.hw.denied.expected");
+        Value *deniedUnexpected = B.CreateAnd(
+            hwDenied,
+            B.CreateAnd(paranoid.ready,
+                        B.CreateNot(paranoid.high,
+                                    "morok.step.perf.paranoid.not.high"),
+                        "morok.step.perf.paranoid.low.ready"),
+            "morok.step.perf.hw.denied.unexpected");
+        Value *hwTelemetry =
+            B.CreateOr(hwDenied, B.CreateOr(hwFlowBad, hwZeroCount),
+                       "morok.step.perf.hw.telemetry");
+        foldState(B, State, paranoid.value, 0x6B4391D8A25F0C7BULL,
+                  "morok.step.perf.paranoid.value");
+        foldFlag(B, State, paranoid.high, 0xC9F12E4A6B803D57ULL,
+                 "morok.step.perf.paranoid.high");
+        foldFlag(B, State, deniedExpected, 0xA0D47E6359B18C2FULL,
+                 "morok.step.perf.hw.denied.expected");
+        foldFlag(B, State, deniedUnexpected, 0x51E8B7C20D694A3FULL,
+                 "morok.step.perf.hw.denied.unexpected");
+        foldFlag(B, State, hwZeroCount, 0x2C7F91A4E058B36DULL,
+                 "morok.step.perf.hw.count.zero");
+        foldFlag(B, State, hwFlowBad, 0x9E23D580C47A61BFULL,
+                 "morok.step.perf.hw.flow.bad");
+        foldFlag(B, State, hwTelemetry, 0x73AE18C5D04B962FULL,
+                 "morok.step.perf.hw.telemetry");
+        mix = B.CreateXor(
+            B.CreateAdd(mix,
+                        B.CreateMul(hwCount.value,
+                                    ConstantInt::get(i64, rng.next() | 1ULL))),
+            B.CreateXor(B.CreateZExt(hwTelemetry, i64),
+                        B.CreateZExt(paranoid.high, i64),
+                        "morok.step.perf.hw.policy.mix"),
+            "morok.step.perf.hw.mix");
+
         Value *perfReady = nullptr;
         Value *perfFd = emitLinuxPerfContextSwitchOpen(B, M, TT, perfReady);
         for (unsigned sample = 0; sample < 3; ++sample) {

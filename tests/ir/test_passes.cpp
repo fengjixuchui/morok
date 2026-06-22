@@ -20430,6 +20430,8 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Ctor != nullptr);
     REQUIRE(Oracle != nullptr);
     CHECK(M->getGlobalVariable("morok.step.state", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.seal.score.anti_debug.weight", true) ==
+          nullptr);
     checkNoSealEnforcement(*Oracle);
     CHECK(M->getFunction("getrusage") != nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
@@ -20437,7 +20439,23 @@ define i32 @main() { ret i32 0 }
     CHECK(functionHasConstantInt(*Oracle, 298u)); // perf_event_open syscall
     CHECK(
         functionHasConstantInt(*Oracle, 3u)); // PERF_COUNT_SW_CONTEXT_SWITCHES
+    CHECK(functionHasConstantInt(*Oracle, 0x2400u)); // PERF_EVENT_IOC_ENABLE
+    CHECK(functionHasConstantInt(*Oracle, 0x2401u)); // PERF_EVENT_IOC_DISABLE
+    CHECK(functionHasConstantInt(*Oracle, 0x2403u)); // PERF_EVENT_IOC_RESET
+    CHECK(functionHasConstantInt(*Oracle, 0x61u)); // disabled+exclude flags
     CHECK(countNamedInstructions(*Oracle, "morok.step.perf.open.ready") >= 1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.step.perf.hw.open.ready") >=
+          1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.step.perf.hw.denied") >= 1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.step.perf.hw.flow.bad") >= 1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.step.perf.hw.count.zero") >=
+          1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.step.perf.hw.telemetry") >=
+          1u);
+    CHECK(countNamedInstructions(*Oracle, "morok.step.perf.paranoid.high") >=
+          1u);
+    CHECK(countNamedInstructions(*Oracle,
+                                 "morok.step.perf.hw.denied.unexpected") >= 1u);
     CHECK(countNamedInstructions(*Oracle,
                                  "morok.step.getrusage.before.total") >= 1u);
     CHECK(countNamedInstructions(*Oracle, "morok.step.getrusage.after.total") >=
@@ -20445,6 +20463,8 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Oracle, "morok.step.switch.anomaly") >= 1u);
     CHECK(countNamedInstructions(*Oracle, "morok.step.anomaly.distribution") >=
           1u);
+    CHECK_FALSE(
+        hasReadableByteString(*M, "/proc/sys/kernel/perf_event_paranoid"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
