@@ -1672,6 +1672,124 @@ bool linuxSeccompInstall(const Triple &TT, std::uint32_t &Seccomp,
     }
 }
 
+bool linuxSeccompTraceSyscalls(const Triple &TT, std::uint32_t &RtSigaction,
+                               std::uint32_t &Sentinel,
+                               ir::IRRandom &rng) {
+    switch (TT.getArch()) {
+    case Triple::x86_64: {
+        constexpr std::array<std::uint32_t, 6> kSentinels = {
+            39, 102, 104, 107, 108, 186}; // getpid/get*u*id/gettid
+        RtSigaction = 13;
+        Sentinel = kSentinels[rng.range(
+            static_cast<std::uint32_t>(kSentinels.size()))];
+        return true;
+    }
+    case Triple::aarch64: {
+        constexpr std::array<std::uint32_t, 7> kSentinels = {
+            172, 173, 174, 175, 176, 177, 178};
+        RtSigaction = 134;
+        Sentinel = kSentinels[rng.range(
+            static_cast<std::uint32_t>(kSentinels.size()))];
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+struct LinuxRawSigactionLayout {
+    std::uint64_t actionSize = 0;
+    std::uint64_t flagsOffset = 0;
+    std::uint64_t restorerOffset = 0;
+    std::uint64_t sigsetSize = 8;
+    std::uint64_t flags = 0;
+    bool needsRestorer = false;
+};
+
+bool linuxRawSigactionLayout(const Triple &TT, LinuxRawSigactionLayout &L) {
+    if (!TT.isOSLinux())
+        return false;
+    constexpr std::uint64_t kSaSiginfo = 4;
+    switch (TT.getArch()) {
+    case Triple::x86_64:
+        L.actionSize = 152;
+        L.flagsOffset = 8;
+        L.restorerOffset = 16;
+        L.sigsetSize = 8;
+        L.flags = kSaSiginfo | 0x04000000ULL; // SA_RESTORER
+        L.needsRestorer = true;
+        return true;
+    case Triple::aarch64:
+        L.actionSize = 32;
+        L.flagsOffset = 8;
+        L.sigsetSize = 8;
+        L.flags = kSaSiginfo;
+        L.needsRestorer = false;
+        return true;
+    default:
+        return false;
+    }
+}
+
+GlobalVariable *linuxSeccompSigsysResult(Module &M) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antidbg.seccomp.sigsys.slot",
+                                /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(
+        M, i32, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i32, 0), "morok.antidbg.seccomp.sigsys.slot");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(Align(4));
+    return gv;
+}
+
+Function *linuxSeccompSigsysHandler(Module &M) {
+    if (Function *existing = M.getFunction("morok.antidbg.seccomp.sigsys"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), {i32, ptr, ptr}, false),
+        GlobalValue::PrivateLinkage, "morok.antidbg.seccomp.sigsys", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *st = B.CreateStore(ConstantInt::get(i32, 1),
+                             linuxSeccompSigsysResult(M));
+    st->setVolatile(true);
+    st->setAlignment(Align(4));
+    B.CreateRetVoid();
+    return fn;
+}
+
+Function *linuxRtSigreturnRestorer(Module &M, const Triple &TT) {
+    if (Function *existing = M.getFunction("morok.antidbg.seccomp.sigreturn"))
+        return existing;
+    if (TT.getArch() != Triple::x86_64)
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *fn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), false),
+        GlobalValue::PrivateLinkage, "morok.antidbg.seccomp.sigreturn", &M);
+    fn->addFnAttr(Attribute::Naked);
+    fn->addFnAttr(Attribute::NoUnwind);
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *asmTy = FunctionType::get(Type::getVoidTy(ctx), false);
+    InlineAsm *IA = InlineAsm::get(
+        asmTy, "mov $$15, %rax\nsyscall",
+        "~{rax},~{rcx},~{r11},~{memory},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    B.CreateCall(asmTy, IA);
+    B.CreateUnreachable();
+    return fn;
+}
+
 bool linuxLandlockSyscalls(const Triple &TT, std::uint32_t &CreateRuleset,
                            std::uint32_t &RestrictSelf) {
     switch (TT.getArch()) {
@@ -1876,6 +1994,250 @@ void emitLinuxSeccompFilter(IRBuilder<> &B, Module &M, const Triple &TT,
         {ConstantInt::get(ip, kSeccompSetModeFilter),
          ConstantInt::get(ip, kSeccompFilterFlagTsync), prog});
     rc->setName("morok.antidbg.seccomp.tsync");
+}
+
+void emitLinuxSeccompTracerOracle(IRBuilder<> &B, Module &M,
+                                  GlobalVariable *State, ir::IRRandom &rng,
+                                  const Triple &TT) {
+    if (!TT.isOSLinux())
+        return;
+
+    std::uint32_t seccompNr = 0;
+    std::uint32_t auditArch = 0;
+    bool rejectX32 = false;
+    if (!linuxSeccompInstall(TT, seccompNr, auditArch, rejectX32))
+        return;
+    std::uint32_t rtSigactionNr = 0;
+    std::uint32_t sentinelNr = 0;
+    if (!linuxSeccompTraceSyscalls(TT, rtSigactionNr, sentinelNr, rng))
+        return;
+    LinuxRawSigactionLayout layout;
+    if (!linuxRawSigactionLayout(TT, layout))
+        return;
+
+    runtime_seal::getChannel(M, runtime_seal::kAntiDebugChannel, rng);
+    runtime_seal::getChannel(M, runtime_seal::kTracerChannel, rng);
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i16 = Type::getInt16Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    Function *ctor = B.GetInsertBlock()->getParent();
+
+    constexpr std::uint16_t kBpfLdWAbs = 0x20;
+    constexpr std::uint16_t kBpfJmpJeqK = 0x15;
+    constexpr std::uint16_t kBpfAluAndK = 0x54;
+    constexpr std::uint16_t kBpfRetK = 0x06;
+    constexpr std::uint32_t kSeccompDataNr = 0;
+    constexpr std::uint32_t kSeccompDataArch = 4;
+    constexpr std::uint32_t kSeccompDataArg0 = 16;
+    constexpr std::uint32_t kSeccompRetKillProcess = 0x80000000U;
+    constexpr std::uint32_t kSeccompRetTrap = 0x00030000U;
+    constexpr std::uint32_t kSeccompRetTrace = 0x7ff00000U;
+    constexpr std::uint32_t kSeccompRetAllow = 0x7fff0000U;
+    constexpr std::uint32_t kSeccompSetModeFilter = 1;
+    constexpr std::uint32_t kX32SyscallBit = 0x40000000U;
+    constexpr std::uint32_t kSigsys = 31;
+    constexpr std::uint32_t kFilterCapacity = 16;
+
+    std::uint32_t traceCookie = static_cast<std::uint32_t>(rng.next()) | 1U;
+    std::uint32_t trapCookie =
+        static_cast<std::uint32_t>(rng.next() ^ 0xA5366B4DU) | 1U;
+    if (trapCookie == traceCookie)
+        trapCookie ^= 0x80000000U;
+
+    Function *handler = linuxSeccompSigsysHandler(M);
+    Function *restorer = layout.needsRestorer
+                             ? linuxRtSigreturnRestorer(M, TT)
+                             : nullptr;
+    if (layout.needsRestorer && !restorer)
+        return;
+
+    auto *actionTy = ArrayType::get(i8, layout.actionSize);
+    auto *action =
+        B.CreateAlloca(actionTy, nullptr, "morok.antidbg.seccomp.sigsys.sa");
+    auto *oldAction = B.CreateAlloca(actionTy, nullptr,
+                                     "morok.antidbg.seccomp.sigsys.old");
+    action->setAlignment(Align(8));
+    oldAction->setAlignment(Align(8));
+    for (std::uint64_t i = 0; i < layout.actionSize; ++i) {
+        B.CreateStore(ConstantInt::get(i8, 0),
+                      gepI8(B, M, action, constIp(M, i),
+                            "morok.antidbg.seccomp.sigsys.sa.zero"));
+        B.CreateStore(ConstantInt::get(i8, 0),
+                      gepI8(B, M, oldAction, constIp(M, i),
+                            "morok.antidbg.seccomp.sigsys.old.zero"));
+    }
+    B.CreateStore(handler,
+                  gepI8(B, M, action, constIp(M, 0),
+                        "morok.antidbg.seccomp.sigsys.sa.handler"));
+    B.CreateStore(ConstantInt::get(i64, layout.flags),
+                  gepI8(B, M, action, constIp(M, layout.flagsOffset),
+                        "morok.antidbg.seccomp.sigsys.sa.flags"));
+    if (layout.needsRestorer)
+        B.CreateStore(restorer,
+                      gepI8(B, M, action, constIp(M, layout.restorerOffset),
+                            "morok.antidbg.seccomp.sigsys.sa.restorer"));
+
+    Value *sigactionRc = emitLinuxSyscall(
+        B, M, TT, rtSigactionNr,
+        {ConstantInt::get(ip, kSigsys), action, oldAction,
+         ConstantInt::get(ip, layout.sigsetSize)});
+    sigactionRc->setName("morok.antidbg.seccomp.rt_sigaction");
+    Value *sigactionOk =
+        B.CreateICmpEQ(sigactionRc, ConstantInt::get(ip, 0),
+                       "morok.antidbg.seccomp.rt_sigaction.ok");
+
+    auto *filterTy = StructType::get(ctx, {i16, i8, i8, i32});
+    auto *filtersTy = ArrayType::get(filterTy, kFilterCapacity);
+    auto *progTy = StructType::get(ctx, {i16, ptr});
+    auto *filters = B.CreateAlloca(filtersTy, nullptr,
+                                   "morok.antidbg.seccomp.trace.filters");
+    auto *prog =
+        B.CreateAlloca(progTy, nullptr, "morok.antidbg.seccomp.trace.prog");
+
+    auto storeFilter = [&](std::uint32_t index, std::uint16_t code,
+                           std::uint8_t jt, std::uint8_t jf, std::uint32_t k) {
+        Value *slot = B.CreateInBoundsGEP(
+            filtersTy, filters,
+            {ConstantInt::get(ip, 0), ConstantInt::get(ip, index)});
+        B.CreateStore(ConstantInt::get(i16, code),
+                      B.CreateStructGEP(filterTy, slot, 0));
+        B.CreateStore(ConstantInt::get(i8, jt),
+                      B.CreateStructGEP(filterTy, slot, 1));
+        B.CreateStore(ConstantInt::get(i8, jf),
+                      B.CreateStructGEP(filterTy, slot, 2));
+        B.CreateStore(ConstantInt::get(i32, k),
+                      B.CreateStructGEP(filterTy, slot, 3));
+    };
+    std::uint32_t filterCount = 0;
+    auto appendFilter = [&](std::uint16_t code, std::uint8_t jt,
+                            std::uint8_t jf, std::uint32_t k) {
+        storeFilter(filterCount++, code, jt, jf, k);
+    };
+
+    appendFilter(kBpfLdWAbs, 0, 0, kSeccompDataArch);
+    appendFilter(kBpfJmpJeqK, 1, 0, auditArch);
+    appendFilter(kBpfRetK, 0, 0, kSeccompRetKillProcess);
+    if (rejectX32) {
+        appendFilter(kBpfLdWAbs, 0, 0, kSeccompDataNr);
+        appendFilter(kBpfAluAndK, 0, 0, kX32SyscallBit);
+        appendFilter(kBpfJmpJeqK, 1, 0, 0);
+        appendFilter(kBpfRetK, 0, 0, kSeccompRetKillProcess);
+    }
+    appendFilter(kBpfLdWAbs, 0, 0, kSeccompDataNr);
+    appendFilter(kBpfJmpJeqK, 0, 5, sentinelNr);
+    appendFilter(kBpfLdWAbs, 0, 0, kSeccompDataArg0);
+    appendFilter(kBpfJmpJeqK, 0, 1, trapCookie);
+    appendFilter(kBpfRetK, 0, 0, kSeccompRetTrap);
+    appendFilter(kBpfJmpJeqK, 0, 1, traceCookie);
+    appendFilter(kBpfRetK, 0, 0, kSeccompRetTrace);
+    appendFilter(kBpfRetK, 0, 0, kSeccompRetAllow);
+
+    Value *filterPtr = B.CreateInBoundsGEP(
+        filtersTy, filters, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)});
+    B.CreateStore(ConstantInt::get(i16, filterCount),
+                  B.CreateStructGEP(progTy, prog, 0));
+    B.CreateStore(filterPtr, B.CreateStructGEP(progTy, prog, 1));
+
+    BasicBlock *preInstallBB = B.GetInsertBlock();
+    auto *installBB =
+        BasicBlock::Create(ctx, "morok.antidbg.seccomp.install", ctor);
+    auto *afterInstallBB =
+        BasicBlock::Create(ctx, "morok.antidbg.seccomp.installed", ctor);
+    B.CreateCondBr(sigactionOk, installBB, afterInstallBB);
+
+    IRBuilder<> IB(installBB);
+    Value *installRc = emitLinuxSyscall(
+        IB, M, TT, seccompNr,
+        {ConstantInt::get(ip, kSeccompSetModeFilter),
+         ConstantInt::get(ip, 0), prog});
+    installRc->setName("morok.antidbg.seccomp.trace.install");
+    Value *installOk =
+        IB.CreateICmpEQ(installRc, ConstantInt::get(ip, 0),
+                        "morok.antidbg.seccomp.trace.install.ok");
+    IB.CreateBr(afterInstallBB);
+
+    B.SetInsertPoint(afterInstallBB);
+    auto *ready =
+        B.CreatePHI(Type::getInt1Ty(ctx), 2, "morok.antidbg.seccomp.trace.ready");
+    ready->addIncoming(ConstantInt::getFalse(ctx), preInstallBB);
+    ready->addIncoming(installOk, installBB);
+    Value *installFail =
+        B.CreateNot(ready, "morok.antidbg.seccomp.trace.install.fail");
+    foldFlag(B, State, installFail, 0x2C9679E51D04AAB7ULL,
+             "morok.antidbg.seccomp.trace.install.fail");
+
+    auto *probeBB = BasicBlock::Create(ctx, "morok.antidbg.seccomp.trace",
+                                       ctor);
+    auto *afterProbeBB =
+        BasicBlock::Create(ctx, "morok.antidbg.seccomp.after", ctor);
+    B.CreateCondBr(ready, probeBB, afterProbeBB);
+
+    IRBuilder<> PB(probeBB);
+    GlobalVariable *sigsysResult = linuxSeccompSigsysResult(M);
+    auto *clear = PB.CreateStore(ConstantInt::get(i32, 0), sigsysResult);
+    clear->setVolatile(true);
+    clear->setAlignment(Align(4));
+    Value *sigsysRc = emitLinuxSyscall(
+        PB, M, TT, sentinelNr, {ConstantInt::get(ip, trapCookie)});
+    sigsysRc->setName("morok.antidbg.seccomp.sigsys.raise");
+    auto *result =
+        PB.CreateLoad(i32, sigsysResult, "morok.antidbg.seccomp.sigsys.result");
+    result->setVolatile(true);
+    result->setAlignment(Align(4));
+    Value *sigsysDelta =
+        PB.CreateXor(result, ConstantInt::get(i32, 1),
+                     "morok.antidbg.seccomp.sigsys.delta");
+    Value *sigsysDirty =
+        PB.CreateICmpNE(sigsysDelta, ConstantInt::get(i32, 0),
+                        "morok.antidbg.seccomp.sigsys.suppressed");
+
+    Value *traceRc = emitLinuxSyscall(
+        PB, M, TT, sentinelNr, {ConstantInt::get(ip, traceCookie)});
+    traceRc->setName("morok.antidbg.seccomp.trace.raise");
+    const std::int64_t cleanTraceRc =
+        useDirectLinuxSyscalls(M, TT) ? -38 : -1;
+    Value *traceDirty =
+        PB.CreateICmpNE(traceRc, ConstantInt::getSigned(ip, cleanTraceRc),
+                        "morok.antidbg.seccomp.trace.diverged");
+    Value *dirty =
+        PB.CreateOr(sigsysDirty, traceDirty, "morok.antidbg.seccomp.traced");
+    foldFlag(PB, State, dirty, 0xA9F673C8164E25D3ULL,
+             "morok.antidbg.seccomp.traced");
+    runtime_seal::foldWord(PB, runtime_seal::kAntiDebugChannel, sigsysDelta,
+                           0x70C41D2E8A9563BFULL,
+                           "morok.antidbg.seccomp.sigsys.anti_debug");
+    runtime_seal::foldWord(PB, runtime_seal::kTracerChannel, sigsysDelta,
+                           0xB56E4F0D3271C9A8ULL,
+                           "morok.antidbg.seccomp.sigsys.tracer");
+    runtime_seal::foldFlag(PB, runtime_seal::kAntiDebugChannel, traceDirty,
+                           0xD46219E80A7CB53FULL,
+                           "morok.antidbg.seccomp.trace.anti_debug");
+    runtime_seal::foldFlag(PB, runtime_seal::kTracerChannel, traceDirty,
+                           0x4BE8A7209F31D65CULL,
+                           "morok.antidbg.seccomp.trace.tracer");
+    PB.CreateBr(afterProbeBB);
+
+    IRBuilder<> AB(afterProbeBB);
+    auto *restoreBB =
+        BasicBlock::Create(ctx, "morok.antidbg.seccomp.restore", ctor);
+    auto *contBB = BasicBlock::Create(ctx, "morok.antidbg.seccomp.cont", ctor);
+    AB.CreateCondBr(sigactionOk, restoreBB, contBB);
+
+    IRBuilder<> RB(restoreBB);
+    Value *restoreRc = emitLinuxSyscall(
+        RB, M, TT, rtSigactionNr,
+        {ConstantInt::get(ip, kSigsys), oldAction,
+         ConstantPointerNull::get(ptr),
+         ConstantInt::get(ip, layout.sigsetSize)});
+    restoreRc->setName("morok.antidbg.seccomp.rt_sigaction.restore");
+    RB.CreateBr(contBB);
+
+    B.SetInsertPoint(contBB);
 }
 
 void emitLinuxWatcherStart(IRBuilder<> &B, Module &M, Function *WatchFn) {
@@ -2133,6 +2495,7 @@ void emitLinuxAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
              0xA4756E49F2D31219ULL, "morok.antidbg.status");
     foldState(B, State, stat4, 0xDA942042E4DD58B5ULL, "morok.antidbg.stat4");
     emitLinuxLandlockSandbox(B, M, State, TT);
+    emitLinuxSeccompTracerOracle(B, M, State, rng, TT);
     emitLinuxSeccompFilter(B, M, TT, AllowSelfTrace);
 
     if (StartLiveWatchers) {

@@ -16472,12 +16472,16 @@ entry:
     Function *Watch = M->getFunction("morok.antidbg.linux.watch");
     Function *Sentinel = M->getFunction("morok.antidbg.linux.dr.sentinel");
     Function *Scrub = M->getFunction("morok.antidbg.linux.dr.scrub");
+    Function *Sigsys = M->getFunction("morok.antidbg.seccomp.sigsys");
+    Function *Sigreturn = M->getFunction("morok.antidbg.seccomp.sigreturn");
     Function *ProbeWatch = M->getFunction("morok.antidbg.probe.watch");
     Function *HeartbeatWatch = M->getFunction("morok.watchdog.heartbeat.watch");
     REQUIRE(Memfd != nullptr);
     CHECK(Watch != nullptr);
     CHECK(Sentinel != nullptr);
     CHECK(Scrub != nullptr);
+    CHECK(Sigsys != nullptr);
+    CHECK(Sigreturn != nullptr);
     CHECK(ProbeWatch != nullptr);
     CHECK(HeartbeatWatch != nullptr);
     CHECK(Memfd->arg_size() == 3);
@@ -16485,9 +16489,13 @@ entry:
     CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
     Function *AntiDbg = M->getFunction("morok.antidbg");
     REQUIRE(AntiDbg != nullptr);
+    CHECK(M->getGlobalVariable("morok.antidbg.seccomp.sigsys.slot", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
     CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
     CHECK(M->getFunction("ptrace") == nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
+    CHECK(M->getFunction("sigaction") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(hasInlineAsmCall(*Memfd));
     CHECK(hasInlineAsmCall(*AntiDbg));
@@ -16593,6 +16601,44 @@ entry:
                                        "morok.antidbg.seccomp.filters") == 17u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.seccomp.tsync") >=
           1u);
+    CHECK(maxStaticAllocaArrayElements(
+              *AntiDbg, "morok.antidbg.seccomp.trace.filters") == 16u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.seccomp.rt_sigaction") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.rt_sigaction.restore") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.trace.install") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.seccomp.trace.ready") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.trace.install.fail") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg,
+              "morok.antidbg.seccomp.trace.install.fail.anti_debug") == 0u);
+    CHECK(countNamedInstructions(
+              *AntiDbg,
+              "morok.antidbg.seccomp.trace.install.fail.tracer") == 0u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.sigsys.raise") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.sigsys.delta") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.seccomp.trace.raise") >= 1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.seccomp.traced") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.sigsys.anti_debug.next") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.sigsys.tracer.next") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.trace.anti_debug.next") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.seccomp.trace.tracer.next") >= 1u);
+    CHECK(functionHasConstantInt(*AntiDbg, 13u));       // rt_sigaction syscall
+    CHECK(functionHasConstantInt(*AntiDbg, 31u));       // SIGSYS
+    CHECK(functionHasConstantInt(*AntiDbg, 0x00030000)); // SECCOMP_RET_TRAP
+    CHECK(functionHasConstantInt(*AntiDbg, 0x7ff00000)); // SECCOMP_RET_TRACE
     CHECK(functionHasConstantInt(*AntiDbg, 317u));       // seccomp syscall
     CHECK(functionHasConstantInt(*AntiDbg, 0xC000003E)); // AUDIT_ARCH_X86_64
     CHECK(functionHasConstantInt(*AntiDbg, 0x40000000)); // __X32_SYSCALL_BIT
@@ -16646,9 +16692,24 @@ define i32 @main() { ret i32 0 }
     REQUIRE(Ctor != nullptr);
     CHECK(maxStaticAllocaArrayElements(*Ctor,
                                        "morok.antidbg.seccomp.filters") == 17u);
+    CHECK(maxStaticAllocaArrayElements(
+              *Ctor, "morok.antidbg.seccomp.trace.filters") == 16u);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.seccomp.tsync") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.seccomp.rt_sigaction") >= 1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.seccomp.sigsys.anti_debug.next") >= 1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.seccomp.sigsys.tracer.next") >= 1u);
+    CHECK(M->getFunction("morok.antidbg.seccomp.sigsys") != nullptr);
+    CHECK(M->getFunction("morok.antidbg.seccomp.sigreturn") == nullptr);
+    CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
+    CHECK(functionHasConstantInt(*Ctor, 134u));       // rt_sigaction syscall
     CHECK(functionHasConstantInt(*Ctor, 277u));       // seccomp syscall
     CHECK(functionHasConstantInt(*Ctor, 0xC00000B7)); // AUDIT_ARCH_AARCH64
+    CHECK(functionHasConstantInt(*Ctor, 0x00030000)); // SECCOMP_RET_TRAP
+    CHECK(functionHasConstantInt(*Ctor, 0x7ff00000)); // SECCOMP_RET_TRACE
+    CHECK(M->getFunction("sigaction") == nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
     CHECK(M->getFunction("syscall") != nullptr);
     CHECK_FALSE(verifyModule(*M, &errs()));
