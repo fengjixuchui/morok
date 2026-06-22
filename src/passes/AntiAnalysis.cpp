@@ -2052,23 +2052,17 @@ bool linuxSeccompInstall(const Triple &TT, std::uint32_t &Seccomp,
 bool linuxSeccompTraceSyscalls(const Triple &TT, std::uint32_t &RtSigaction,
                                std::uint32_t &Sentinel,
                                ir::IRRandom &rng) {
+    constexpr std::uint32_t kReservedSentinelBase = 0x3fff0000U;
+    constexpr std::uint32_t kReservedSentinelSpan = 0x1000U;
     switch (TT.getArch()) {
-    case Triple::x86_64: {
-        constexpr std::array<std::uint32_t, 6> kSentinels = {
-            39, 102, 104, 107, 108, 186}; // getpid/get*u*id/gettid
+    case Triple::x86_64:
         RtSigaction = 13;
-        Sentinel = kSentinels[rng.range(
-            static_cast<std::uint32_t>(kSentinels.size()))];
+        Sentinel = kReservedSentinelBase + rng.range(kReservedSentinelSpan);
         return true;
-    }
-    case Triple::aarch64: {
-        constexpr std::array<std::uint32_t, 7> kSentinels = {
-            172, 173, 174, 175, 176, 177, 178};
+    case Triple::aarch64:
         RtSigaction = 134;
-        Sentinel = kSentinels[rng.range(
-            static_cast<std::uint32_t>(kSentinels.size()))];
+        Sentinel = kReservedSentinelBase + rng.range(kReservedSentinelSpan);
         return true;
-    }
     default:
         return false;
     }

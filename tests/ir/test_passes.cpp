@@ -395,6 +395,21 @@ bool namedInstructionUsesConstant(Function &F, StringRef name,
     return false;
 }
 
+std::vector<std::uint64_t> namedCallFirstArgConstants(Function &F,
+                                                      StringRef name) {
+    std::vector<std::uint64_t> values;
+    for (Instruction &I : instructions(F)) {
+        if (!I.getName().starts_with(name))
+            continue;
+        auto *CB = dyn_cast<CallBase>(&I);
+        if (!CB || CB->arg_size() == 0)
+            continue;
+        if (auto *CI = dyn_cast<ConstantInt>(CB->getArgOperand(0)))
+            values.push_back(CI->getZExtValue());
+    }
+    return values;
+}
+
 bool constantContainsInt(const Constant *C, std::uint64_t value) {
     if (!C)
         return false;
@@ -17402,6 +17417,15 @@ entry:
               *AntiDbg, "morok.antidbg.seccomp.sigsys.delta") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg,
                                  "morok.antidbg.seccomp.trace.raise") >= 1u);
+    auto X86SigsysSentinels = namedCallFirstArgConstants(
+        *AntiDbg, "morok.antidbg.seccomp.sigsys.raise");
+    auto X86TraceSentinels = namedCallFirstArgConstants(
+        *AntiDbg, "morok.antidbg.seccomp.trace.raise");
+    REQUIRE(X86SigsysSentinels.size() == 1u);
+    REQUIRE(X86TraceSentinels.size() == 1u);
+    CHECK(X86SigsysSentinels[0] == X86TraceSentinels[0]);
+    CHECK(X86SigsysSentinels[0] >= 0x3fff0000u);
+    CHECK(X86SigsysSentinels[0] < 0x3fff1000u);
     CHECK(countNamedInstructions(*AntiDbg,
                                  "morok.antidbg.seccomp.traced") >= 1u);
     CHECK(namedInstructionPrecedes(*AntiDbg,
@@ -17513,6 +17537,15 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.seccomp.tsync") >= 1u);
     CHECK(countNamedInstructions(*Ctor,
                                  "morok.antidbg.seccomp.rt_sigaction") >= 1u);
+    auto Aarch64SigsysSentinels = namedCallFirstArgConstants(
+        *Ctor, "morok.antidbg.seccomp.sigsys.raise");
+    auto Aarch64TraceSentinels = namedCallFirstArgConstants(
+        *Ctor, "morok.antidbg.seccomp.trace.raise");
+    REQUIRE(Aarch64SigsysSentinels.size() == 1u);
+    REQUIRE(Aarch64TraceSentinels.size() == 1u);
+    CHECK(Aarch64SigsysSentinels[0] == Aarch64TraceSentinels[0]);
+    CHECK(Aarch64SigsysSentinels[0] >= 0x3fff0000u);
+    CHECK(Aarch64SigsysSentinels[0] < 0x3fff1000u);
     CHECK(countNamedInstructions(
               *Ctor, "morok.antidbg.seccomp.sigsys.anti_debug.next") >= 1u);
     CHECK(countNamedInstructions(
