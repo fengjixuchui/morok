@@ -384,6 +384,187 @@ void incrementDiff(IRBuilderBase &B, AllocaInst *Diff, Value *Flag,
     st->setVolatile(true);
 }
 
+AllocaInst *createGateCounter(IRBuilderBase &B, const Twine &Name) {
+    auto *slot = B.CreateAlloca(B.getInt64Ty(), nullptr, Name);
+    B.CreateStore(ConstantInt::get(B.getInt64Ty(), 0), slot)->setVolatile(true);
+    return slot;
+}
+
+Value *loadGateCounter(IRBuilderBase &B, AllocaInst *Slot, const Twine &Name) {
+    auto *value = B.CreateLoad(B.getInt64Ty(), Slot, Name);
+    value->setVolatile(true);
+    return value;
+}
+
+Value *weightedGateContribution(IRBuilderBase &B, Value *Active,
+                                std::uint64_t Weight, std::uint64_t Salt,
+                                const Twine &Name) {
+    auto *i64 = B.getInt64Ty();
+    switch (Salt % 3) {
+    case 0:
+        return B.CreateMul(B.CreateZExt(Active, i64),
+                           ConstantInt::get(i64, Weight),
+                           Name + ".weight.mul");
+    case 1:
+        return B.CreateSelect(Active, ConstantInt::get(i64, Weight),
+                              ConstantInt::get(i64, 0),
+                              Name + ".weight.select");
+    default: {
+        Value *mask =
+            B.CreateSub(ConstantInt::get(i64, 0), B.CreateZExt(Active, i64),
+                        Name + ".weight.mask");
+        return B.CreateAnd(mask, ConstantInt::get(i64, Weight),
+                           Name + ".weight.and");
+    }
+    }
+}
+
+void incrementWeightedGate(IRBuilderBase &B, AllocaInst *Slot, Value *Flag,
+                           std::uint64_t Weight, std::uint64_t Salt,
+                           const Twine &Name) {
+    if (Weight == 0)
+        return;
+    auto *i64 = B.getInt64Ty();
+    Value *active =
+        B.CreateICmpNE(toI64(B, Flag), ConstantInt::get(i64, 0),
+                       Name + ".active");
+    Value *weighted = weightedGateContribution(B, active, Weight, Salt, Name);
+    Value *old = loadGateCounter(B, Slot, Name + ".old");
+    Value *next = B.CreateAdd(old, weighted, Name + ".next");
+    auto *st = B.CreateStore(next, Slot);
+    st->setVolatile(true);
+}
+
+struct GateAccumulator {
+    AllocaInst *hard = nullptr;
+    AllocaInst *soft = nullptr;
+    AllocaInst *coherence = nullptr;
+    AllocaInst *clusters = nullptr;
+};
+
+GateAccumulator createGateAccumulator(IRBuilderBase &B) {
+    return {createGateCounter(B, "morok.gate.hard.score"),
+            createGateCounter(B, "morok.gate.soft.score"),
+            createGateCounter(B, "morok.gate.coherence.penalty"),
+            createGateCounter(B, "morok.gate.cluster.score")};
+}
+
+void addHardGateSignal(IRBuilderBase &B, GateAccumulator &Gate, Value *Flag,
+                       std::uint64_t Weight, std::uint64_t Salt,
+                       const Twine &Name) {
+    incrementWeightedGate(B, Gate.hard, Flag, Weight, Salt, Name + ".hard");
+    incrementWeightedGate(B, Gate.clusters, Flag, 1,
+                          Salt ^ 0x9E3779B97F4A7C15ULL, Name + ".cluster");
+}
+
+void addSoftGateSignal(IRBuilderBase &B, GateAccumulator &Gate, Value *Flag,
+                       std::uint64_t Weight, std::uint64_t Salt,
+                       const Twine &Name) {
+    incrementWeightedGate(B, Gate.soft, Flag, Weight, Salt, Name + ".soft");
+    incrementWeightedGate(B, Gate.clusters, Flag, 1,
+                          Salt ^ 0xA0761D6478BD642FULL, Name + ".cluster");
+}
+
+void addCoherencePenalty(IRBuilderBase &B, GateAccumulator &Gate, Value *Flag,
+                         std::uint64_t Weight, std::uint64_t Salt,
+                         const Twine &Name) {
+    incrementWeightedGate(B, Gate.coherence, Flag, Weight, Salt,
+                          Name + ".coherence");
+}
+
+void addGateCoherencePenalties(IRBuilderBase &B, GateAccumulator &Gate) {
+    auto *i64 = B.getInt64Ty();
+    Value *hard =
+        loadGateCounter(B, Gate.hard, "morok.gate.coherence.hard.peek");
+    Value *soft =
+        loadGateCounter(B, Gate.soft, "morok.gate.coherence.soft.peek");
+    Value *softCluster =
+        B.CreateICmpUGE(soft, ConstantInt::get(i64, 2),
+                        "morok.gate.coherence.soft.cluster");
+    Value *noHard =
+        B.CreateICmpEQ(hard, ConstantInt::get(i64, 0),
+                       "morok.gate.coherence.no.hard");
+    Value *unbackedSoft =
+        B.CreateAnd(softCluster, noHard,
+                    "morok.gate.coherence.soft.unbacked");
+    addCoherencePenalty(B, Gate, unbackedSoft, 2, 0x43A7B91D5E2C806FULL,
+                        "morok.gate.coherence.soft.unbacked");
+}
+
+struct GateDecision {
+    Value *hardScore = nullptr;
+    Value *softScore = nullptr;
+    Value *clusterScore = nullptr;
+    Value *finalScore = nullptr;
+    Value *hardConfirmed = nullptr;
+    Value *softConfirmed = nullptr;
+    Value *confirmed = nullptr;
+};
+
+GateDecision emitGateDecision(IRBuilderBase &B, GlobalVariable *State,
+                              GateAccumulator &Gate) {
+    auto *i64 = B.getInt64Ty();
+    GateDecision decision;
+    decision.hardScore =
+        loadGateCounter(B, Gate.hard, "morok.gate.hard.score.final");
+    decision.softScore =
+        loadGateCounter(B, Gate.soft, "morok.gate.soft.score.final");
+    decision.clusterScore =
+        loadGateCounter(B, Gate.clusters, "morok.gate.cluster.score.final");
+    Value *raw =
+        B.CreateAdd(decision.hardScore, decision.softScore,
+                    "morok.gate.raw.score");
+    Value *penalty =
+        loadGateCounter(B, Gate.coherence,
+                        "morok.gate.coherence.penalty.final");
+    Value *cap = B.CreateLShr(raw, ConstantInt::get(i64, 1),
+                              "morok.gate.coherence.cap");
+    Value *cappedPenalty =
+        B.CreateSelect(B.CreateICmpUGT(penalty, cap,
+                                       "morok.gate.coherence.over.cap"),
+                       cap, penalty, "morok.gate.coherence.capped");
+    decision.finalScore =
+        B.CreateSub(raw, cappedPenalty, "morok.gate.score.final");
+    decision.hardConfirmed =
+        B.CreateICmpUGE(decision.hardScore, ConstantInt::get(i64, 2),
+                        "morok.gate.hard.confirmed");
+    Value *clusterConfirmed =
+        B.CreateICmpUGE(decision.clusterScore, ConstantInt::get(i64, 2),
+                        "morok.gate.cluster.confirmed");
+    Value *scoreConfirmed =
+        B.CreateICmpUGE(decision.finalScore, ConstantInt::get(i64, 4),
+                        "morok.gate.score.confirmed");
+    Value *confirmedCluster =
+        B.CreateAnd(scoreConfirmed, clusterConfirmed,
+                    "morok.gate.confirmed.cluster");
+    decision.confirmed =
+        B.CreateAnd(confirmedCluster, decision.hardConfirmed,
+                    "morok.gate.confirmed");
+    decision.softConfirmed = B.CreateAnd(
+        B.CreateICmpUGE(decision.softScore, ConstantInt::get(i64, 2),
+                        "morok.gate.soft.threshold"),
+        decision.hardConfirmed, "morok.gate.soft.confirmed");
+
+    foldState(B, State, decision.finalScore, 0x2E5B91A73C64D80FULL,
+              "morok.gate.score.state");
+    runtime_seal::foldFlag(B, runtime_seal::kAntiDebugChannel,
+                           decision.confirmed, 0x9C4F1D72E6A835B0ULL,
+                           "morok.gate.score.fold");
+    Value *softWord =
+        B.CreateSelect(decision.softConfirmed, decision.softScore,
+                       ConstantInt::get(i64, 0), "morok.gate.soft.word");
+    runtime_seal::foldWord(B, runtime_seal::kAntiDebugChannel, softWord,
+                           0x5F72E319A840C6DBULL, "morok.gate.soft.kdf");
+    Value *coherenceWord =
+        B.CreateSelect(decision.confirmed, cappedPenalty,
+                       ConstantInt::get(i64, 0),
+                       "morok.gate.coherence.word");
+    runtime_seal::foldWord(B, runtime_seal::kAntiDebugChannel, coherenceWord,
+                           0xC1A46E8B32D90F75ULL,
+                           "morok.gate.coherence.kdf");
+    return decision;
+}
+
 Value *arrayBytePtr(IRBuilderBase &B, ArrayType *ArrTy, Value *Base,
                     Value *Index) {
     auto *idxTy = cast<IntegerType>(Index->getType());
@@ -7347,7 +7528,7 @@ Function *sandboxTbTimingTarget(Module &M) {
     return fn;
 }
 
-void emitSandboxTbTiming(IRBuilder<> &B, Module &M, AllocaInst *Score) {
+Value *emitSandboxTbTiming(IRBuilder<> &B, Module &M, AllocaInst *Score) {
     Function *target = sandboxTbTimingTarget(M);
     auto *i64 = Type::getInt64Ty(M.getContext());
     Value *seed = B.CreatePtrToInt(target, i64,
@@ -7379,15 +7560,18 @@ void emitSandboxTbTiming(IRBuilder<> &B, Module &M, AllocaInst *Score) {
     Value *resultOk =
         B.CreateICmpNE(warmResult, ConstantInt::get(i64, 0),
                        "morok.antihook.sandbox.tcg.tb.result.ok");
-    incrementDiff(B, Score, B.CreateAnd(clockOk, B.CreateAnd(ratio, resultOk)),
-                  "morok.antihook.sandbox.tcg.tb");
+    Value *hit =
+        B.CreateAnd(clockOk, B.CreateAnd(ratio, resultOk),
+                    "morok.antihook.sandbox.tcg.tb.hit");
+    incrementDiff(B, Score, hit, "morok.antihook.sandbox.tcg.tb");
+    return hit;
 }
 
-void emitSandboxSmcLatency(IRBuilder<> &B, Module &M, const Triple &TT,
+Value *emitSandboxSmcLatency(IRBuilder<> &B, Module &M, const Triple &TT,
                            AllocaInst *Score) {
     if (intPtrTy(M)->getBitWidth() != 64 ||
         (!TT.isOSLinux() && !TT.isOSDarwin() && !TT.isOSWindows()))
-        return;
+        return nullptr;
     LLVMContext &ctx = M.getContext();
     auto *i8 = Type::getInt8Ty(ctx);
     auto *i32 = Type::getInt32Ty(ctx);
@@ -7428,9 +7612,10 @@ void emitSandboxSmcLatency(IRBuilder<> &B, Module &M, const Triple &TT,
         protectOk = B.CreateICmpNE(rc, ConstantInt::get(i32, 0),
                                    "morok.antihook.sandbox.smc.rwx.ok");
     } else {
-        return;
+        return nullptr;
     }
 
+    BasicBlock *preBB = B.GetInsertBlock();
     auto *hotBB = BasicBlock::Create(ctx, "morok.antihook.sandbox.smc", parent);
     auto *afterBB =
         BasicBlock::Create(ctx, "morok.antihook.sandbox.after.smc", parent);
@@ -7494,11 +7679,20 @@ void emitSandboxSmcLatency(IRBuilder<> &B, Module &M, const Triple &TT,
         HB.CreateICmpEQ(second, ConstantInt::get(i32, 0x13579BDFu),
                         "morok.antihook.sandbox.smc.second.ok"),
         "morok.antihook.sandbox.smc.result.ok");
-    incrementDiff(HB, Score,
-                  HB.CreateAnd(clockOk, HB.CreateAnd(slow, resultsOk)),
-                  "morok.antihook.sandbox.smc.flush");
+    Value *hit =
+        HB.CreateAnd(clockOk, HB.CreateAnd(slow, resultsOk),
+                     "morok.antihook.sandbox.smc.flush.hit");
+    incrementDiff(HB, Score, hit, "morok.antihook.sandbox.smc.flush");
     HB.CreateBr(afterBB);
+
+    IRBuilder<> AB(afterBB);
+    auto *observed =
+        AB.CreatePHI(Type::getInt1Ty(ctx), 2,
+                     "morok.antihook.sandbox.smc.flush.observed");
+    observed->addIncoming(ConstantInt::getFalse(ctx), preBB);
+    observed->addIncoming(hit, hotBB);
     B.SetInsertPoint(afterBB);
+    return observed;
 }
 
 Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
@@ -7527,6 +7721,11 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
     AllocaInst *score =
         B.CreateAlloca(i64, nullptr, "morok.antihook.sandbox.score");
     B.CreateStore(ConstantInt::get(i64, 0), score)->setVolatile(true);
+    AllocaInst *coherence =
+        B.CreateAlloca(i64, nullptr,
+                       "morok.antihook.sandbox.coherence.penalty");
+    B.CreateStore(ConstantInt::get(i64, 0), coherence)->setVolatile(true);
+    Value *identityEvidence = ConstantInt::getFalse(ctx);
 
     if (X86) {
         auto *tripwire = B.CreateLoad(i8, sandboxTripwireGate(M),
@@ -7582,9 +7781,52 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
         Value *qemuBrand = emitQemuBrandMatch(B, M);
         incrementDiff(B, score, qemuBrand,
                       "morok.antihook.sandbox.qemu.brand");
+        identityEvidence =
+            B.CreateOr(B.CreateOr(hypervisor, vmwareVendor),
+                       B.CreateOr(tcgVendor, qemuBrand),
+                       "morok.antihook.sandbox.identity.evidence");
+        Value *hvWithoutLeaf =
+            B.CreateAnd(hypervisor,
+                        B.CreateNot(hvVendor,
+                                    "morok.antihook.sandbox.hv.vendor.missing"),
+                        "morok.antihook.sandbox.coherence.hv.no.vendor");
+        incrementWeightedGate(B, coherence, hvWithoutLeaf, 2,
+                              0xD9A6C13E7B4F0285ULL,
+                              "morok.antihook.sandbox.coherence.hv.no.vendor");
+        Value *vendorWithoutHv = B.CreateAnd(
+            B.CreateOr(vmwareVendor, tcgVendor,
+                       "morok.antihook.sandbox.vendor.identity"),
+            B.CreateNot(hypervisor,
+                        "morok.antihook.sandbox.hypervisor.absent"),
+            "morok.antihook.sandbox.coherence.vendor.no.hv");
+        incrementWeightedGate(
+            B, coherence, vendorWithoutHv, 2, 0x74E2B93D1C8056AFULL,
+            "morok.antihook.sandbox.coherence.vendor.no.hv");
+        Value *brandWithoutHv =
+            B.CreateAnd(qemuBrand,
+                        B.CreateNot(hypervisor,
+                                    "morok.antihook.sandbox.brand.hv.absent"),
+                        "morok.antihook.sandbox.coherence.brand.no.hv");
+        incrementWeightedGate(B, coherence, brandWithoutHv, 1,
+                              0xB51F28E6C4097D3AULL,
+                              "morok.antihook.sandbox.coherence.brand.no.hv");
         if (TT.isArch64Bit()) {
-            emitSandboxTbTiming(B, M, score);
-            emitSandboxSmcLatency(B, M, TT, score);
+            Value *tbHit = emitSandboxTbTiming(B, M, score);
+            Value *smcHit = emitSandboxSmcLatency(B, M, TT, score);
+            Value *timingHit = tbHit ? tbHit : ConstantInt::getFalse(ctx);
+            if (smcHit)
+                timingHit =
+                    B.CreateOr(timingHit, smcHit,
+                               "morok.antihook.sandbox.timing.artifact");
+            Value *timingWithoutIdentity = B.CreateAnd(
+                timingHit,
+                B.CreateNot(identityEvidence,
+                            "morok.antihook.sandbox.identity.absent"),
+                "morok.antihook.sandbox.coherence.timing.no.identity");
+            incrementWeightedGate(
+                B, coherence, timingWithoutIdentity, 1,
+                0xC2E7A49B581D306FULL,
+                "morok.antihook.sandbox.coherence.timing.no.identity");
         }
 
         auto *backdoorBB =
@@ -7661,6 +7903,18 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
             "morok.antihook.sandbox.ram.low");
         incrementDiff(B, score, oneCpu, "morok.antihook.sandbox.cpu");
         incrementDiff(B, score, lowPages, "morok.antihook.sandbox.ram");
+        Value *lowResource =
+            B.CreateOr(oneCpu, lowPages,
+                       "morok.antihook.sandbox.low.resource");
+        Value *resourceWithoutIdentity = B.CreateAnd(
+            lowResource,
+            B.CreateNot(identityEvidence,
+                        "morok.antihook.sandbox.resource.identity.absent"),
+            "morok.antihook.sandbox.coherence.resource.no.identity");
+        incrementWeightedGate(
+            B, coherence, resourceWithoutIdentity, 1,
+            0x8F13D6A0C254B79EULL,
+            "morok.antihook.sandbox.coherence.resource.no.identity");
 
         // The clock_gettime/nanosleep heuristics below model `struct timespec`
         // as two 64-bit fields and read it back with emitClockGettimeNanos's
@@ -7707,11 +7961,30 @@ Function *sandboxHeuristicProbe(Module &M, const Triple &TT) {
             B.CreateICmpULT(sleepDelta, ConstantInt::get(i64, 1000000)),
             "morok.antihook.sandbox.sleep.skip");
         incrementDiff(B, score, sleepSkipped, "morok.antihook.sandbox.sleep");
+        Value *timeOnly =
+            B.CreateAnd(B.CreateOr(shortUptime, sleepSkipped,
+                                   "morok.antihook.sandbox.time.artifact"),
+                        B.CreateNot(identityEvidence,
+                                    "morok.antihook.sandbox.time.identity.absent"),
+                        "morok.antihook.sandbox.coherence.time.no.identity");
+        incrementWeightedGate(
+            B, coherence, timeOnly, 1, 0xA4619C7D502E38B5ULL,
+            "morok.antihook.sandbox.coherence.time.no.identity");
         } // TT.isArch64Bit()
     }
 
-    auto *out = B.CreateLoad(i64, score, "morok.antihook.sandbox.score.ret");
-    out->setVolatile(true);
+    Value *raw =
+        loadGateCounter(B, score, "morok.antihook.sandbox.raw.score");
+    Value *penalty = loadGateCounter(
+        B, coherence, "morok.antihook.sandbox.coherence.penalty.final");
+    Value *cap = B.CreateLShr(raw, ConstantInt::get(i64, 1),
+                              "morok.antihook.sandbox.coherence.cap");
+    Value *cappedPenalty = B.CreateSelect(
+        B.CreateICmpUGT(penalty, cap,
+                        "morok.antihook.sandbox.coherence.over.cap"),
+        cap, penalty, "morok.antihook.sandbox.coherence.capped");
+    Value *out =
+        B.CreateSub(raw, cappedPenalty, "morok.antihook.sandbox.score.ret");
     B.CreateRet(out);
     return fn;
 }
@@ -17809,7 +18082,6 @@ bool microarchitecturalCanaryModule(Module &M, ir::IRRandom &rng) {
 bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     const Triple tt(M.getTargetTriple());
     LLVMContext &ctx = M.getContext();
-    auto *i32 = Type::getInt32Ty(ctx);
     auto *ptr = PointerType::getUnqual(ctx);
     constexpr std::uint32_t kMaxPrologueTargets = 16;
 
@@ -17827,17 +18099,15 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
     antiDebugSeal(M, rng);
     GlobalVariable *state = antiHookState(M, rng);
     IRBuilder<> B(&ctor->getEntryBlock());
-    AllocaInst *corroboration =
-        B.CreateAlloca(B.getInt64Ty(), nullptr, "morok.corroborate.score");
-    B.CreateStore(ConstantInt::get(B.getInt64Ty(), 0), corroboration)
-        ->setVolatile(true);
+    GateAccumulator gate = createGateAccumulator(B);
 
     if (Function *clean = cleanCopyProbe(M, rng, tt)) {
         Value *diff = B.CreateCall(clean, {}, "morok.antihook.clean.diff");
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.clean.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.clean");
+        addSoftGateSignal(B, gate, changed, 1, 0x8E12A6D5C9437B20ULL,
+                          "morok.gate.clean");
         foldState(B, state, diff, 0xE0B9CA7F2D341985ULL,
                   "morok.antihook.clean");
         foldFlag(B, state, changed, 0x48C3F3A9127DE40BULL,
@@ -17850,7 +18120,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.got.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.got");
+        addHardGateSignal(B, gate, changed, 3, 0xF3A91C6E245BD807ULL,
+                          "morok.gate.got");
         foldState(B, state, diff, 0xF93A8B7C62D514E1ULL, "morok.antihook.got");
         foldEnforcedFlag(B, state, changed, 0xB17D4E23C9A5806FULL,
                          "morok.antihook.got.changed");
@@ -17860,7 +18131,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.fixup.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.fixup");
+        addSoftGateSignal(B, gate, changed, 1, 0x61D48F0A7C2E9B35ULL,
+                          "morok.gate.fixup");
         foldState(B, state, diff, 0x8D46E52CA7B9130FULL,
                   "morok.antihook.fixup");
         foldFlag(B, state, changed, 0xD1C9A03F76542BE8ULL,
@@ -17873,7 +18145,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.census.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.census");
+        addSoftGateSignal(B, gate, changed, 1, 0xB7045E2CA91D683FULL,
+                          "morok.gate.census");
         foldState(B, state, diff, 0x6B4E9D718C2A35F0ULL,
                   "morok.antihook.census");
         changed->setName("morok.negative.modules.extra");
@@ -17887,7 +18160,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.wxorx.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.wxorx");
+        addHardGateSignal(B, gate, changed, 3, 0x2C8B15D9F0476EA3ULL,
+                          "morok.gate.wxorx");
         foldState(B, state, diff, 0x14E2B7C95A680D3FULL,
                   "morok.antihook.wxorx");
         foldEnforcedFlag(B, state, changed, 0xD8F31C6A4B927E50ULL,
@@ -17899,7 +18173,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.diverge.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.diverge");
+        addHardGateSignal(B, gate, changed, 3, 0x9D6F203BA84C517EULL,
+                          "morok.gate.diverge");
         foldState(B, state, diff, 0x2F8D6C1E9A7453B0ULL,
                   "morok.antihook.diverge");
         foldEnforcedFlag(B, state, changed, 0xC58E90A37B42D16FULL,
@@ -17910,7 +18185,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.emu.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.emu");
+        addHardGateSignal(B, gate, changed, 3, 0x4A73D8C10E6F29B5ULL,
+                          "morok.gate.emu");
         foldState(B, state, diff, 0x7642CDB91E30A58FULL, "morok.antihook.emu");
         foldEnforcedFlag(B, state, changed, 0x1F0E3D2C4B5A6978ULL,
                          "morok.antihook.emu.changed");
@@ -17920,7 +18196,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.fpu.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.fpu");
+        addHardGateSignal(B, gate, changed, 3, 0x6E20C4F9A38B51D7ULL,
+                          "morok.gate.fpu");
         foldState(B, state, diff, 0xA38F51D76B20C4E9ULL, "morok.antihook.fpu");
         foldEnforcedFlag(B, state, changed, 0x62D9B40E8F1C357AULL,
                          "morok.antihook.fpu.changed");
@@ -17931,7 +18208,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpUGE(score, ConstantInt::get(B.getInt64Ty(), 2),
                             "morok.corroborate.sandbox.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.sandbox");
+        addSoftGateSignal(B, gate, changed, 1, 0xD251A07B6E34C89FULL,
+                          "morok.gate.sandbox");
         foldState(B, state, score, 0x9A01C7E52D63B48FULL,
                   "morok.antihook.sandbox");
         // VM/cloud identity and sandbox-shape signals are useful telemetry, but
@@ -17945,7 +18223,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.dbi.smc.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.dbi.smc");
+        addHardGateSignal(B, gate, changed, 3, 0x7E40B2C95D18A36FULL,
+                          "morok.gate.dbi.smc");
         foldState(B, state, diff, 0xE62D41B98A3F570CULL,
                   "morok.antihook.dbi.smc");
         foldEnforcedFlag(B, state, changed, 0x73B5D02E6C49A18FULL,
@@ -17956,7 +18235,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.schro.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.schro");
+        addSoftGateSignal(B, gate, changed, 1, 0xA59C31E74B2086D3ULL,
+                          "morok.gate.schro");
         foldState(B, state, diff, 0xC92D4F61A7E8053BULL,
                   "morok.antihook.schro");
         foldFlag(B, state, changed, 0x5F0A81C3D624B7E9ULL,
@@ -17968,7 +18248,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.antidump.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.antidump");
+        addSoftGateSignal(B, gate, changed, 1, 0x37F8A6C2D9145B0EULL,
+                          "morok.gate.antidump");
         foldState(B, state, diff, 0xD48C71E9A5B2036FULL,
                   "morok.antihook.antidump");
         foldFlag(B, state, changed, 0x6E51B9C07D3A428FULL,
@@ -17979,7 +18260,8 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.dbi.changed");
-        incrementDiff(B, corroboration, changed, "morok.corroborate.dbi");
+        addHardGateSignal(B, gate, changed, 3, 0xC68E4901B2F75AD3ULL,
+                          "morok.gate.dbi");
         foldState(B, state, diff, 0x1B89E4C76F20DA53ULL,
                   "morok.antihook.dbi");
         foldEnforcedFlag(B, state, changed, 0xF4A7812C39D60E5BULL,
@@ -17991,12 +18273,15 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
         Value *changed =
             B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
                            "morok.corroborate.negative.timing.changed");
-        incrementDiff(B, corroboration, changed,
-                      "morok.corroborate.negative.timing");
+        addSoftGateSignal(B, gate, changed, 1, 0x1B7D4E903A6C52F8ULL,
+                          "morok.gate.negative.timing");
         foldState(B, state, diff, 0x4D91C2A8F76E350BULL,
                   "morok.negative.timing");
-        foldEnforcedFlag(B, state, changed, 0x8A6357D1C49E20BFULL,
-                         "morok.negative.timing.changed");
+        // Timing remains a low-weight, corroborated score input.  A loaded
+        // host, nested VM, or scheduler hiccup must not directly poison the
+        // consumed anti_debug seal (#147).
+        foldFlag(B, state, changed, 0x8A6357D1C49E20BFULL,
+                 "morok.negative.timing.changed");
     }
     insertStackOriginChecks(M, stackOriginCheck(M), state, prologueTargets, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);
@@ -18005,23 +18290,25 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                                       rng);
 
     if (tt.isOSDarwin()) {
+        addGateCoherencePenalties(B, gate);
+        emitGateDecision(B, state, gate);
         B.CreateRetVoid();
         appendToGlobalCtors(M, ctor, 0);
         return true;
     }
     if (!tt.isOSLinux()) {
+        addGateCoherencePenalties(B, gate);
+        emitGateDecision(B, state, gate);
         B.CreateRetVoid();
         appendToGlobalCtors(M, ctor, 0);
         return true;
     }
 
     // Detect a resident function-hooking framework: if its entry point
-    // resolves, the process is being instrumented — bail out.  Darwin uses the
-    // clean-copy checker here until the Mach-O export-by-hash resolver exists.
+    // resolves, the process is being instrumented.  The verdict joins the gate
+    // accumulator instead of branching to an immediate exit (#147).
     FunctionCallee dlsym = M.getOrInsertFunction(
         "dlsym", FunctionType::get(ptr, {ptr, ptr}, false));
-    FunctionCallee exitFn = M.getOrInsertFunction(
-        "exit", FunctionType::get(Type::getVoidTy(ctx), {i32}, false));
 
     BasicBlock *guardBB = B.GetInsertBlock();
     auto *dlsymBB = BasicBlock::Create(ctx, "morok.antihook.dlsym", ctor);
@@ -18045,27 +18332,26 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                                "morok.antihook.hooked");
     hooked->addIncoming(ConstantInt::getFalse(ctx), guardBB);
     hooked->addIncoming(dynHooked, dlsymBB);
-    auto *score = B.CreateLoad(B.getInt64Ty(), corroboration,
-                               "morok.corroborate.score.final");
-    score->setVolatile(true);
-    Value *confirmed =
-        B.CreateICmpUGE(score, ConstantInt::get(B.getInt64Ty(), 2),
-                        "morok.corroborate.confirmed");
-    Value *aggressive = B.CreateAnd(hooked, confirmed,
-                                    "morok.corroborate.aggressive");
+    addHardGateSignal(B, gate, hooked, 3, 0xE57A2C91D603B48FULL,
+                      "morok.gate.hook.symbol");
+    addGateCoherencePenalties(B, gate);
+    GateDecision decision = emitGateDecision(B, state, gate);
+    Value *aggressive = B.CreateAnd(hooked, decision.confirmed,
+                                    "morok.gate.response.aggressive");
     foldPoisonFlag(B, aggressive, 0xA4F6C2E91B537D8BULL,
                    "morok.antihook.corroborated");
-
-    auto *bail = BasicBlock::Create(ctx, "bail", ctor);
-    auto *cont = BasicBlock::Create(ctx, "cont", ctor);
-    B.CreateCondBr(aggressive, bail, cont);
-
-    IRBuilder<> BB(bail);
-    BB.CreateCall(exitFn, {ConstantInt::get(i32, 1)});
-    BB.CreateUnreachable();
-
-    IRBuilder<> CB(cont);
-    CB.CreateRetVoid();
+    Value *softTier = B.CreateSelect(
+        decision.softConfirmed, ConstantInt::get(B.getInt64Ty(), 4),
+        ConstantInt::get(B.getInt64Ty(), 0), "morok.gate.response.soft.tier");
+    Value *responseTier = B.CreateSelect(
+        aggressive, ConstantInt::get(B.getInt64Ty(), 7), softTier,
+        "morok.gate.response.tier");
+    foldState(B, state, responseTier, 0xE31C749A52B806DFULL,
+              "morok.gate.response");
+    runtime_seal::foldWord(B, runtime_seal::kAntiDebugChannel, responseTier,
+                           0x7C2D48E1B59A306FULL,
+                           "morok.gate.response.kdf");
+    B.CreateRetVoid();
     appendToGlobalCtors(M, ctor, 0);
     return true;
 }
