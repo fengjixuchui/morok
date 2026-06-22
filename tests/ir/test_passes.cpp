@@ -17835,6 +17835,14 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.heap.flags") >= 1u);
     CHECK(countNamedInstructions(*Probe,
                                  "morok.win.pebheap.heap.force.flags") >= 1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.nt.heapdebug.present") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.win.pebheap.heap.debug.present") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *Probe, "morok.win.pebheap.nt.heap.coherence.mismatch") >= 1u);
     CHECK(countNamedInstructions(*Probe, "morok.win.pebheap.heap.composite") >=
           1u);
     Instruction *Majority =
@@ -17850,6 +17858,11 @@ define i32 @main() { ret i32 0 }
         findNamedInstruction(*Probe, "morok.win.pebheap.api.raw.diverged");
     REQUIRE(ApiDiverged != nullptr);
     CHECK(valueFeedsNamedInstruction(ApiDiverged,
+                                     "morok.seal.fold.anti_debug"));
+    Instruction *HeapCoherence = findNamedInstruction(
+        *Probe, "morok.win.pebheap.nt.heap.coherence.mismatch");
+    REQUIRE(HeapCoherence != nullptr);
+    CHECK(valueFeedsNamedInstruction(HeapCoherence,
                                      "morok.seal.fold.anti_debug"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }

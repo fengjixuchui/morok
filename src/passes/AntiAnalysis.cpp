@@ -14549,6 +14549,21 @@ Function *windowsPebHeapDebugProbe(Module &M, GlobalVariable *State,
     Value *heapDebugBits =
         HB.CreateAnd(heapFlags, ConstantInt::get(i32, 0x40000060),
                      "morok.win.pebheap.heap.flags.debug.bits");
+    Value *ntHeapDebugPresent =
+        HB.CreateICmpNE(ntDebugBits, ConstantInt::get(i32, 0),
+                        "morok.win.pebheap.nt.heapdebug.present");
+    Value *heapFlagsPresent =
+        HB.CreateICmpNE(heapDebugBits, ConstantInt::get(i32, 0),
+                        "morok.win.pebheap.heap.flags.present");
+    Value *heapForcePresent =
+        HB.CreateICmpNE(heapForceFlags, ConstantInt::get(i32, 0),
+                        "morok.win.pebheap.heap.force.flags.present");
+    Value *heapDebugPresent =
+        HB.CreateOr(heapFlagsPresent, heapForcePresent,
+                    "morok.win.pebheap.heap.debug.present");
+    Value *heapCoherenceMismatch =
+        HB.CreateXor(ntHeapDebugPresent, heapDebugPresent,
+                     "morok.win.pebheap.nt.heap.coherence.mismatch");
     foldEnforcedFlag(HB, State,
                      HB.CreateICmpNE(
                          heapDebugBits, ConstantInt::get(i32, 0),
@@ -14561,6 +14576,9 @@ Function *windowsPebHeapDebugProbe(Module &M, GlobalVariable *State,
                          "morok.win.pebheap.heap.force.flags.hit"),
                      0x91D630A24CFB5875ULL,
                      "morok.win.pebheap.heap.force.flags");
+    foldEnforcedFlag(HB, State, heapCoherenceMismatch,
+                     0x4E73B9C12A56D08FULL,
+                     "morok.win.pebheap.nt.heap.coherence");
     Value *heapVsPeb =
         HB.CreateOr(HB.CreateZExt(heapDebugBits, ip),
                     HB.CreateShl(HB.CreateZExt(heapForceFlags, ip),
