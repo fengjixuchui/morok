@@ -18065,6 +18065,9 @@ entry:
     Function *FaultCf = M->getFunction("morok.antidbg.faultcf");
     Function *FaultCfHandler =
         M->getFunction("morok.antidbg.faultcf.handler");
+    Function *Sigtrap = M->getFunction("morok.antidbg.sigtrap");
+    Function *SigtrapHandler =
+        M->getFunction("morok.antidbg.sigtrap.handler");
     Function *HotProbe = M->getFunction("morok.antidbg.probe");
     REQUIRE(Memfd != nullptr);
     REQUIRE(Sigmask != nullptr);
@@ -18078,6 +18081,8 @@ entry:
     CHECK(HeartbeatWatch != nullptr);
     CHECK(FaultCf != nullptr);
     CHECK(FaultCfHandler != nullptr);
+    CHECK(Sigtrap != nullptr);
+    CHECK(SigtrapHandler != nullptr);
     CHECK(HotProbe != nullptr);
     CHECK(Memfd->arg_size() == 3);
     CHECK(M->getFunction("morok.watchdog") != nullptr);
@@ -18091,6 +18096,9 @@ entry:
     CHECK(M->getGlobalVariable("morok.antidbg.faultcf.sentinel", true) !=
           nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.faultcf.token", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.antidbg.sigtrap.sentinel", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.antidbg.sigtrap.token", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.faultcf.enabled", true) !=
           nullptr);
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
@@ -18108,6 +18116,7 @@ entry:
     CHECK(hasInlineAsmCall(*M->getFunction("morok.antidbg.linux.stat4")));
     CHECK(hasInlineAsmCall(*Watch));
     CHECK(hasInlineAsmCall(*FaultCf));
+    CHECK(hasInlineAsmCall(*Sigtrap));
     CHECK(countNamedInstructions(*Memfd, "morok.antidbg.memfd.readlink") >= 1u);
     CHECK(hasNamedIcmpWithConstant(*Memfd, "morok.antidbg.memfd.prefix.enough",
                                    7u));
@@ -18302,6 +18311,35 @@ entry:
     REQUIRE(PtraceChain != nullptr);
     CHECK(valueFeedsNamedInstruction(PtraceChain,
                                      "morok.seal.fold.anti_debug"));
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.sigtrap.bits") >=
+          1u);
+    CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.sigtrap.ready") >=
+          1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.sigtrap.handler.fired") >=
+          1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.sigtrap.handler.missing") >=
+          1u);
+    CHECK(countNamedInstructions(*AntiDbg,
+                                 "morok.antidbg.sigtrap.routing.disagree") >=
+          1u);
+    Instruction *SigtrapCoherence =
+        findNamedInstruction(*AntiDbg, "morok.antidbg.sigtrap.coherence");
+    REQUIRE(SigtrapCoherence != nullptr);
+    CHECK(valueFeedsNamedInstruction(SigtrapCoherence,
+                                     "morok.seal.fold.anti_debug"));
+    Instruction *SigtrapMissing =
+        findNamedInstruction(*AntiDbg,
+                             "morok.antidbg.sigtrap.handler.missing");
+    REQUIRE(SigtrapMissing != nullptr);
+    CHECK_FALSE(valueFeedsNamedInstruction(SigtrapMissing,
+                                           "morok.seal.fold.anti_debug"));
+    Instruction *ProbeSigtrapCoherence = findNamedInstruction(
+        *HotProbe, "morok.antidbg.probe.sigtrap.coherence");
+    REQUIRE(ProbeSigtrapCoherence != nullptr);
+    CHECK(valueFeedsNamedInstruction(ProbeSigtrapCoherence,
+                                     "morok.seal.fold.anti_debug"));
     CHECK(maxStaticAllocaArrayElements(*AntiDbg,
                                        "morok.antidbg.seccomp.filters") == 17u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.seccomp.tsync") >=
@@ -18381,8 +18419,21 @@ entry:
               *FaultCfHandler, "morok.antidbg.faultcf.advance.pc") >= 1u);
     CHECK(countNamedInstructions(
               *FaultCfHandler, "morok.antidbg.faultcf.si.addr") >= 1u);
+    CHECK(countNamedInstructions(*Sigtrap,
+                                 "morok.antidbg.sigtrap.rt_sigaction") >= 1u);
+    CHECK(countNamedInstructions(
+              *Sigtrap, "morok.antidbg.sigtrap.rt_sigaction.restore") >= 1u);
+    CHECK(countNamedInstructions(*Sigtrap,
+                                 "morok.antidbg.sigtrap.handler.fired") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *SigtrapHandler, "morok.antidbg.sigtrap.sig.match") >= 1u);
+    CHECK(countNamedInstructions(*SigtrapHandler,
+                                 "morok.antidbg.sigtrap.token.v") >= 1u);
     CHECK(countNamedInstructions(*HotProbe,
                                  "morok.antidbg.probe.status") >= 1u);
+    CHECK(countCallsTo(*AntiDbg, "morok.antidbg.sigtrap") == 1u);
+    CHECK(countCallsTo(*HotProbe, "morok.antidbg.sigtrap") == 1u);
     CHECK(functionHasConstantInt(*AntiDbg, 13u));       // rt_sigaction syscall
     CHECK(functionHasConstantInt(*AntiDbg, 31u));       // SIGSYS
     CHECK(functionHasConstantInt(*AntiDbg, 0x00030000)); // SECCOMP_RET_TRAP
@@ -18431,6 +18482,57 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE(
+    "antiDebuggingModule emits i386 Linux SIGTRAP routing with raw int80") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target datalayout = "e-m:e-p:32:32-i64:64-f80:128-n8:16:32-S128"
+target triple = "i386-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8813);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.antidbg");
+    Function *Sigtrap = M->getFunction("morok.antidbg.sigtrap");
+    Function *SigtrapHandler =
+        M->getFunction("morok.antidbg.sigtrap.handler");
+    Function *Sigreturn = M->getFunction("morok.antidbg.seccomp.sigreturn");
+    Function *HotProbe = M->getFunction("morok.antidbg.probe");
+    REQUIRE(Ctor != nullptr);
+    REQUIRE(Sigtrap != nullptr);
+    REQUIRE(SigtrapHandler != nullptr);
+    REQUIRE(Sigreturn != nullptr);
+    REQUIRE(HotProbe != nullptr);
+
+    CHECK(maxStaticAllocaArrayElements(*Sigtrap,
+                                       "morok.antidbg.sigtrap.sa") == 20u);
+    CHECK(hasInlineAsmCall(*Sigtrap));
+    CHECK(countInlineAsmBodies(*Sigtrap, "0x80") >= 2u);
+    CHECK(countInlineAsmBodies(*Sigtrap, ".byte 0xcc") >= 1u);
+    CHECK(countInlineAsmBodies(*Sigreturn, "173") >= 1u);
+    CHECK(countCallsTo(*Sigtrap, "syscall") == 0u);
+    CHECK(countCallsTo(*Sigtrap, "sigaction") == 0u);
+    CHECK(countNamedInstructions(*Sigtrap,
+                                 "morok.antidbg.sigtrap.rt_sigaction") >= 1u);
+    CHECK(countNamedInstructions(
+              *Sigtrap, "morok.antidbg.sigtrap.rt_sigaction.restore") >= 1u);
+    CHECK(functionHasConstantInt(*Sigtrap, 174u)); // i386 rt_sigaction
+    CHECK(countNamedInstructions(
+              *SigtrapHandler, "morok.antidbg.sigtrap.sig.match") >= 1u);
+
+    Instruction *SigtrapCoherence =
+        findNamedInstruction(*Ctor, "morok.antidbg.sigtrap.coherence");
+    REQUIRE(SigtrapCoherence != nullptr);
+    CHECK(valueFeedsNamedInstruction(SigtrapCoherence,
+                                     "morok.seal.fold.anti_debug"));
+    CHECK(countCallsTo(*Ctor, "morok.antidbg.sigtrap") == 1u);
+    CHECK(countCallsTo(*HotProbe, "morok.antidbg.sigtrap") == 1u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("antiDebuggingModule emits aarch64 Linux seccomp TSYNC arch filter") {
     LLVMContext ctx;
     auto M = parse(ctx, R"ir(
@@ -18454,6 +18556,8 @@ define i32 @main() { ret i32 0 }
     Function *FaultCfHandler =
         M->getFunction("morok.antidbg.faultcf.handler");
     REQUIRE(FaultCfHandler != nullptr);
+    CHECK(M->getFunction("morok.antidbg.sigtrap") == nullptr);
+    CHECK(M->getFunction("morok.antidbg.sigtrap.handler") == nullptr);
     CHECK(maxStaticAllocaArrayElements(*Ctor,
                                        "morok.antidbg.seccomp.filters") == 17u);
     CHECK(maxStaticAllocaArrayElements(
