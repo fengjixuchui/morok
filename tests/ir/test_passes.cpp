@@ -17151,7 +17151,8 @@ entry:
     CHECK(M->getGlobalVariable("morok.antidbg.faultcf.token", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
     CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
-    CHECK(M->getFunction("ptrace") == nullptr);
+    CHECK(M->getFunction("ptrace") != nullptr);
+    CHECK(M->getFunction("__errno_location") != nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
     CHECK(M->getFunction("sigaction") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
@@ -17256,6 +17257,27 @@ entry:
     CHECK(countNamedInstructions(
               *AntiDbg, "morok.antidbg.ptrace.init.active.load") >= 1u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.ptrace.init") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.first") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.second") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.chain.libc") >= 1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.chain.libc.errno.eperm") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.state.bad") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *AntiDbg, "morok.antidbg.ptrace.init.chain.raw.libc.xor") >=
+          1u);
+    CHECK(functionHasConstantInt(*AntiDbg, 101u)); // x86_64 ptrace syscall
+    Instruction *PtraceChain =
+        findNamedInstruction(*AntiDbg, "morok.antidbg.ptrace.init.chain.diverged");
+    REQUIRE(PtraceChain != nullptr);
+    CHECK(valueFeedsNamedInstruction(PtraceChain,
+                                     "morok.seal.fold.anti_debug"));
     CHECK(maxStaticAllocaArrayElements(*AntiDbg,
                                        "morok.antidbg.seccomp.filters") == 17u);
     CHECK(countNamedInstructions(*AntiDbg, "morok.antidbg.seccomp.tsync") >=
@@ -17410,15 +17432,55 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("morok.antidbg.seccomp.sigsys") != nullptr);
     CHECK(M->getFunction("morok.antidbg.seccomp.sigreturn") == nullptr);
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
+    CHECK(countNamedInstructions(*Ctor, "morok.antidbg.ptrace.init.chain") ==
+          0u);
     CHECK(functionHasConstantInt(*Ctor, 134u));       // rt_sigaction syscall
     CHECK(functionHasConstantInt(*Ctor, 277u));       // seccomp syscall
     CHECK(functionHasConstantInt(*FaultCf, 132u));    // sigaltstack syscall
     CHECK(functionHasConstantInt(*Ctor, 0xC00000B7)); // AUDIT_ARCH_AARCH64
     CHECK(functionHasConstantInt(*Ctor, 0x00030000)); // SECCOMP_RET_TRAP
     CHECK(functionHasConstantInt(*Ctor, 0x7ff00000)); // SECCOMP_RET_TRACE
+    CHECK(M->getFunction("ptrace") == nullptr);
+    CHECK(M->getFunction("__errno_location") == nullptr);
     CHECK(M->getFunction("sigaction") == nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
     CHECK(M->getFunction("syscall") != nullptr);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiDebuggingModule emits aarch64 Linux ptrace chain when "
+          "self-trace is allowed") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "aarch64-unknown-linux-gnu"
+define i32 @main() { ret i32 0 }
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8823);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiDebuggingModule(*M, rng));
+
+    Function *Ctor = M->getFunction("morok.antidbg");
+    REQUIRE(Ctor != nullptr);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.ptrace.init.chain.raw.first") >= 1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.ptrace.init.chain.raw.second") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.antidbg.ptrace.init.chain.libc") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *Ctor, "morok.antidbg.ptrace.init.chain.libc.errno.eperm") >=
+          1u);
+    CHECK(functionHasConstantInt(*Ctor, 117u)); // aarch64 ptrace syscall
+    CHECK(M->getFunction("ptrace") != nullptr);
+    CHECK(M->getFunction("__errno_location") != nullptr);
+    CHECK(M->getFunction("syscall") != nullptr);
+    Instruction *PtraceChain =
+        findNamedInstruction(*Ctor, "morok.antidbg.ptrace.init.chain.diverged");
+    REQUIRE(PtraceChain != nullptr);
+    CHECK(valueFeedsNamedInstruction(PtraceChain,
+                                     "morok.seal.fold.anti_debug"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
@@ -17471,6 +17533,8 @@ define i32 @main() { ret i32 0 }
     CHECK(M->getFunction("morok.antidbg.linux.dr.scrub") != nullptr);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.dr.ptracer.ok") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.ptrace.init") == 0u);
+    CHECK(countNamedInstructions(*Ctor, "morok.antidbg.ptrace.init.chain") ==
+          0u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.watch.ptrace") == 0u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.ptrace") == 0u);
     CHECK(countNamedInstructions(*Watch, "morok.antidbg.buddy.pid.valid") >=

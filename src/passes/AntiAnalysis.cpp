@@ -613,17 +613,118 @@ Value *emitLinuxPtrace(IRBuilder<> &B, Module &M, const Triple &TT,
     return runtime::emitLinuxPtrace(B, M, TT, request);
 }
 
+FunctionCallee linuxErrnoLocationDecl(Module &M) {
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    return M.getOrInsertFunction("__errno_location",
+                                 FunctionType::get(ptr, false));
+}
+
+FunctionCallee linuxPtraceDecl(Module &M) {
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    return M.getOrInsertFunction("ptrace",
+                                 FunctionType::get(ip, {ip, ip, ptr, ptr},
+                                                   false));
+}
+
+Value *emitLinuxPtraceLibcTraceMe(IRBuilder<> &B, Module &M,
+                                  const Twine &Name) {
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    return B.CreateCall(
+        linuxPtraceDecl(M),
+        {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0),
+         ConstantPointerNull::get(ptr), ConstantPointerNull::get(ptr)},
+        Name);
+}
+
+Value *emitLinuxPtraceRaw(IRBuilder<> &B, Module &M, const Triple &TT,
+                          std::uint64_t Request, Value *Pid, Value *Addr,
+                          Value *Data, const Twine &Name);
+
+void emitLinuxPtraceTraceMeChain(IRBuilder<> &B, Module &M,
+                                 GlobalVariable *State, const Triple &TT,
+                                 const Twine &Name, std::uint64_t Salt) {
+    std::uint32_t ptraceNr = 0;
+    std::uint32_t prctlNr = 0;
+    std::uint32_t openatNr = 0;
+    std::uint32_t readNr = 0;
+    std::uint32_t closeNr = 0;
+    if (!linuxCoreSyscalls(TT, ptraceNr, prctlNr, openatNr, readNr, closeNr)) {
+        auto *i32 = Type::getInt32Ty(M.getContext());
+        Value *traceRc = emitLinuxPtrace(B, M, TT, 0);
+        foldFlag(B, State,
+                 B.CreateICmpSLT(traceRc, ConstantInt::getSigned(i32, 0)),
+                 Salt, Name);
+        return;
+    }
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    std::string base = Name.str();
+    auto *zeroIp = ConstantInt::get(ip, 0);
+    auto *negOneIp = ConstantInt::getSigned(ip, -1);
+    auto *nullPtr = ConstantPointerNull::get(ptr);
+
+    Value *rawFirst =
+        emitLinuxPtraceRaw(B, M, TT, 0, zeroIp, nullPtr, zeroIp,
+                           base + ".chain.raw.first");
+    Value *rawFirstOk =
+        B.CreateICmpEQ(rawFirst, zeroIp, base + ".chain.raw.first.ok");
+    Value *rawFirstFailed =
+        B.CreateICmpSLT(rawFirst, zeroIp, base + ".chain.raw.first.fail");
+    foldFlag(B, State, rawFirstFailed, Salt, Name);
+
+    Value *rawSecond =
+        emitLinuxPtraceRaw(B, M, TT, 0, zeroIp, nullPtr, zeroIp,
+                           base + ".chain.raw.second");
+    Value *rawSecondEperm =
+        B.CreateICmpEQ(rawSecond, negOneIp, base + ".chain.raw.second.eperm");
+    Value *rawStateBad = B.CreateAnd(
+        rawFirstOk, B.CreateNot(rawSecondEperm,
+                                base + ".chain.raw.second.not.eperm"),
+        base + ".chain.raw.state.bad");
+
+    Value *errnoPtr =
+        B.CreateCall(linuxErrnoLocationDecl(M), {}, base + ".chain.errno.ptr");
+    auto *clearErrno = B.CreateStore(ConstantInt::get(i32, 0), errnoPtr);
+    clearErrno->setVolatile(true);
+    clearErrno->setAlignment(Align(4));
+    Value *libcRc = emitLinuxPtraceLibcTraceMe(B, M, base + ".chain.libc");
+    Value *libcFailed =
+        B.CreateICmpEQ(libcRc, negOneIp, base + ".chain.libc.eperm.rc");
+    auto *errnoLoad =
+        B.CreateLoad(i32, errnoPtr, base + ".chain.libc.errno");
+    errnoLoad->setVolatile(true);
+    errnoLoad->setAlignment(Align(4));
+    Value *errnoEperm = B.CreateICmpEQ(
+        errnoLoad, ConstantInt::get(i32, 1), base + ".chain.libc.errno.eperm");
+    Value *rawVsLibcDiverged =
+        B.CreateXor(rawSecondEperm, libcFailed, base + ".chain.raw.libc.xor");
+    Value *libcPatternBad = B.CreateAnd(
+        rawSecondEperm,
+        B.CreateOr(B.CreateNot(libcFailed, base + ".chain.libc.not.eperm"),
+                   B.CreateNot(errnoEperm, base + ".chain.errno.not.eperm"),
+                   base + ".chain.libc.pattern.bits"),
+        base + ".chain.libc.pattern.bad");
+    Value *diverged =
+        B.CreateOr(rawStateBad,
+                   B.CreateOr(rawVsLibcDiverged, libcPatternBad,
+                              base + ".chain.wrapper.bad"),
+                   base + ".chain.diverged");
+    foldEnforcedFlag(B, State, diverged, Salt ^ 0x6E91C4A52D730B8FULL,
+                     base + ".chain");
+}
+
 void emitLinuxSelfTraceFallback(IRBuilder<> &B, Module &M,
                                 GlobalVariable *State,
                                 GlobalVariable *SentinelActive,
                                 const Triple &TT, const Twine &Name,
                                 std::uint64_t Salt) {
-    auto *i32 = Type::getInt32Ty(M.getContext());
     auto trace = [&]() {
-        Value *traceRc = emitLinuxPtrace(B, M, TT, 0);
-        foldFlag(B, State,
-                 B.CreateICmpSLT(traceRc, ConstantInt::getSigned(i32, 0)),
-                 Salt, Name);
+        emitLinuxPtraceTraceMeChain(B, M, State, TT, Name, Salt);
     };
     if (!SentinelActive) {
         trace();
