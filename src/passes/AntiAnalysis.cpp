@@ -12015,6 +12015,91 @@ GlobalVariable *windowsVehHandle(Module &M) {
     return gv;
 }
 
+GlobalVariable *windowsVehDispatchHit(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.win.veh.dispatch.hit",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(M, i32, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(i32, 0),
+                                  "morok.win.veh.dispatch.hit");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(Align(4));
+    return gv;
+}
+
+GlobalVariable *windowsVehDispatchFault(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.win.veh.dispatch.fault",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *ip = intPtrTy(M);
+    auto *gv = new GlobalVariable(M, ip, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(ip, 0),
+                                  "morok.win.veh.dispatch.fault");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(Align(8));
+    return gv;
+}
+
+GlobalVariable *windowsVehDispatchDelta(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.win.veh.dispatch.delta.enc",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *ip = intPtrTy(M);
+    auto *gv = new GlobalVariable(M, ip, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(ip, 0),
+                                  "morok.win.veh.dispatch.delta.enc");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    gv->setAlignment(Align(8));
+    return gv;
+}
+
+Value *windowsVehDispatchKey(IRBuilderBase &B, Module &M,
+                             GlobalVariable *State, const Twine &Name) {
+    auto *i64 = B.getInt64Ty();
+    auto *ip = intPtrTy(M);
+    Value *state = B.CreateLoad(i64, State, Name + ".state");
+    cast<LoadInst>(state)->setVolatile(true);
+    cast<LoadInst>(state)->setAlignment(Align(8));
+
+    Value *anti = ConstantInt::get(i64, 0);
+    if (GlobalVariable *antiSeal =
+            runtime_seal::findChannel(M, runtime_seal::kAntiDebugChannel)) {
+        anti = B.CreateLoad(i64, antiSeal, Name + ".anti");
+        cast<LoadInst>(anti)->setVolatile(true);
+        cast<LoadInst>(anti)->setAlignment(Align(8));
+    }
+
+    Value *env = ConstantInt::get(i64, 0);
+    if (GlobalVariable *envSeal =
+            runtime_seal::findChannel(M, runtime_seal::kEnvBindingChannel)) {
+        env = B.CreateLoad(i64, envSeal, Name + ".env");
+        cast<LoadInst>(env)->setVolatile(true);
+        cast<LoadInst>(env)->setAlignment(Align(8));
+    }
+
+    Value *stateSeal = B.CreateXor(state, anti, Name + ".state.seal");
+    Value *x = B.CreateXor(
+        stateSeal,
+        B.CreateAdd(env, ConstantInt::get(i64, 0xA5B3579D4E6F102BULL),
+                    Name + ".env.bias"),
+        Name + ".seed");
+    x = B.CreateXor(x, B.CreateShl(x, ConstantInt::get(i64, 11)),
+                    Name + ".fold11");
+    x = B.CreateMul(x, ConstantInt::get(i64, 0xD6E8FEB86659FD93ULL),
+                    Name + ".mul0");
+    x = B.CreateXor(x, B.CreateLShr(x, ConstantInt::get(i64, 31)),
+                    Name + ".fold31");
+    x = B.CreateMul(x, ConstantInt::get(i64, 0x9E3779B97F4A7C15ULL),
+                    Name + ".mul1");
+    x = B.CreateXor(x, B.CreateLShr(x, ConstantInt::get(i64, 27)),
+                    Name + ".fold27");
+    return B.CreateZExtOrTrunc(x, ip, Name + ".ip");
+}
+
 Value *emitWindowsGsRead(IRBuilder<> &B, Module &M, std::uint32_t Offset,
                          const Twine &Name) {
     const Triple TT(M.getTargetTriple());
@@ -13924,6 +14009,246 @@ Function *windowsVehHandler(Module &M, GlobalVariable *State) {
 
     IRBuilder<> RB(retBB);
     RB.CreateRet(ConstantInt::get(i32, 0)); // EXCEPTION_CONTINUE_SEARCH
+    return fn;
+}
+
+Function *windowsVehDispatchHandler(Module &M, GlobalVariable *State) {
+    if (Function *existing = M.getFunction("morok.win.veh.dispatch.handler"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(i32, {ptr}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.veh.dispatch.handler", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *exceptionPointers = fn->getArg(0);
+    exceptionPointers->setName("exception_pointers");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *readBB = BasicBlock::Create(ctx, "read", fn);
+    auto *inspectBB = BasicBlock::Create(ctx, "inspect", fn);
+    auto *redirectBB = BasicBlock::Create(ctx, "redirect", fn);
+    auto *foldBB = BasicBlock::Create(ctx, "fold", fn);
+    auto *searchBB = BasicBlock::Create(ctx, "search", fn);
+
+    IRBuilder<> B(entry);
+    B.CreateCondBr(B.CreateICmpNE(exceptionPointers,
+                                  ConstantPointerNull::get(ptr),
+                                  "morok.win.veh.dispatch.args"),
+                   readBB, searchBB);
+
+    IRBuilder<> RB(readBB);
+    Value *record = loadAt(RB, M, ptr, exceptionPointers, 0ULL,
+                           "morok.win.veh.dispatch.record");
+    Value *context = loadAt(RB, M, ptr, exceptionPointers, 8,
+                            "morok.win.veh.dispatch.context");
+    RB.CreateCondBr(RB.CreateICmpNE(record, ConstantPointerNull::get(ptr),
+                                    "morok.win.veh.dispatch.record.ready"),
+                    inspectBB, searchBB);
+
+    IRBuilder<> IB(inspectBB);
+    Value *code =
+        loadAt(IB, M, i32, record, 0ULL, "morok.win.veh.dispatch.code");
+    Value *address =
+        loadAt(IB, M, ip, record, 16, "morok.win.veh.dispatch.address");
+    Value *fault = IB.CreateLoad(ip, windowsVehDispatchFault(M),
+                                 "morok.win.veh.dispatch.fault.v");
+    cast<LoadInst>(fault)->setVolatile(true);
+    cast<LoadInst>(fault)->setAlignment(Align(8));
+    Value *encodedDelta = IB.CreateLoad(ip, windowsVehDispatchDelta(M),
+                                        "morok.win.veh.dispatch.delta.v");
+    cast<LoadInst>(encodedDelta)->setVolatile(true);
+    cast<LoadInst>(encodedDelta)->setAlignment(Align(8));
+    Value *key = windowsVehDispatchKey(IB, M, State,
+                                       "morok.win.veh.dispatch.key");
+    Value *delta = IB.CreateXor(encodedDelta, key,
+                                "morok.win.veh.dispatch.delta");
+    Value *deltaSmall =
+        IB.CreateAnd(IB.CreateICmpUGT(delta, ConstantInt::get(ip, 0)),
+                     IB.CreateICmpULT(delta, ConstantInt::get(ip, 16)),
+                     "morok.win.veh.dispatch.delta.small");
+    Value *isUd2 =
+        IB.CreateICmpEQ(code, ConstantInt::get(i32, 0xC000001D),
+                        "morok.win.veh.dispatch.ud2");
+    Value *isInt3 =
+        IB.CreateICmpEQ(code, ConstantInt::get(i32, 0x80000003),
+                        "morok.win.veh.dispatch.int3");
+    Value *codeOk = IB.CreateOr(isUd2, isInt3,
+                                "morok.win.veh.dispatch.code.ok");
+    Value *faultOk =
+        IB.CreateAnd(IB.CreateICmpNE(fault, ConstantInt::get(ip, 0),
+                                     "morok.win.veh.dispatch.fault.armed"),
+                     IB.CreateICmpEQ(address, fault,
+                                     "morok.win.veh.dispatch.fault.match"),
+                     "morok.win.veh.dispatch.fault.ok");
+    Value *ours = IB.CreateAnd(
+        IB.CreateAnd(codeOk,
+                     IB.CreateICmpNE(context, ConstantPointerNull::get(ptr),
+                                     "morok.win.veh.dispatch.context.ready"),
+                     "morok.win.veh.dispatch.exception.ready"),
+        IB.CreateAnd(faultOk, deltaSmall,
+                     "morok.win.veh.dispatch.table.ready"),
+        "morok.win.veh.dispatch.ours");
+    IB.CreateCondBr(ours, redirectBB, foldBB);
+
+    IRBuilder<> DB(redirectBB);
+    Value *target =
+        DB.CreateAdd(address, delta, "morok.win.veh.dispatch.target");
+    storeAt(DB, M, context, 0xF8, target, "morok.win.veh.dispatch.rip");
+    DB.CreateStore(ConstantInt::get(i32, 1), windowsVehDispatchHit(M))
+        ->setVolatile(true);
+    foldState(DB, State, code, 0xEF16792A43B8D501ULL,
+              "morok.win.veh.dispatch.code.mix");
+    foldState(DB, State, address, 0xB42E6D8A1973C05FULL,
+              "morok.win.veh.dispatch.address.mix");
+    DB.CreateRet(ConstantInt::getSigned(i32, -1)); // CONTINUE_EXECUTION
+
+    IRBuilder<> FB(foldBB);
+    foldState(FB, State, code, 0x9DA36C0B52E4817FULL,
+              "morok.win.veh.dispatch.pass.code");
+    foldState(FB, State, address, 0x4BA29F6D17C8E503ULL,
+              "morok.win.veh.dispatch.pass.address");
+    FB.CreateBr(searchBB);
+
+    IRBuilder<> SB(searchBB);
+    SB.CreateRet(ConstantInt::get(i32, 0)); // CONTINUE_SEARCH
+    return fn;
+}
+
+Function *windowsVehDispatchTrip(Module &M) {
+    if (Function *existing = M.getFunction("morok.win.veh.dispatch.trip"))
+        return existing;
+    const Triple TT(M.getTargetTriple());
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64)
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), {ptr}, false),
+        GlobalValue::PrivateLinkage, "morok.win.veh.dispatch.trip", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *faultSlot = fn->getArg(0);
+    faultSlot->setName("fault_slot");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *asmTy = FunctionType::get(Type::getVoidTy(ctx), {ptr}, false);
+    InlineAsm *IA = InlineAsm::get(
+        asmTy,
+        "movq $0, %r10\nleaq 0f(%rip), %rax\nmovq %rax, (%r10)\n"
+        "0:\n.byte 0x0f, 0x0b\n1:",
+        "r,~{rax},~{r10},~{memory},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    B.CreateCall(asmTy, IA, {faultSlot});
+    B.CreateRetVoid();
+    return fn;
+}
+
+Function *windowsVehHeadMatcher(Module &M) {
+    if (Function *existing = M.getFunction("morok.win.veh.head.match"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(i32, {ip, ip, ip, ip}, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.veh.head.match", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *head = fn->getArg(0);
+    head->setName("head");
+    Argument *decode = fn->getArg(1);
+    decode->setName("decode");
+    Argument *queryVm = fn->getArg(2);
+    queryVm->setName("query_vm");
+    Argument *handler = fn->getArg(3);
+    handler->setName("handler");
+
+    Function *readable = windowsReadableAddressHelper(M);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *headBB = BasicBlock::Create(ctx, "head", fn);
+    auto *firstBB = BasicBlock::Create(ctx, "first", fn);
+    auto *decodeBB = BasicBlock::Create(ctx, "decode", fn);
+    auto *ret0BB = BasicBlock::Create(ctx, "ret0", fn);
+
+    IRBuilder<> B(entry);
+    Value *ready = B.CreateAnd(
+        B.CreateAnd(B.CreateICmpNE(head, ConstantInt::get(ip, 0)),
+                    B.CreateICmpNE(decode, ConstantInt::get(ip, 0)),
+                    "morok.win.veh.head.args"),
+        B.CreateAnd(B.CreateICmpNE(queryVm, ConstantInt::get(ip, 0)),
+                    B.CreateICmpNE(handler, ConstantInt::get(ip, 0)),
+                    "morok.win.veh.head.apis"),
+        "morok.win.veh.head.ready");
+    B.CreateCondBr(ready, headBB, ret0BB);
+
+    IRBuilder<> HB(headBB);
+    Value *headReadable =
+        HB.CreateCall(readable, {head, queryVm}, "morok.win.veh.head.readable");
+    HB.CreateCondBr(HB.CreateICmpNE(headReadable, ConstantInt::get(i32, 0),
+                                    "morok.win.veh.head.readable.ok"),
+                    firstBB, ret0BB);
+
+    IRBuilder<> FB(firstBB);
+    Value *first = loadAt(FB, M, ip, FB.CreateIntToPtr(head, ptr),
+                          0ULL, "morok.win.veh.head.first");
+    Value *firstReady =
+        FB.CreateAnd(FB.CreateICmpNE(first, ConstantInt::get(ip, 0)),
+                     FB.CreateICmpNE(first, head,
+                                     "morok.win.veh.head.not.empty"),
+                     "morok.win.veh.head.first.ready");
+    Value *firstReadable =
+        FB.CreateCall(readable, {first, queryVm},
+                      "morok.win.veh.head.first.readable");
+    FB.CreateCondBr(
+        FB.CreateAnd(firstReady,
+                     FB.CreateICmpNE(firstReadable, ConstantInt::get(i32, 0),
+                                     "morok.win.veh.head.first.ok"),
+                     "morok.win.veh.head.decode.ready"),
+        decodeBB, ret0BB);
+
+    IRBuilder<> DB(decodeBB);
+    Value *cursorPtr =
+        DB.CreateIntToPtr(first, ptr, "morok.win.veh.head.cursor.ptr");
+    Value *encoded20 =
+        loadAt(DB, M, ip, cursorPtr, 0x20, "morok.win.veh.head.encoded.20");
+    Value *encoded18 =
+        loadAt(DB, M, ip, cursorPtr, 0x18, "morok.win.veh.head.encoded.18");
+    auto *decodeTy = FunctionType::get(ptr, {ptr}, false);
+    Value *decodePtr =
+        DB.CreateIntToPtr(decode, ptr, "morok.win.veh.head.decode.ptr");
+    Value *decoded20Ptr = DB.CreateCall(
+        decodeTy, decodePtr,
+        {DB.CreateIntToPtr(encoded20, ptr,
+                           "morok.win.veh.head.encoded.20.ptr")},
+        "morok.win.veh.head.decoded.20.ptr");
+    Value *decoded18Ptr = DB.CreateCall(
+        decodeTy, decodePtr,
+        {DB.CreateIntToPtr(encoded18, ptr,
+                           "morok.win.veh.head.encoded.18.ptr")},
+        "morok.win.veh.head.decoded.18.ptr");
+    Value *decoded20 =
+        DB.CreatePtrToInt(decoded20Ptr, ip, "morok.win.veh.head.decoded.20");
+    Value *decoded18 =
+        DB.CreatePtrToInt(decoded18Ptr, ip, "morok.win.veh.head.decoded.18");
+    Value *match = DB.CreateOr(DB.CreateICmpEQ(decoded20, handler,
+                                               "morok.win.veh.head.match.20"),
+                               DB.CreateICmpEQ(decoded18, handler,
+                                               "morok.win.veh.head.match.18"),
+                               "morok.win.veh.head.match.any");
+    DB.CreateRet(DB.CreateZExt(match, i32));
+
+    IRBuilder<> R0(ret0BB);
+    R0.CreateRet(ConstantInt::get(i32, 0));
     return fn;
 }
 
@@ -16319,6 +16644,198 @@ Function *windowsHardwareBreakpointProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+Function *windowsVehDispatchProbe(Module &M, GlobalVariable *State,
+                                  ir::IRRandom &rng, const Triple &TT) {
+    if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
+        intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.win.veh.dispatch"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.win.veh.dispatch", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    Function *pebReader = windowsPebReader(M);
+    Function *moduleByHash = windowsLdrModuleByHash(M);
+    Function *resolver = windowsPeExportResolver(M);
+    Function *imageSizeFn = windowsPeImageSize(M);
+    Function *scanner = windowsVehListReferenceScanner(M);
+    Function *headMatcher = windowsVehHeadMatcher(M);
+    Function *handler = windowsVehDispatchHandler(M, State);
+    Function *trip = windowsVehDispatchTrip(M);
+    if (!pebReader || !moduleByHash || !resolver || !imageSizeFn || !scanner ||
+        !headMatcher || !handler || !trip)
+        return nullptr;
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *resolveBB = BasicBlock::Create(ctx, "resolve", fn);
+    auto *registerBB = BasicBlock::Create(ctx, "register", fn);
+    auto *headBB = BasicBlock::Create(ctx, "head", fn);
+    auto *tripBB = BasicBlock::Create(ctx, "trip", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    Value *peb = B.CreateCall(pebReader, {}, "morok.win.veh.dispatch.peb");
+    foldState(B, State, peb, rng.next(), "morok.win.veh.dispatch.peb.mix");
+    Value *pebPresent =
+        B.CreateICmpNE(peb, ConstantInt::get(ip, 0),
+                       "morok.win.veh.dispatch.peb.present");
+    foldEnforcedFlag(B, State, B.CreateNot(pebPresent),
+                     0xD64902B1E87AC35FULL,
+                     "morok.win.veh.dispatch.peb.missing");
+    B.CreateCondBr(pebPresent, resolveBB, retBB);
+
+    IRBuilder<> RB(resolveBB);
+    Value *ntdll = RB.CreateCall(
+        moduleByHash,
+        {peb, ConstantInt::get(i64, fnv1aLowerAsciiName("ntdll.dll"))},
+        "morok.win.veh.dispatch.ntdll");
+    Value *rtlAdd = RB.CreateCall(
+        resolver,
+        {ntdll, ConstantInt::get(i64,
+                                 fnv1aName("RtlAddVectoredExceptionHandler"))},
+        "morok.win.veh.dispatch.rtladd");
+    Value *rtlRemove = RB.CreateCall(
+        resolver,
+        {ntdll,
+         ConstantInt::get(i64,
+                          fnv1aName("RtlRemoveVectoredExceptionHandler"))},
+        "morok.win.veh.dispatch.rtlremove");
+    Value *rtlDecode = RB.CreateCall(
+        resolver, {ntdll, ConstantInt::get(i64, fnv1aName("RtlDecodePointer"))},
+        "morok.win.veh.dispatch.rtldecode");
+    Value *ntQueryVm = RB.CreateCall(
+        resolver,
+        {ntdll, ConstantInt::get(i64, fnv1aName("NtQueryVirtualMemory"))},
+        "morok.win.veh.dispatch.ntqueryvm");
+    Value *imageSize = RB.CreateCall(
+        imageSizeFn, {ntdll}, "morok.win.veh.dispatch.ntdll.image.size");
+    foldState(RB, State, ntdll, rng.next(),
+              "morok.win.veh.dispatch.ntdll.mix");
+    foldState(RB, State, rtlAdd, rng.next(),
+              "morok.win.veh.dispatch.rtladd.mix");
+    foldState(RB, State, rtlDecode, rng.next(),
+              "morok.win.veh.dispatch.rtldecode.mix");
+    Value *addReady = RB.CreateAnd(
+        RB.CreateICmpNE(ntdll, ConstantInt::get(ip, 0)),
+        RB.CreateICmpNE(rtlAdd, ConstantInt::get(ip, 0),
+                        "morok.win.veh.dispatch.rtladd.ready"),
+        "morok.win.veh.dispatch.register.ready");
+    foldEnforcedFlag(RB, State, RB.CreateNot(addReady),
+                     0x2B18E34D6F905C71ULL,
+                     "morok.win.veh.dispatch.resolve.missing");
+    RB.CreateCondBr(addReady, registerBB, retBB);
+
+    IRBuilder<> AB(registerBB);
+    auto *addTy = FunctionType::get(ptr, {i32, ptr}, false);
+    Value *handle = AB.CreateCall(
+        addTy,
+        AB.CreateIntToPtr(rtlAdd, ptr, "morok.win.veh.dispatch.rtladd.ptr"),
+        {ConstantInt::get(i32, 1), handler},
+        "morok.win.veh.dispatch.handle");
+    AB.CreateStore(handle, windowsVehHandle(M))->setVolatile(true);
+    Value *handleMissing =
+        AB.CreateICmpEQ(handle, ConstantPointerNull::get(ptr),
+                        "morok.win.veh.dispatch.handle.missing");
+    foldEnforcedFlag(AB, State, handleMissing, 0x76F4B1290C83DE5AULL,
+                     "morok.win.veh.dispatch.handle");
+    AB.CreateCondBr(
+        AB.CreateICmpNE(handle, ConstantPointerNull::get(ptr),
+                        "morok.win.veh.dispatch.handle.ready"),
+        headBB, retBB);
+
+    IRBuilder<> HB(headBB);
+    Value *headReady = HB.CreateAnd(
+        HB.CreateAnd(HB.CreateICmpNE(rtlDecode, ConstantInt::get(ip, 0)),
+                     HB.CreateICmpNE(ntQueryVm, ConstantInt::get(ip, 0)),
+                     "morok.win.veh.dispatch.head.apis"),
+        HB.CreateAnd(HB.CreateICmpNE(rtlRemove, ConstantInt::get(ip, 0)),
+                     HB.CreateICmpNE(imageSize, ConstantInt::get(ip, 0)),
+                     "morok.win.veh.dispatch.head.image"),
+        "morok.win.veh.dispatch.head.ready");
+    Value *addCandidate =
+        HB.CreateCall(scanner, {ntdll, imageSize, rtlAdd},
+                      "morok.win.veh.dispatch.list.from.add");
+    Value *removeCandidate =
+        HB.CreateCall(scanner, {ntdll, imageSize, rtlRemove},
+                      "morok.win.veh.dispatch.list.from.remove");
+    Value *listBase = HB.CreateSelect(
+        HB.CreateICmpNE(addCandidate, ConstantInt::get(ip, 0),
+                        "morok.win.veh.dispatch.add.candidate.present"),
+        addCandidate, removeCandidate, "morok.win.veh.dispatch.list.base");
+    Value *shiftedHead = HB.CreateSelect(
+        HB.CreateICmpNE(listBase, ConstantInt::get(ip, 0),
+                        "morok.win.veh.dispatch.list.base.present"),
+        HB.CreateAdd(listBase, ConstantInt::get(ip, 8),
+                     "morok.win.veh.dispatch.list.shifted.addr"),
+        ConstantInt::get(ip, 0), "morok.win.veh.dispatch.list.shifted");
+    Value *handlerIp =
+        HB.CreatePtrToInt(handler, ip, "morok.win.veh.dispatch.handler.ip");
+    auto *headTy = headMatcher->getFunctionType();
+    Value *primaryHead = HB.CreateCall(
+        headTy, headMatcher, {listBase, rtlDecode, ntQueryVm, handlerIp},
+        "morok.win.veh.dispatch.head.primary");
+    Value *shifted = HB.CreateCall(
+        headTy, headMatcher, {shiftedHead, rtlDecode, ntQueryVm, handlerIp},
+        "morok.win.veh.dispatch.head.shifted");
+    Value *headMatched =
+        HB.CreateICmpNE(HB.CreateOr(primaryHead, shifted,
+                                    "morok.win.veh.dispatch.head.any"),
+                        ConstantInt::get(i32, 0),
+                        "morok.win.veh.dispatch.head.match");
+    Value *headKnown = HB.CreateAnd(
+        headReady, HB.CreateICmpNE(listBase, ConstantInt::get(ip, 0),
+                                   "morok.win.veh.dispatch.head.known"),
+        "morok.win.veh.dispatch.head.verifiable");
+    Value *notHead = HB.CreateAnd(headKnown, HB.CreateNot(headMatched),
+                                  "morok.win.veh.dispatch.not.head");
+    foldState(HB, State, addCandidate, rng.next(),
+              "morok.win.veh.dispatch.list.add.mix");
+    foldState(HB, State, removeCandidate, rng.next(),
+              "morok.win.veh.dispatch.list.remove.mix");
+    foldFlag(HB, State, HB.CreateNot(headReady),
+             0x5AAE3B78C91F620DULL,
+             "morok.win.veh.dispatch.head.unavailable");
+    foldEnforcedFlag(HB, State, notHead, 0x0DBA71E52C9F3684ULL,
+                     "morok.win.veh.dispatch.head");
+    HB.CreateBr(tripBB);
+
+    IRBuilder<> TB(tripBB);
+    TB.CreateStore(ConstantInt::get(i32, 0), windowsVehDispatchHit(M))
+        ->setVolatile(true);
+    TB.CreateStore(ConstantInt::get(ip, 0), windowsVehDispatchFault(M))
+        ->setVolatile(true);
+    Value *key = windowsVehDispatchKey(TB, M, State,
+                                       "morok.win.veh.dispatch.arm.key");
+    Value *encodedDelta =
+        TB.CreateXor(ConstantInt::get(ip, 2), key,
+                     "morok.win.veh.dispatch.delta.encoded");
+    TB.CreateStore(encodedDelta, windowsVehDispatchDelta(M))->setVolatile(true);
+    TB.CreateCall(trip->getFunctionType(), trip, {windowsVehDispatchFault(M)});
+    Value *hit = TB.CreateLoad(i32, windowsVehDispatchHit(M),
+                               "morok.win.veh.dispatch.hit.v");
+    cast<LoadInst>(hit)->setVolatile(true);
+    cast<LoadInst>(hit)->setAlignment(Align(4));
+    Value *missing =
+        TB.CreateICmpEQ(hit, ConstantInt::get(i32, 0),
+                        "morok.win.veh.dispatch.missing");
+    foldEnforcedFlag(TB, State, missing, 0x93E5D2B8417AC60FULL,
+                     "morok.win.veh.dispatch.invocation");
+    TB.CreateBr(retBB);
+
+    IRBuilder<> RetB(retBB);
+    RetB.CreateRetVoid();
+    return fn;
+}
+
 Function *windowsUnhookProbe(Module &M, GlobalVariable *State,
                              ir::IRRandom &rng, const Triple &TT) {
     if (!TT.isOSWindows() || TT.getArch() != Triple::x86_64 ||
@@ -16919,6 +17436,8 @@ void emitWindowsAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
     if (Function *dr = windowsHardwareBreakpointProbe(M, State, rng, TT))
         B.CreateCall(dr->getFunctionType(), dr,
                      {ConstantInt::get(B.getInt64Ty(), rng.next())});
+    if (Function *veh = windowsVehDispatchProbe(M, State, rng, TT))
+        B.CreateCall(veh->getFunctionType(), veh, {});
     B.CreateRetVoid();
 }
 

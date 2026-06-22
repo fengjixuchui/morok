@@ -17199,6 +17199,10 @@ entry:
     Function *Resolve = M->getFunction("morok.win.pe.resolve");
     Function *Scan = M->getFunction("morok.win.sys.scan");
     Function *Direct = M->getFunction("morok.win.sys.direct");
+    Function *VehDispatch = M->getFunction("morok.win.veh.dispatch");
+    Function *VehHandler = M->getFunction("morok.win.veh.dispatch.handler");
+    Function *VehTrip = M->getFunction("morok.win.veh.dispatch.trip");
+    Function *VehHead = M->getFunction("morok.win.veh.head.match");
     REQUIRE(Ctor != nullptr);
     REQUIRE(Probe != nullptr);
     REQUIRE(WinText != nullptr);
@@ -17212,17 +17216,32 @@ entry:
     REQUIRE(Resolve != nullptr);
     REQUIRE(Scan != nullptr);
     REQUIRE(Direct != nullptr);
+    REQUIRE(VehDispatch != nullptr);
+    REQUIRE(VehHandler != nullptr);
+    REQUIRE(VehTrip != nullptr);
+    REQUIRE(VehHead != nullptr);
     CHECK(WinText->arg_size() == 1u);
     CHECK(WinDr->arg_size() == 1u);
     CHECK(M->getGlobalVariable("morok.antidbg.state", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.veh.handle", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.win.veh.dispatch.hit", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.win.veh.dispatch.fault", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.win.veh.dispatch.delta.enc", true) !=
+          nullptr);
     checkSealEnforcement(*M, *WinText);
     checkSealEnforcement(*M, *WinDr);
+    checkSealEnforcement(*M, *VehDispatch);
     CHECK(hasInlineAsmCall(*Peb));
     CHECK(hasInlineAsmCall(*Direct));
+    CHECK(hasInlineAsmCall(*VehTrip));
     CHECK(countCallsTo(*Ctor, "morok.antidbg.win.textchk") >= 1u);
     CHECK(countCallsTo(*Ctor, "morok.antidbg.win.dr") >= 1u);
+    CHECK(countCallsTo(*Ctor, "morok.win.veh.dispatch") >= 1u);
     CHECK(countCallsTo(*Probe, "morok.antidbg.win.textchk") == 0u);
     CHECK(countCallsTo(*Probe, "morok.antidbg.win.dr") >= 1u);
+    CHECK(countCallsTo(*VehDispatch, "morok.win.veh.dispatch.trip") >= 1u);
     const std::size_t userProbeSites =
         countCallsTo(*Work, "morok.antidbg.probe") +
         countCallsTo(*Main, "morok.antidbg.probe");
@@ -17237,6 +17256,7 @@ entry:
     CHECK(M->getFunction("MapViewOfFile") == nullptr);
     CHECK(M->getFunction("UnmapViewOfFile") == nullptr);
     CHECK(M->getFunction("CloseHandle") == nullptr);
+    CHECK(M->getFunction("AddVectoredExceptionHandler") == nullptr);
     CHECK(countCallsTo(*WinText, "morok.win.textchk.clean") >= 1u);
     CHECK(countNamedInstructions(*WinText, "morok.win.textchk.peb") >= 1u);
     CHECK(countNamedInstructions(*WinText,
@@ -17292,9 +17312,43 @@ entry:
                                  "morok.win.dr.sentinel.mismatch") >= 1u);
     CHECK(countNamedInstructions(*WinDr,
                                  "morok.win.dr.restore.status") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.rtladd") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.rtlremove") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.rtldecode") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.ntqueryvm") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.handle") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.head.match") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.not.head") >= 1u);
+    CHECK(countNamedInstructions(*VehDispatch,
+                                 "morok.win.veh.dispatch.missing") >= 1u);
+    CHECK(countNamedInstructions(*VehHandler,
+                                 "morok.win.veh.dispatch.context") >= 1u);
+    CHECK(countNamedInstructions(*VehHandler,
+                                 "morok.win.veh.dispatch.rip.ptr") >= 1u);
+    CHECK(countNamedInstructions(*VehHandler,
+                                 "morok.win.veh.dispatch.target") >= 1u);
+    CHECK(countNamedInstructions(*VehHead,
+                                 "morok.win.veh.head.match.any") >= 1u);
     Instruction *Active = findNamedInstruction(*WinDr, "morok.win.dr.active");
     REQUIRE(Active != nullptr);
     CHECK(valueFeedsNamedInstruction(Active, "morok.seal.fold.anti_debug"));
+    Instruction *VehMissing =
+        findNamedInstruction(*VehDispatch, "morok.win.veh.dispatch.missing");
+    REQUIRE(VehMissing != nullptr);
+    CHECK(valueFeedsNamedInstruction(VehMissing,
+                                     "morok.seal.fold.anti_debug"));
+    Instruction *VehNotHead =
+        findNamedInstruction(*VehDispatch, "morok.win.veh.dispatch.not.head");
+    REQUIRE(VehNotHead != nullptr);
+    CHECK(valueFeedsNamedInstruction(VehNotHead,
+                                     "morok.seal.fold.anti_debug"));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
