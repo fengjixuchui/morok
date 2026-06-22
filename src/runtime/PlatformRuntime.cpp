@@ -337,6 +337,14 @@ static Value *emitArm64Svc8InlineAsm(IRBuilder<> &B, Module &M, Value *Nr,
                         Name);
 }
 
+static ConstantInt *darwinX86MachTrapNumber(IntegerType *IP,
+                                            std::int32_t Trap) {
+    std::uint32_t Ordinal =
+        Trap < 0 ? static_cast<std::uint32_t>(-Trap)
+                 : static_cast<std::uint32_t>(Trap);
+    return ConstantInt::get(IP, 0x01000000U | Ordinal);
+}
+
 static Value *emitX86DarwinMachTrap0(IRBuilder<> &B, Module &M,
                                      std::int32_t Trap, const Twine &Name) {
     auto *IP = platformWordTy(M);
@@ -345,7 +353,41 @@ static Value *emitX86DarwinMachTrap0(IRBuilder<> &B, Module &M,
         AsmTy, "syscall\nsbbq %r11, %r11\norq %r11, %rax",
         "={rax},{rax},~{rcx},~{r11},~{memory},~{dirflag},~{fpsr},~{flags}",
         /*hasSideEffects=*/true);
-    return B.CreateCall(AsmTy, TrapAsm, {ConstantInt::getSigned(IP, Trap)},
+    return B.CreateCall(AsmTy, TrapAsm, {darwinX86MachTrapNumber(IP, Trap)},
+                        Name);
+}
+
+static Value *emitX86DarwinMachTrap2(IRBuilder<> &B, Module &M,
+                                     std::int32_t Trap,
+                                     const std::array<Value *, 2> &A,
+                                     const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    std::vector<Type *> Params(3, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *TrapAsm = InlineAsm::get(
+        AsmTy, "syscall\nsbbq %r11, %r11\norq %r11, %rax",
+        "={rax},{rax},{rdi},{rsi},~{rcx},~{r11},~{memory},~{dirflag},~{fpsr},"
+        "~{flags}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(AsmTy, TrapAsm,
+                        {darwinX86MachTrapNumber(IP, Trap), A[0], A[1]},
+                        Name);
+}
+
+static Value *emitX86DarwinMachTrap3(IRBuilder<> &B, Module &M,
+                                     std::int32_t Trap,
+                                     const std::array<Value *, 3> &A,
+                                     const Twine &Name) {
+    auto *IP = platformWordTy(M);
+    std::vector<Type *> Params(4, IP);
+    auto *AsmTy = FunctionType::get(IP, Params, false);
+    InlineAsm *TrapAsm = InlineAsm::get(
+        AsmTy, "syscall\nsbbq %r11, %r11\norq %r11, %rax",
+        "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory},~{dirflag},"
+        "~{fpsr},~{flags}",
+        /*hasSideEffects=*/true);
+    return B.CreateCall(AsmTy, TrapAsm,
+                        {darwinX86MachTrapNumber(IP, Trap), A[0], A[1], A[2]},
                         Name);
 }
 
@@ -365,7 +407,7 @@ static Value *emitX86DarwinMachTrap7(IRBuilder<> &B, Module &M,
         /*hasSideEffects=*/true);
     return B.CreateCall(
         AsmTy, TrapAsm,
-        {ConstantInt::getSigned(IP, Trap), A[0], A[1], A[2], A[3], A[4],
+        {darwinX86MachTrapNumber(IP, Trap), A[0], A[1], A[2], A[3], A[4],
          A[5], A[6]},
         Name);
 }
@@ -390,6 +432,42 @@ static Value *emitDarwinMachTrap0(IRBuilder<> &B, Module &M, const Triple &TT,
             ConstantInt::get(IP, 0), ConstantInt::get(IP, 0)};
         return emitArm64SvcInlineAsm(B, M, ConstantInt::getSigned(IP, Trap), A,
                                      Name);
+    }
+    return nullptr;
+}
+
+static Value *emitDarwinMachTrap2(IRBuilder<> &B, Module &M, const Triple &TT,
+                                  std::int32_t Trap,
+                                  const std::array<Value *, 2> &A,
+                                  const Twine &Name) {
+    if (useDirectDarwinSyscalls(M, TT))
+        return emitX86DarwinMachTrap2(B, M, Trap, A, Name);
+    if (TT.isOSDarwin() && TT.getArch() == Triple::aarch64 &&
+        directSyscallPolicy(M) != 2u) {
+        auto *IP = platformWordTy(M);
+        std::array<Value *, 6> Args = {
+            A[0], A[1], ConstantInt::get(IP, 0), ConstantInt::get(IP, 0),
+            ConstantInt::get(IP, 0), ConstantInt::get(IP, 0)};
+        return emitArm64SvcInlineAsm(B, M, ConstantInt::getSigned(IP, Trap),
+                                     Args, Name);
+    }
+    return nullptr;
+}
+
+static Value *emitDarwinMachTrap3(IRBuilder<> &B, Module &M, const Triple &TT,
+                                  std::int32_t Trap,
+                                  const std::array<Value *, 3> &A,
+                                  const Twine &Name) {
+    if (useDirectDarwinSyscalls(M, TT))
+        return emitX86DarwinMachTrap3(B, M, Trap, A, Name);
+    if (TT.isOSDarwin() && TT.getArch() == Triple::aarch64 &&
+        directSyscallPolicy(M) != 2u) {
+        auto *IP = platformWordTy(M);
+        std::array<Value *, 6> Args = {
+            A[0], A[1], A[2], ConstantInt::get(IP, 0),
+            ConstantInt::get(IP, 0), ConstantInt::get(IP, 0)};
+        return emitArm64SvcInlineAsm(B, M, ConstantInt::getSigned(IP, Trap),
+                                     Args, Name);
     }
     return nullptr;
 }
@@ -758,6 +836,52 @@ Value *emitDarwinTaskInfoAuditToken(IRBuilder<> &B, Module &M, const Triple &TT,
                          ConstantInt::get(I32, kTaskAuditTokenFlavor),
                          AuditToken, Count},
                         Name + ".import");
+}
+
+Value *emitDarwinTaskSelf(IRBuilder<> &B, Module &M, const Triple &TT,
+                          const Twine &Name) {
+    auto *I32 = Type::getInt32Ty(M.getContext());
+    if (Value *Raw = emitDarwinMachTrap0(B, M, TT, -28, Name))
+        return B.CreateTruncOrBitCast(Raw, I32, Name + ".name");
+    auto *Self = cast<GlobalVariable>(M.getOrInsertGlobal("mach_task_self_", I32));
+    return B.CreateLoad(I32, Self, Name + ".global");
+}
+
+Value *emitDarwinTaskForPid(IRBuilder<> &B, Module &M, const Triple &TT,
+                            Value *TargetTask, Value *Pid, Value *OutTask,
+                            const Twine &Name) {
+    auto *I32 = Type::getInt32Ty(M.getContext());
+    auto *Ptr = PointerType::getUnqual(M.getContext());
+    if (Value *Raw = emitDarwinMachTrap3(
+            B, M, TT, -45,
+            {toSyscallArg(B, TargetTask), toSyscallArg(B, Pid),
+             toSyscallArg(B, OutTask)},
+            Name))
+        return B.CreateTruncOrBitCast(Raw, I32, Name + ".rc");
+
+    FunctionCallee TaskForPid = M.getOrInsertFunction(
+        "task_for_pid", FunctionType::get(I32, {I32, I32, Ptr}, false));
+    return B.CreateCall(TaskForPid,
+                        {B.CreateTruncOrBitCast(TargetTask, I32),
+                         B.CreateTruncOrBitCast(Pid, I32), OutTask},
+                        Name + ".import");
+}
+
+Value *emitDarwinMachPortDeallocate(IRBuilder<> &B, Module &M,
+                                    const Triple &TT, Value *Task,
+                                    Value *PortName, const Twine &CallName) {
+    auto *I32 = Type::getInt32Ty(M.getContext());
+    if (Value *Raw = emitDarwinMachTrap2(
+            B, M, TT, -18,
+            {toSyscallArg(B, Task), toSyscallArg(B, PortName)}, CallName))
+        return B.CreateTruncOrBitCast(Raw, I32, CallName + ".rc");
+
+    FunctionCallee Deallocate = M.getOrInsertFunction(
+        "mach_port_deallocate", FunctionType::get(I32, {I32, I32}, false));
+    return B.CreateCall(Deallocate,
+                        {B.CreateTruncOrBitCast(Task, I32),
+                         B.CreateTruncOrBitCast(PortName, I32)},
+                        CallName + ".import");
 }
 
 Value *emitDarwinTaskGetExceptionPorts(

@@ -108,6 +108,18 @@ llvm::Value *emitDarwinTaskInfoAuditToken(
     llvm::IRBuilder<> &B, llvm::Module &M, const llvm::Triple &TT,
     llvm::Value *Task, llvm::Value *AuditToken,
     const llvm::Twine &Name = llvm::Twine("morok.darwin.task.audit_token"));
+llvm::Value *emitDarwinTaskSelf(llvm::IRBuilder<> &B, llvm::Module &M,
+                                const llvm::Triple &TT,
+                                const llvm::Twine &Name =
+                                    llvm::Twine("morok.darwin.task.self"));
+llvm::Value *emitDarwinTaskForPid(
+    llvm::IRBuilder<> &B, llvm::Module &M, const llvm::Triple &TT,
+    llvm::Value *TargetTask, llvm::Value *Pid, llvm::Value *OutTask,
+    const llvm::Twine &Name = llvm::Twine("morok.darwin.task_for_pid"));
+llvm::Value *emitDarwinMachPortDeallocate(
+    llvm::IRBuilder<> &B, llvm::Module &M, const llvm::Triple &TT,
+    llvm::Value *Task, llvm::Value *Name,
+    const llvm::Twine &CallName = llvm::Twine("morok.darwin.port.deallocate"));
 llvm::Value *emitDarwinTaskGetExceptionPorts(
     llvm::IRBuilder<> &B, llvm::Module &M, const llvm::Triple &TT,
     llvm::Value *Task, llvm::Value *ExceptionMask, llvm::Value *Masks,

@@ -380,6 +380,36 @@ void checkDarwinCsopsExceptionCoherence(Function &F) {
     CHECK(valueFeedsNamedInstruction(Coherent, "morok.seal.fold.anti_debug"));
 }
 
+void checkDarwinTaskForPidSignals(Function &F) {
+    Instruction *Missing = findNamedInstruction(
+        F, "morok.antidbg.csops.gta.missing.effective");
+    Instruction *Grant = findNamedInstruction(F, "morok.antidbg.tfp.grant");
+    Instruction *AbsentGrant =
+        findNamedInstruction(F, "morok.antidbg.tfp.gta.absent.grant");
+    Instruction *DebuggedWithoutTaskAllow =
+        findNamedInstruction(F, "morok.antidbg.csops.gta.absent.debugged");
+    Instruction *Coherent =
+        findNamedInstruction(F, "morok.antidbg.tfp.csops.coherent");
+    REQUIRE(Missing != nullptr);
+    REQUIRE(Grant != nullptr);
+    REQUIRE(AbsentGrant != nullptr);
+    REQUIRE(DebuggedWithoutTaskAllow != nullptr);
+    REQUIRE(Coherent != nullptr);
+    CHECK(valueFeedsNamedInstruction(Missing,
+                                     "morok.antidbg.tfp.gta.absent.grant"));
+    CHECK(valueFeedsNamedInstruction(Grant,
+                                     "morok.antidbg.tfp.gta.absent.grant"));
+    CHECK_FALSE(valueFeedsNamedInstruction(AbsentGrant,
+                                           "morok.seal.fold.anti_debug"));
+    CHECK(valueFeedsNamedInstruction(DebuggedWithoutTaskAllow,
+                                     "morok.antidbg.tfp.csops.coherent"));
+    CHECK(valueFeedsNamedInstruction(Coherent, "morok.seal.fold.anti_debug"));
+    CHECK(countNamedInstructions(F, "morok.antidbg.tfp.task") >= 1u);
+    CHECK(countNamedInstructions(F, "morok.antidbg.tfp.self") >= 1u);
+    CHECK(countNamedInstructions(F, "morok.antidbg.tfp.port.deallocate") >=
+          1u);
+}
+
 void checkDarwinExceptionPortVariableReplyParser(Function &F, StringRef Prefix) {
     auto requireNamed = [&](StringRef Suffix) -> Instruction * {
         std::string Name = (Twine(Prefix) + Suffix).str();
@@ -1676,6 +1706,41 @@ TEST_CASE("PlatformRuntime emits Darwin csops audit-token status through raw "
     CHECK(hasInlineAsmCall(*F));
     CHECK(functionHasConstantInt(*F, 0x020000AAU));
     CHECK(countNamedInstructions(*F, "morok.darwin.csops.audit") >= 1u);
+    CHECK_FALSE(verifyModule(M, &errs()));
+}
+
+TEST_CASE("PlatformRuntime emits Darwin task_for_pid through direct Mach trap") {
+    LLVMContext ctx;
+    Module M("platform-runtime-darwin-tfp-direct", ctx);
+    M.setTargetTriple(Triple("x86_64-apple-macosx13.0.0"));
+    auto *I32 = Type::getInt32Ty(ctx);
+    auto *F = Function::Create(FunctionType::get(I32, false),
+                               GlobalValue::ExternalLinkage, "probe", M);
+    IRBuilder<> B(BasicBlock::Create(ctx, "entry", F));
+    auto *Port = B.CreateAlloca(I32, nullptr, "port");
+    B.CreateStore(ConstantInt::get(I32, 0), Port);
+    Value *Task =
+        morok::runtime::emitDarwinTaskSelf(B, M, Triple(M.getTargetTriple()),
+                                           "morok.test.tfp.task");
+    Value *Rc = morok::runtime::emitDarwinTaskForPid(
+        B, M, Triple(M.getTargetTriple()), Task, ConstantInt::get(I32, 1234),
+        Port, "morok.test.tfp");
+    Value *PortValue = B.CreateLoad(I32, Port, "morok.test.tfp.port");
+    morok::runtime::emitDarwinMachPortDeallocate(
+        B, M, Triple(M.getTargetTriple()), Task, PortValue,
+        "morok.test.tfp.deallocate");
+    B.CreateRet(Rc);
+
+    CHECK(M.getFunction("task_for_pid") == nullptr);
+    CHECK(M.getFunction("mach_port_deallocate") == nullptr);
+    CHECK(M.getFunction("syscall") == nullptr);
+    CHECK(hasInlineAsmCall(*F));
+    CHECK(countNamedInstructions(*F, "morok.test.tfp.task") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.tfp") >= 1u);
+    CHECK(countNamedInstructions(*F, "morok.test.tfp.deallocate") >= 1u);
+    CHECK(functionHasConstantInt(*F, 0x0100001cU));
+    CHECK(functionHasConstantInt(*F, 0x0100002dU));
+    CHECK(functionHasConstantInt(*F, 0x01000012U));
     CHECK_FALSE(verifyModule(M, &errs()));
 }
 
@@ -18659,6 +18724,8 @@ entry:
     CHECK(M->getFunction("csops") == nullptr);
     CHECK(M->getFunction("csops_audittoken") == nullptr);
     CHECK(M->getFunction("task_info") == nullptr);
+    CHECK(M->getFunction("task_for_pid") == nullptr);
+    CHECK(M->getFunction("mach_port_deallocate") == nullptr);
     CHECK(M->getFunction("task_get_exception_ports") == nullptr);
     CHECK(M->getFunction("csr_get_active_config") == nullptr);
     CHECK(M->getFunction("SecTaskCreateFromSelf") == nullptr);
@@ -18694,6 +18761,8 @@ entry:
     CHECK(countNamedInstructions(*Ctor, "morok.antidbg.exc.any") >= 1u);
     checkDarwinCsopsTaskAllowSignals(*Ctor);
     checkDarwinCsopsTaskAllowSignals(*Probe);
+    checkDarwinTaskForPidSignals(*Ctor);
+    checkDarwinTaskForPidSignals(*Probe);
     checkDarwinCsopsExceptionCoherence(*Ctor);
     checkDarwinCsrPolicySignals(*M, *Ctor);
     CHECK(functionHasConstantInt(*Ctor, 0x7FE));
@@ -18931,6 +19000,8 @@ entry:
     CHECK(M->getFunction("csops") == nullptr);
     CHECK(M->getFunction("csops_audittoken") == nullptr);
     CHECK(M->getFunction("task_info") == nullptr);
+    CHECK(M->getFunction("task_for_pid") == nullptr);
+    CHECK(M->getFunction("mach_port_deallocate") == nullptr);
     CHECK(M->getFunction("task_get_exception_ports") == nullptr);
     CHECK(M->getFunction("csr_get_active_config") == nullptr);
     CHECK(M->getFunction("getenv") != nullptr);
@@ -18973,6 +19044,8 @@ entry:
                                  "morok.antidbg.exc.any") >= 1u);
     checkDarwinCsopsTaskAllowSignals(*M->getFunction("morok.antidbg"));
     checkDarwinCsopsTaskAllowSignals(*M->getFunction("morok.antidbg.probe"));
+    checkDarwinTaskForPidSignals(*M->getFunction("morok.antidbg"));
+    checkDarwinTaskForPidSignals(*M->getFunction("morok.antidbg.probe"));
     checkDarwinCsopsExceptionCoherence(*M->getFunction("morok.antidbg"));
     checkDarwinCsrPolicySignals(*M, *M->getFunction("morok.antidbg"));
     CHECK(functionHasConstantInt(*M->getFunction("morok.antidbg"), 0x7FE));

@@ -1029,6 +1029,25 @@ Value *emitDarwinTaskInfoAuditToken(IRBuilder<> &B, Module &M,
                                                  Name);
 }
 
+Value *emitDarwinTaskSelf(IRBuilder<> &B, Module &M, const Triple &TT,
+                          const Twine &Name) {
+    return runtime::emitDarwinTaskSelf(B, M, TT, Name);
+}
+
+Value *emitDarwinTaskForPid(IRBuilder<> &B, Module &M, const Triple &TT,
+                            Value *TargetTask, Value *Pid, Value *OutTask,
+                            const Twine &Name) {
+    return runtime::emitDarwinTaskForPid(B, M, TT, TargetTask, Pid, OutTask,
+                                         Name);
+}
+
+Value *emitDarwinMachPortDeallocate(IRBuilder<> &B, Module &M,
+                                    const Triple &TT, Value *Task,
+                                    Value *PortName, const Twine &Name) {
+    return runtime::emitDarwinMachPortDeallocate(B, M, TT, Task, PortName,
+                                                 Name);
+}
+
 Value *emitDarwinTaskGetExceptionPorts(
     IRBuilder<> &B, Module &M, const Triple &TT, Value *Task,
     Value *ExceptionMask, Value *Masks, Value *MaskCount, Value *Handlers,
@@ -3520,6 +3539,7 @@ void emitDarwinSysctlCheck(IRBuilder<> &B, Module &M, GlobalVariable *State,
 struct DarwinCsopsSignals {
     Value *debugged = nullptr;
     Value *debuggedWithoutTaskAllow = nullptr;
+    Value *taskAllowMissing = nullptr;
 };
 
 DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
@@ -3540,7 +3560,8 @@ DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
     Value *debugged =
         B.CreateICmpNE(B.CreateAnd(flags, ConstantInt::get(i32, 0x10000000)),
                        ConstantInt::get(i32, 0));
-    Value *ok = B.CreateICmpEQ(rc, ConstantInt::get(i32, 0));
+    Value *ok =
+        B.CreateICmpEQ(rc, ConstantInt::get(i32, 0), "morok.antidbg.csops.ok");
     Value *dbgFlag = B.CreateAnd(ok, debugged, "morok.antidbg.csops.debugged");
     foldFlag(B, State, dbgFlag, 0xF1D88C6C72195307ULL, "morok.antidbg.csops");
     sealFold(B, dbgFlag, 0xF1D88C6C72195307ULL);
@@ -3670,8 +3691,11 @@ DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
                        "morok.antidbg.csops.gta");
     Value *missingTaskAllow =
         B.CreateNot(taskAllowed, "morok.antidbg.csops.gta.missing");
+    Value *taskAllowMissing =
+        B.CreateAnd(ok, missingTaskAllow,
+                    "morok.antidbg.csops.gta.missing.effective");
     Value *debuggedWithoutTaskAllow =
-        B.CreateAnd(dbgFlag, missingTaskAllow,
+        B.CreateAnd(dbgFlag, taskAllowMissing,
                     "morok.antidbg.csops.gta.absent.debugged");
     foldFlag(B, State, debuggedWithoutTaskAllow, 0x4B6E8A13D927C5F1ULL,
              "morok.antidbg.csops.gta.absent");
@@ -3685,8 +3709,11 @@ DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
                        "morok.antidbg.csops.audit.gta");
     Value *auditMissingTaskAllow =
         B.CreateNot(auditTaskAllowed, "morok.antidbg.csops.audit.gta.missing");
+    Value *auditTaskAllowMissing = B.CreateAnd(
+        auditOk, auditMissingTaskAllow,
+        "morok.antidbg.csops.audit.gta.missing.effective");
     Value *auditDebuggedWithoutTaskAllow =
-        B.CreateAnd(auditDbgFlag, auditMissingTaskAllow,
+        B.CreateAnd(auditDbgFlag, auditTaskAllowMissing,
                     "morok.antidbg.csops.audit.gta.absent.debugged");
     foldFlag(B, State, auditDebuggedWithoutTaskAllow, 0xD7E9B43A6501C28FULL,
              "morok.antidbg.csops.audit.gta.absent");
@@ -3697,7 +3724,73 @@ DarwinCsopsSignals emitDarwinCsopsCheck(IRBuilder<> &B, Module &M,
     Value *anyDebuggedWithoutTaskAllow = B.CreateOr(
         debuggedWithoutTaskAllow, auditDebuggedWithoutTaskAllow,
         "morok.antidbg.csops.gta.absent.any");
-    return {anyDebugged, anyDebuggedWithoutTaskAllow};
+    Value *anyTaskAllowMissing =
+        B.CreateOr(taskAllowMissing, auditTaskAllowMissing,
+                   "morok.antidbg.csops.gta.missing.any");
+    return {anyDebugged, anyDebuggedWithoutTaskAllow, anyTaskAllowMissing};
+}
+
+void emitDarwinTaskForPidSelfProbe(IRBuilder<> &B, Module &M,
+                                   GlobalVariable *State, const Triple &TT,
+                                   DarwinCsopsSignals Csops) {
+    if (!Csops.taskAllowMissing || !TT.isOSDarwin() ||
+        (TT.getArch() != Triple::x86_64 && TT.getArch() != Triple::aarch64))
+        return;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    Function *fn = B.GetInsertBlock()->getParent();
+    BasicBlock *startBB = B.GetInsertBlock();
+    BasicBlock *probeBB =
+        BasicBlock::Create(ctx, "morok.antidbg.tfp.probe", fn);
+    BasicBlock *deallocBB =
+        BasicBlock::Create(ctx, "morok.antidbg.tfp.dealloc", fn);
+    BasicBlock *doneBB =
+        BasicBlock::Create(ctx, "morok.antidbg.tfp.done", fn);
+
+    auto *port = B.CreateAlloca(i32, nullptr, "morok.antidbg.tfp.port");
+    B.CreateStore(ConstantInt::get(i32, 0), port);
+    B.CreateCondBr(Csops.taskAllowMissing, probeBB, doneBB);
+
+    IRBuilder<> PB(probeBB);
+    Value *task = emitDarwinTaskSelf(PB, M, TT, "morok.antidbg.tfp.task");
+    Value *pid = emitDarwinGetpid(PB, M, TT);
+    pid->setName("morok.antidbg.tfp.pid");
+    Value *rc = emitDarwinTaskForPid(PB, M, TT, task, pid, port,
+                                     "morok.antidbg.tfp.self");
+    Value *ok =
+        PB.CreateICmpEQ(rc, ConstantInt::get(i32, 0), "morok.antidbg.tfp.ok");
+    Value *portValue = PB.CreateLoad(i32, port, "morok.antidbg.tfp.port.v");
+    Value *hasPort = PB.CreateICmpNE(
+        portValue, ConstantInt::get(i32, 0), "morok.antidbg.tfp.port.nonzero");
+    Value *grant = PB.CreateAnd(ok, hasPort, "morok.antidbg.tfp.grant");
+    Value *unexpectedGrant =
+        PB.CreateAnd(grant, Csops.taskAllowMissing,
+                     "morok.antidbg.tfp.gta.absent.grant");
+    // A process can legitimately obtain its own task port on some clean hosts.
+    // Keep the raw grant as telemetry; only the CS_DEBUGGED-coherent case below
+    // reaches the consumed anti_debug seal.
+    foldFlag(PB, State, unexpectedGrant, 0x8F0E2C4D91A6B375ULL,
+             "morok.antidbg.task_for_pid.gta.absent");
+
+    if (Csops.debuggedWithoutTaskAllow) {
+        Value *coherent =
+            PB.CreateAnd(grant, Csops.debuggedWithoutTaskAllow,
+                         "morok.antidbg.tfp.csops.coherent");
+        foldFlag(PB, State, coherent, 0x27BA5C1D6E4098F3ULL,
+                 "morok.antidbg.task_for_pid.csops");
+        sealFold(PB, coherent, 0x27BA5C1D6E4098F3ULL);
+    }
+
+    PB.CreateCondBr(grant, deallocBB, doneBB);
+
+    IRBuilder<> DB(deallocBB);
+    emitDarwinMachPortDeallocate(DB, M, TT, task, portValue,
+                                 "morok.antidbg.tfp.port.deallocate");
+    DB.CreateBr(doneBB);
+
+    B.SetInsertPoint(doneBB);
+    (void)startBB;
 }
 
 Value *emitDarwinExceptionPortProbe(IRBuilder<> &B, Module &M,
@@ -4550,6 +4643,7 @@ void emitDarwinAntiDebug(Module &M, Function *Ctor, GlobalVariable *State,
     emitDarwinSysctlCheck(B, M, State, TT);
     DarwinCsopsSignals csops =
         emitDarwinCsopsCheck(B, M, State, TT, DistributionSigned);
+    emitDarwinTaskForPidSelfProbe(B, M, State, TT, csops);
     Value *exceptionPorts = emitDarwinExceptionPortProbe(B, M, State, TT);
     if (csops.debuggedWithoutTaskAllow && exceptionPorts) {
         Value *coherent =
@@ -11414,7 +11508,9 @@ Function *antiDebugProbe(Module &M, GlobalVariable *State, ir::IRRandom &rng,
             B.CreateCall(faultCf->getFunctionType(), faultCf, {tag});
     } else if (TT.isOSDarwin()) {
         emitDarwinSysctlCheck(B, M, State, TT);
-        emitDarwinCsopsCheck(B, M, State, TT, DistributionSigned);
+        DarwinCsopsSignals csops =
+            emitDarwinCsopsCheck(B, M, State, TT, DistributionSigned);
+        emitDarwinTaskForPidSelfProbe(B, M, State, TT, csops);
     } else if (TT.isOSWindows()) {
         if (Function *dr = windowsHardwareBreakpointProbe(M, State, rng, TT))
             B.CreateCall(dr->getFunctionType(), dr, {tag});
