@@ -11,10 +11,13 @@
 #include <unistd.h>
 #endif
 
+static volatile unsigned runtime_secret_salt;
+
 static unsigned runtime_secret_byte(unsigned idx) {
     const unsigned char *secret =
         (const unsigned char *)"TRACE_RUNTIME_PLAINTEXT_761";
-    return secret[idx % (sizeof("TRACE_RUNTIME_PLAINTEXT_761") - 1u)];
+    return secret[(idx + runtime_secret_salt) %
+                  (sizeof("TRACE_RUNTIME_PLAINTEXT_761") - 1u)];
 }
 
 static void boundary_pause_if_requested(void) {
