@@ -2281,18 +2281,39 @@ Value *emitManualDlsymLookup(IRBuilder<> &B, Module &M, FunctionCallee Resolver,
                              StringRef Symbol, std::uint64_t DlsymHash,
                              std::uint64_t DlsymSalt, int RtldDefaultVal,
                              ir::IRRandom &rng) {
+    LLVMContext &Ctx = M.getContext();
     auto *I64 = Type::getInt64Ty(M.getContext());
     auto *Ptr = PointerType::getUnqual(M.getContext());
     Value *DlsymPtr = B.CreateCall(
         Resolver,
         {ConstantInt::get(I64, DlsymHash), ConstantInt::get(I64, DlsymSalt)},
         "morok.fco.dlsym.resolved");
-    Value *Name = ir::emitCloakedSymbol(B, M, Symbol, rng);
-    Value *Rtld = B.CreateIntToPtr(ConstantInt::getSigned(I64, RtldDefaultVal),
-                                   Ptr, "morok.fco.dlsym.rtld");
+    Function *F = B.GetInsertBlock()->getParent();
+    BasicBlock *CallBB = BasicBlock::Create(Ctx, "morok.fco.dlsym.call", F);
+    BasicBlock *NullBB = BasicBlock::Create(Ctx, "morok.fco.dlsym.null", F);
+    BasicBlock *ContBB = BasicBlock::Create(Ctx, "morok.fco.dlsym.cont", F);
+    B.CreateCondBr(B.CreateICmpNE(DlsymPtr, ConstantPointerNull::get(Ptr),
+                                  "morok.fco.dlsym.available"),
+                   CallBB, NullBB);
+
     auto *DlsymTy = FunctionType::get(Ptr, {Ptr, Ptr}, false);
-    return B.CreateCall(DlsymTy, DlsymPtr, {Rtld, Name},
-                        "morok.fco.dlsym.fallback");
+    IRBuilder<> CB(CallBB);
+    Value *Name = ir::emitCloakedSymbol(CB, M, Symbol, rng);
+    Value *Rtld = CB.CreateIntToPtr(ConstantInt::getSigned(I64, RtldDefaultVal),
+                                    Ptr, "morok.fco.dlsym.rtld");
+    Value *Fallback = CB.CreateCall(DlsymTy, DlsymPtr, {Rtld, Name},
+                                    "morok.fco.dlsym.fallback");
+    CB.CreateBr(ContBB);
+
+    IRBuilder<> NB(NullBB);
+    NB.CreateBr(ContBB);
+
+    IRBuilder<> PB(ContBB);
+    PHINode *Result = PB.CreatePHI(Ptr, 2, "morok.fco.dlsym.result");
+    Result->addIncoming(Fallback, CallBB);
+    Result->addIncoming(ConstantPointerNull::get(Ptr), NullBB);
+    B.SetInsertPoint(ContBB);
+    return Result;
 }
 
 Value *emitResolvedViaException(CallInst *CI, Module &M, ExceptionRuntime &Rt,
@@ -2408,13 +2429,14 @@ Value *emitCachedResolvedViaException(
         IRBuilder<> FB(FallbackBB);
         Value *FallbackResolved = emitManualDlsymLookup(
             FB, M, Resolver, Symbol, DlsymHash, DlsymSalt, RtldDefaultVal, rng);
+        BasicBlock *FallbackIncoming = FB.GetInsertBlock();
         FB.CreateBr(StoreBB);
 
         IRBuilder<> SB(StoreBB);
         PHINode *FinalResolved =
             SB.CreatePHI(Ptr, 2, "morok.fco.hash.resolved.final");
         FinalResolved->addIncoming(Resolved, ResolveBB);
-        FinalResolved->addIncoming(FallbackResolved, FallbackBB);
+        FinalResolved->addIncoming(FallbackResolved, FallbackIncoming);
         ResolvedForStore = FinalResolved;
         RB.SetInsertPoint(StoreBB);
     }
@@ -2506,13 +2528,14 @@ Value *emitCachedManualResolved(CallInst *CI, Module &M,
         IRBuilder<> FB(FallbackBB);
         Value *FallbackResolved = emitManualDlsymLookup(
             FB, M, Resolver, Symbol, DlsymHash, DlsymSalt, RtldDefaultVal, rng);
+        BasicBlock *FallbackIncoming = FB.GetInsertBlock();
         FB.CreateBr(StoreBB);
 
         IRBuilder<> SB(StoreBB);
         PHINode *FinalResolved =
             SB.CreatePHI(Ptr, 2, "morok.fco.hash.resolved.final");
         FinalResolved->addIncoming(Resolved, MissBB);
-        FinalResolved->addIncoming(FallbackResolved, FallbackBB);
+        FinalResolved->addIncoming(FallbackResolved, FallbackIncoming);
         ResolvedForStore = FinalResolved;
         MB.SetInsertPoint(StoreBB);
     }
@@ -2752,16 +2775,35 @@ bool functionCallObfuscateModule(Module &M, const FcoParams &params,
                     "morok.fco.hash.resolved.alias.sel");
             }
             if (manualDlsymFallback) {
+                Function *F = cb->getFunction();
+                BasicBlock *ResolveBB = cb->getParent();
+                BasicBlock *ContBB = ResolveBB->splitBasicBlock(
+                    cb->getIterator(), "morok.fco.hash.cont");
+                ResolveBB->getTerminator()->eraseFromParent();
+                BasicBlock *FallbackBB =
+                    BasicBlock::Create(ctx, "morok.fco.hash.dlsym", F, ContBB);
+                IRBuilder<> RB(ResolveBB);
+                RB.CreateCondBr(RB.CreateICmpEQ(resolved,
+                                                ConstantPointerNull::get(ptr),
+                                                "morok.fco.hash.miss"),
+                                FallbackBB, ContBB);
+
+                IRBuilder<> FB(FallbackBB);
                 Value *FallbackResolved = emitManualDlsymLookup(
-                    B, M, resolver, plan.name, plan.dlsym_hash, plan.dlsym_salt,
-                    rtldDefaultVal, rng);
-                resolved = B.CreateSelect(
-                    B.CreateICmpEQ(resolved, ConstantPointerNull::get(ptr),
-                                   "morok.fco.hash.miss"),
-                    FallbackResolved, resolved,
-                    "morok.fco.hash.resolved.fallback.sel");
+                    FB, M, resolver, plan.name, plan.dlsym_hash,
+                    plan.dlsym_salt, rtldDefaultVal, rng);
+                BasicBlock *FallbackIncoming = FB.GetInsertBlock();
+                FB.CreateBr(ContBB);
+
+                IRBuilder<> CB(&*ContBB->getFirstInsertionPt());
+                PHINode *FinalResolved =
+                    CB.CreatePHI(ptr, 2, "morok.fco.hash.resolved.final");
+                FinalResolved->addIncoming(resolved, ResolveBB);
+                FinalResolved->addIncoming(FallbackResolved, FallbackIncoming);
+                decoded = encodeResolvedPointer(CB, M, FinalResolved, rng);
+            } else {
+                decoded = encodeResolvedPointer(B, M, resolved, rng);
             }
-            decoded = encodeResolvedPointer(B, M, resolved, rng);
         } else {
             Value *rtld = B.CreateIntToPtr(
                 ConstantInt::getSigned(i64, rtldDefaultVal), ptr);

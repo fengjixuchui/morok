@@ -73,6 +73,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -15128,6 +15129,67 @@ lpad:
         countStoresToBaseWithOpaqueSource(*M, "morok.cloak.buf");
     CHECK(cloakStores >= 1u);
     CHECK(opaqueCloakStores == cloakStores);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("functionCallObfuscateModule guards Linux invoke dlsym fallback") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+declare i32 @may_throw()
+declare i32 @__gxx_personality_v0(...)
+
+define i32 @caller() personality ptr @__gxx_personality_v0 {
+entry:
+  %r = invoke i32 @may_throw()
+          to label %ok unwind label %lpad
+ok:
+  ret i32 %r
+lpad:
+  %lp = landingpad { ptr, i32 }
+          cleanup
+  ret i32 -1
+}
+)ir");
+    Function *F = M->getFunction("caller");
+    REQUIRE(F);
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(12401);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::functionCallObfuscateModule(*M, {/*prob=*/100}, rng));
+
+    CHECK(M->getFunction("dlsym") == nullptr);
+    CHECK(M->getFunction("morok.fco.resolve.elf") == nullptr);
+    CHECK(countCallsToPrefix(*F, "morok.fco.resolve.elf.") >= 2u);
+
+    CallInst *Fallback = nullptr;
+    for (Instruction &I : instructions(*F))
+        if (auto *CI = dyn_cast<CallInst>(&I))
+            if (CI->getName().starts_with("morok.fco.dlsym.fallback"))
+                Fallback = CI;
+    REQUIRE(Fallback != nullptr);
+
+    bool fallbackBehindMiss = false;
+    bool fallbackBehindDlsymNullCheck = false;
+    for (BasicBlock *Pred : predecessors(Fallback->getParent())) {
+        if (auto *BI = dyn_cast<BranchInst>(Pred->getTerminator())) {
+            fallbackBehindDlsymNullCheck |=
+                BI->isConditional() &&
+                BI->getCondition()->getName().starts_with(
+                    "morok.fco.dlsym.available");
+        }
+        for (BasicBlock *GrandPred : predecessors(Pred)) {
+            if (auto *BI = dyn_cast<BranchInst>(GrandPred->getTerminator())) {
+                fallbackBehindMiss |= BI->isConditional() &&
+                                      BI->getCondition()->getName().starts_with(
+                                          "morok.fco.hash.miss");
+            }
+        }
+    }
+
+    CHECK(fallbackBehindMiss);
+    CHECK(fallbackBehindDlsymNullCheck);
+    CHECK(countNamedInstructions(*F, "morok.fco.hash.resolved.final") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
