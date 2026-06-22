@@ -20658,7 +20658,11 @@ Function *windowsTrapFlagVehHandler(Module &M, GlobalVariable *Counter,
 
     const unsigned contextRecordOff = x86 ? 0x04 : 0x08;
     const unsigned exceptionAddressOff = x86 ? 0x0c : 0x10;
-    const unsigned eflagsOff = x86 ? 0xc4 : 0x44;
+    // CONTEXT.EFlags byte offset. i386 CONTEXT: ContextFlags@0x00, Dr0-7,
+    // FLOATING_SAVE_AREA[0x70]@0x1C (ends 0x8C), SegGs/Fs/Es/Ds, Edi..Eax,
+    // Ebp@0xB4, Eip@0xB8, SegCs@0xBC, EFlags@0xC0, Esp@0xC4 — so EFlags is
+    // 0xC0 (0xC4 is Esp). AMD64 CONTEXT puts EFlags at 0x44.
+    const unsigned eflagsOff = x86 ? 0xc0 : 0x44;
     constexpr std::uint32_t kExceptionSingleStep = 0x80000004u;
     constexpr std::uint32_t kTrapFlag = 0x00000100u;
 

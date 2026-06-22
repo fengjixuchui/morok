@@ -226,6 +226,19 @@ Instruction *findNamedInstruction(Function &F, StringRef name) {
     return nullptr;
 }
 
+// Byte offset of a gepI8-emitted `getelementptr i8, ptr Base, ip <off>` named
+// `name`. Returns -1 if the instruction is missing or not a constant-offset
+// i8 GEP. Used to pin platform struct field offsets in emitted handlers.
+long long namedGepByteOffset(Function &F, StringRef name) {
+    auto *GEP = dyn_cast_or_null<GetElementPtrInst>(findNamedInstruction(F, name));
+    if (!GEP || GEP->getNumOperands() != 2)
+        return -1;
+    auto *Idx = dyn_cast<ConstantInt>(GEP->getOperand(1));
+    if (!Idx)
+        return -1;
+    return static_cast<long long>(Idx->getZExtValue());
+}
+
 bool valueFeedsNamedInstruction(Value *Root, StringRef prefix) {
     SmallVector<Value *, 16> worklist;
     SmallPtrSet<Value *, 32> seen;
@@ -19312,6 +19325,11 @@ define i32 @main() { ret i32 0 }
                                  "morok.trap.win.veh.single.step") >= 1u);
     CHECK(countNamedInstructions(*Handler,
                                  "morok.trap.win.veh.eflags.clear") >= 1u);
+    // Regression (#225): AMD64 CONTEXT.EFlags is at 0x44. Pinned here so a fix
+    // to the i686 0xC0 offset cannot silently break the x64 path.
+    CHECK(namedGepByteOffset(*Handler, "morok.trap.win.veh.eflags.ptr") == 0x44);
+    CHECK(namedGepByteOffset(*Handler,
+                             "morok.trap.win.veh.eflags.store.ptr") == 0x44);
     Instruction *Missing =
         findNamedInstruction(*Probe, "morok.trap.win.single_step.missing");
     REQUIRE(Missing != nullptr);
@@ -19344,6 +19362,12 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(*Probe, "morok.trap.win.veh.handle") >= 1u);
     CHECK(countNamedInstructions(*Handler,
                                  "morok.trap.win.veh.eflags.clear") >= 1u);
+    // Regression (#225): on i686 the VEH handler must read/write CONTEXT.EFlags
+    // at 0xC0, not 0xC4 (0xC4 is Esp). Using 0xC4 masked the trap flag out of
+    // Esp, corrupting the stack pointer and leaving TF set.
+    CHECK(namedGepByteOffset(*Handler, "morok.trap.win.veh.eflags.ptr") == 0xC0);
+    CHECK(namedGepByteOffset(*Handler,
+                             "morok.trap.win.veh.eflags.store.ptr") == 0xC0);
     CallInst *Register = nullptr;
     for (Instruction &I : instructions(*Probe))
         if (auto *CI = dyn_cast<CallInst>(&I))
