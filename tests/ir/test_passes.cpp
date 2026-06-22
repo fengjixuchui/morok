@@ -18931,9 +18931,9 @@ define i32 @main() { ret i32 0 }
     CHECK(countNamedInstructions(
               *Probe, "morok.win.dbgobj.object.debug.count.final") >= 1u);
     CHECK(countNamedInstructions(*Probe,
-                                 "morok.win.dbgobj.object.debug.score") >= 1u);
+                                 "morok.win.dbgobj.object.debug.score") == 0u);
     CHECK(countNamedInstructions(
-              *Probe, "morok.win.dbgobj.object.debug.count.score") >= 1u);
+              *Probe, "morok.win.dbgobj.object.debug.count.score") == 0u);
     CHECK(namedInstructionUsesConstant(
         *Probe, "morok.win.dbgobj.object.fixed.next", 0x68));
     CHECK_FALSE(namedInstructionUsesConstant(
