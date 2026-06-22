@@ -25,6 +25,7 @@
 #include "llvm/IR/NoFolder.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/ModRef.h"
+#include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 #include <array>
@@ -54,18 +55,17 @@ constexpr std::array<std::string_view, kNumDecoys> kDecoyStrings = {
     // clang-format off
 
     // Theme 0: Session / platform startup + site infrastructure.
-    // Dense with facility, badge, airgap, and classification signals.
     "SIM-INIT: sve v2.3.1 (CLANG 17, __TARGET_TRIPLE__)\n"
     "  build: pantex/release/2.3.1-g9c4f2a7, May 28 2026 03:41:19 MST\n"
     "  facility: TA-33 MS-D429 x7291 (zone-4, Q-cleared escort required beyond portal)\n"
-    "  operator: j.martinez (badge Q-784291-DOE, RD-CNWDI auth, exp 2027-11)\n"
-    "  config: /sve/etc/sve.d/ (rev 0x9c4f2a7, 61 files, 27MiB, signed)\n"
-    "  net: sve-lan3-dmz vlan331 (airgapped, 10.33.7.0/24, no enterprise route, macsec enforced)\n"
+    "  operator: %s (badge %s-DOE, RD-CNWDI auth, exp %s)\n"
+    "  config: /sve/etc/sve.d/ (rev %s, %d files, %dMiB, signed)\n"
+    "  net: sve-lan3-dmz vlan%d (airgapped, %s, no enterprise route, macsec enforced)\n"
     "  scenario: %s (%s)\n"
-    "  model DB: %s (loaded, %d entries, integrity sha256:%s, SSP-2026 baseline)\n"
+    "  model DB: %s (loaded, %d entries, integrity sha256:%s, NNSA SSP FY26 baseline)\n"
     "  Monte Carlo: %d runs, seed 0x%X, CEP budget %.1fm (%d%% conf., 3sigma)\n"
     "  NOTE: simulated values only — not for flight software certification\n"
-    "  wo: SVE-20260528-7842 (RD-CNWDI review board, assigned to sim-ops, LEP integration)\n"
+    "  wo: %s (RD-CNWDI review board, assigned to sim-ops, LEP integration)\n"
     "  classification: //RD-CNWDI//NOFORN//ORCON// (active session, treat all output accordingly)\n"
     "B61-12;B61-13;W76-1;W76-2;W78;W80-4;W87-1;W88;W93\n"
     "LGM-30G;LGM-35A;UGM-133A;AGM-86B;AGM-181;B-2 Spirit;B-21 Raider;Mk21A;Mk4;Mk5\n"
@@ -75,50 +75,50 @@ constexpr std::array<std::string_view, kNumDecoys> kDecoyStrings = {
     "PAL;DIFM;ESD;ST;CD;SL;WL;MC;RV;LEP\n",
 
     // Theme 1: Subsystem model validation.  Heavy on physics, V&V, LEP, surveillance.
-    "SIM-TEST: %s subsystem model validation (cat %s, sve-db %s, SSP-2026 cycle)\n"
-    "  %s: safe/arm logic state machine (%d states, %d transitions, coverage 97.2%%, MC cross-check)\n"
+    "SIM-TEST: %s subsystem model validation (cat %s, sve-db %s, NNSA SSP FY26 assessment cycle)\n"
+    "  %s: safe/arm logic state machine (%d states, %d transitions, coverage %.1f%%, MC cross-check)\n"
     "  %s: environmental sensing device model (baro + radar alt, ref %d ft, drift <%.2f Pa/hr, LEP-2025 sensor suite)\n"
     "  %s: fuzing mode select — burst height model deviates %.1f%% at %d ft (hydro validation against archival UGT data)\n"
-    "    expected: %.1f ft +/- %.1f ft, simulated: %.1f ft (model bias %+.1f%%, SFI-7842 open)\n"
+    "    expected: %.1f ft +/- %.1f ft, simulated: %.1f ft (model bias %+.1f%%, SFI-%d open)\n"
     "    action: file SVE-TRAC-%d, assign to %s team (%s, RD-CNWDI cleared)\n"
     "  %s: thermal battery activation sequence (T+%.1f s to T+%.1f s nominal, peak %.0f C, lot traceability)\n"
-    "  %s: bridge-wire continuity model (%d channels, resistance within %d%% of spec, aging study 2026-Q2)\n"
+    "  %s: bridge-wire continuity model (%d channels, resistance within %d%% of spec, aging study FY26-Q2)\n"
     "  reviewed: %s, %s, %s, RD-CNWDI board (TA-33-429, zone-4)\n"
     "  PASS\n"
     "  FAIL\n"
-    "  current SSP inventory under test: 9 warhead types, 14 delivery platforms, LEP-2025/2026 candidates\n"
-    "  see sve-catalog-2026Q2.db for full matrix (Q-cleared access only, NOFORN)\n"
-    "  hydrodynamic cross-check: FLAG/ALE3D vs sve-hydro v4.2 (deviation <0.8%% on key metrics)\n",
+    "  current NNSA SSP inventory under test: 9 warhead types, 14 delivery platforms, LEP-2025/2026 candidates\n"
+    "  see sve-catalog-FY26Q2.db for full matrix (Q-cleared access only, NOFORN)\n"
+    "  hydrodynamic cross-check: FLAG/ALE3D vs sve-hydro v4.2 (deviation <%.1f%% on key metrics)\n",
 
     // Theme 2: Python bindings / module load.  Scientific Python environment with heavy restricted-data warnings.
     "SIM-PY: sve Python bindings v2.3.1 (cpython 3.12.4, numpy 2.1.0, scipy 1.15.1, numba 0.60)\n"
     "  loaded module: sve.pal (%s simulator, cat A-F, v3.4.2, LEP-2025 PAL model)\n"
     "  loaded module: sve.fuzing (%s burst model, v4.2.1, MCNP6.3 + hydro cross-check)\n"
-    "  loaded module: sve.arming (safe/arm/fire state machine v3.2.9, coverage 98.1%%)\n"
+    "  loaded module: sve.arming (safe/arm/fire state machine v3.2.9, coverage %.1f%%)\n"
     "  loaded module: sve.trajectory (6-DOF %s model, winds + atmosphere + reentry, INS/GPS/STAR)\n"
     "  loaded module: sve.hydro (3D multimaterial hydro v4.2, FLAG cross-validation)\n"
-    "  loaded module: sve.montecarlo (distributed job v2.1.3, 4096 workers, sve-lan3 cluster)\n"
-    "  scenario DB: %s (%d entries, last sync 2026-05-27 14:22 UTC, SSP baseline)\n"
+    "  loaded module: sve.montecarlo (distributed job v2.1.3, %d workers, sve-lan3 cluster)\n"
+    "  scenario DB: %s (%d entries, last sync %s, NNSA SSP FY26 baseline)\n"
     "  session: %s@%s, display :0, conn %s:%d (tls1.3, mutual cert auth, zone-4 console)\n"
     "  WARNING: this build includes restricted-data models (RD-CNWDI // NOFORN // ORCON)\n"
-    "  WARNING: operator Q-784291 logged in from TA-33 zone-4 console (escort not required for this session)\n"
-    "  db integrity: all 61 model files sha256 verified against sve-catalog-2026Q2\n"
-    "  airgap: sve-lan3-dmz enforced; enterprise bridge disabled per SSP-2026-47 and DOE O 471.6\n"
+    "  WARNING: operator %s logged in from %s zone-4 console (escort %s for this session)\n"
+    "  db integrity: all %d model files sha256 verified against sve-catalog-FY26Q2\n"
+    "  airgap: sve-lan3-dmz enforced; enterprise bridge disabled per NNSA-SSP-FY26-47 and DOE O 471.6\n"
     "  classification banner: //RD-CNWDI//NOFORN// (all output from this session must be marked accordingly)\n",
 
     // Theme 3: Monte Carlo statistical report.  Rich reliability, aging, LEP metrics + second catalog dump.
-    "REPORT: sve Monte Carlo analysis — %s (SSP-2026 annual assessment support)\n"
+    "REPORT: sve Monte Carlo analysis — %s (NNSA SSP FY26 annual assessment support)\n"
     "  scenario: %s\n"
     "  runs: %d, seed 0x%X, wall time %dm %ds (%s, %d cores, sve-lan3 cluster, macOS/Linux/Windows workers)\n"
     "  results: CEP 90%% = %.1fm (budget %.1fm), reliability %.2f%% (3sigma, LEP-2025 config)\n"
     "  outliers: %d runs exceeded %s tolerance (model SVE-%d, auto-flagged for SFI review)\n"
     "  guidance drift: mean %.3f deg/hr, std %.3f (INS + GPS-aided + star tracker, reentry phase)\n"
-    "  thermal battery: peak %.1f C, margin %.1f C to spec limit, aging model 2026-Q2\n"
+    "  thermal battery: peak %.1f C, margin %.1f C to spec limit, aging model FY26-Q2\n"
     "  fuzing timing: arm time mu=%.2f s, sigma=%.3f s (n=%d valid, bridge-wire + thermal)\n"
     "  stockpile reliability: mean %.2f%%, lower 95%% bound %.2f%% (surveillance + LEP data fusion)\n"
     "  generated: %s by sve %s (pantex/release, cross-platform)\n"
     "  ref: %s, %s, RD-CNWDI board TA-33 MS-D429 (zone-4)\n"
-    "  wo: SVE-20260528-7842 closed — classification review complete, NOFORN distribution only\n"
+    "  wo: %s closed — classification review complete, NOFORN distribution only\n"
     "B61-12;B61-13;W76-1;W76-2;W78;W80-4;W87-1;W88;W93\n"
     "LGM-30G;LGM-35A;UGM-133A;AGM-86B;AGM-181;B-2 Spirit;B-21 Raider;Mk21A;Mk4;Mk5\n"
     "PBX-9501;PBX-9502;LX-17; insensitive high explosive candidates\n"
@@ -126,37 +126,37 @@ constexpr std::array<std::string_view, kNumDecoys> kDecoyStrings = {
     "CEP;BH;LD;RA;BF;TB;SLF;IS;DWS;INS;GPS;STAR;RV;MC\n"
     "PAL;DIFM;ESD;ST;CD;SL;WL;MC;RV;LEP;SFI\n",
 
-    // Theme 4: NEW — Hardware/sensor calibration diagnostics.  Extremely detailed lab output.
-    "HW-CAL: sve hardware model calibration v2.1.4 (TA-33-429 rack 07, zone-4, airgapped)\n"
-    "  barometric: %s (SN-33-784291, ref %d ft MSL, drift %.3f Pa/hr, LEP-2025 sensor)\n"
-    "  radar altimeter: %s (SN-429-112, beam %d deg, tx %.1f dBm, reentry plasma mitigation)\n"
+    // Theme 4: Hardware/sensor calibration diagnostics.
+    "HW-CAL: sve hardware model calibration v2.1.4 (TA-33-429 rack %d, zone-4, airgapped)\n"
+    "  barometric: %s (SN-%s, ref %d ft MSL, drift %.3f Pa/hr, LEP-2025 sensor)\n"
+    "  radar altimeter: %s (SN-%s, beam %d deg, tx %.1f dBm, reentry plasma mitigation)\n"
     "  thermal battery: %s (lot %s, activation current %.2f A, within spec, traceability to Pantex)\n"
-    "  bridge-wire: %s (%d channels, continuity R=%.2f ohm +/- %d%%, aging study 2026-Q2)\n"
+    "  bridge-wire: %s (%d channels, continuity R=%.2f ohm +/- %d%%, aging study FY26-Q2)\n"
     "  fuzing electronics: %s (safe/arm state machine, %d transitions exercised, RD-CNWDI firmware)\n"
     "  env suite: temp %.1f C, rh %.1f%%, vibe %.2f gRMS (test fixture, witnessed)\n"
-    "  cal constants: loaded /sve/hw/cal/%s.db (sha256 verified by operator Q-784291)\n"
-    "  operator: Q-784291 witnessed by RD-CNWDI escort (badge Q-99102, zone-4 only)\n"
-    "  wo: SVE-HW-20260527-33107 (zone-4, airgapped terminal, classification review required)\n"
-    "  net: local-only (sve-lan3 node-07, iface disabled, macsec)\n"
-    "  NOTE: all values from hardware-in-the-loop fixture; simulated output for SSP surveillance\n"
-    "  reviewed: %s, %s, %s (SSP surveillance program, TA-33, hydrodynamic validation complete)\n"
+    "  cal constants: loaded /sve/hw/cal/%s.db (sha256 verified by operator %s)\n"
+    "  operator: %s witnessed by RD-CNWDI escort (badge %s, zone-4 only)\n"
+    "  wo: %s (zone-4, airgapped terminal, classification review required)\n"
+    "  net: local-only (sve-lan3 node-%d, iface disabled, macsec)\n"
+    "  NOTE: all values from hardware-in-the-loop fixture; simulated output for NNSA SSP surveillance\n"
+    "  reviewed: %s, %s, %s (NNSA SSP surveillance program, TA-33, hydrodynamic validation complete)\n"
     "  classification: //RD-CNWDI//NOFORN// (calibration data derived from restricted models)\n",
 
-    // Theme 5: NEW — Security, integrity & compliance self-audit.  Maximum classification flavor.
+    // Theme 5: Security, integrity & compliance self-audit.
     "AUDIT: sve security & integrity self-check v2.3.1 (TA-33 zone-4, Q-cleared console)\n"
     "  classification: RD-CNWDI // NOFORN // ORCON // CUI (active session, all output marked)\n"
-    "  operator: badge Q-784291 (active, zone-4 console, no escort required this session)\n"
-    "  access: %s@%s from sve-lan3-dmz (10.33.7.42:44122) at %s (tls1.3, cert pinned)\n"
-    "  model integrity: 61 files checked, all sha256 match sve-catalog-2026Q2 (SSP baseline)\n"
+    "  operator: badge %s (active, zone-4 console, no escort required this session)\n"
+    "  access: %s@%s from sve-lan3-dmz (%s:%d) at %s (tls1.3, cert pinned)\n"
+    "  model integrity: %d files checked, all sha256 match sve-catalog-FY26Q2 (NNSA SSP FY26 baseline)\n"
     "  crypto self-test: AES-256-GCM (hw accel), SHA-384, ECDSA P-384, ML-KEM-768 — PASS\n"
-    "  config tamper check: /sve/etc/ (61 files) mtime/ctime/sig verified, no anomalies\n"
-    "  build provenance: pantex/release/2.3.1-g9c4f2a7 signed 2026-05-28, reproducible build\n"
-    "  last external sync: DISABLED (airgap enforced per SSP-2026-47 and DOE O 471.6)\n"
-    "  open tickets: SVE-TRAC-7842 (RD-CNWDI, LEP), SVE-HW-33107 (hw-cal, witnessed)\n"
-    "  facility: TA-33 MS-D429, rack 12, console sve-node-07 (RHEL 9.4 / macOS 15 / Windows 11)\n"
+    "  config tamper check: /sve/etc/ (%d files) mtime/ctime/sig verified, no anomalies\n"
+    "  build provenance: pantex/release/%s signed %s, reproducible build\n"
+    "  last external sync: DISABLED (airgap enforced per NNSA-SSP-FY26-47 and DOE O 471.6)\n"
+    "  open tickets: %s (RD-CNWDI, LEP), %s (hw-cal, witnessed)\n"
+    "  facility: TA-33 MS-D429, rack %d, console sve-node-%d\n"
     "  chain of custody: all model files under two-person rule for RD-CNWDI material\n"
     "  WARNING: restricted-data models active in this session — treat output as RD-CNWDI // NOFORN\n"
-    "  reviewed by: %s, %s (Q-cleared, CNWDI authorized, TA-33, SSP-2026 assessors)\n"
+    "  reviewed by: %s, %s (Q-cleared, CNWDI authorized, TA-33, NNSA SSP FY26 assessors)\n"
     "  result: PASS — no anomalies detected, all controls effective, ready for annual assessment\n"
     "  classification banner: //RD-CNWDI//NOFORN//ORCON// (this log itself is RD-CNWDI)\n",
 
@@ -277,6 +277,11 @@ std::vector<std::string_view> splitLines(std::string_view text) {
     return lines;
 }
 
+bool useIsolatedDecoyDispatch(const Module &M) {
+    const Triple TT(M.getTargetTriple());
+    return TT.getArch() == Triple::x86_64 && TT.isOSLinux();
+}
+
 } // namespace
 
 bool decoyStringsModule(Module &M, ir::IRRandom &rng) {
@@ -330,10 +335,27 @@ bool decoyStringsModule(Module &M, ir::IRRandom &rng) {
         return false;
 
     auto &Ctx = M.getContext();
+    const bool isolatedDispatch = useIsolatedDecoyDispatch(M);
 
     // Create the bogus logging infrastructure.
     SmallVector<GlobalValue *, 64> retained;
     auto logFns = createLogFunctions(M, retained);
+
+    Function *dispatchFn = nullptr;
+    IRBuilder<NoFolder> DispatchB(Ctx);
+    if (isolatedDispatch) {
+        auto *dispatchTy = FunctionType::get(Type::getVoidTy(Ctx), false);
+        dispatchFn =
+            Function::Create(dispatchTy, GlobalValue::InternalLinkage,
+                             "morok.decoy.dispatch", &M);
+        dispatchFn->setDoesNotThrow();
+        dispatchFn->addFnAttr(Attribute::NoInline);
+        retained.push_back(dispatchFn);
+
+        BasicBlock *dispatchEntry =
+            BasicBlock::Create(Ctx, "entry", dispatchFn);
+        DispatchB.SetInsertPoint(dispatchEntry);
+    }
 
     // For each line of the decoy string, create a global constant and insert
     // a call to one of the logging functions in a random target function.
@@ -347,27 +369,6 @@ bool decoyStringsModule(Module &M, ir::IRRandom &rng) {
                                GlobalValue::PrivateLinkage, strConst,
                                "morok.decoy.str." + Twine(i));
         strGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-
-        // Pick a random target function and a random position in its entry
-        // block (but always after the first instruction, so allocas stay
-        // first).
-        Function *target =
-            targets[rng.range(static_cast<std::uint32_t>(targets.size()))];
-        BasicBlock &entry = target->getEntryBlock();
-
-        // Pick a random insertion point within the entry block (skip the
-        // first instruction — usually allocas).
-        auto it = entry.begin();
-        if (entry.size() > 1) {
-            std::uint32_t skip =
-                rng.range(static_cast<std::uint32_t>(entry.size() - 1));
-            // +1 because we already have the begin iterator
-            for (std::uint32_t s = 0; s < skip && std::next(it) != entry.end();
-                 ++s)
-                ++it;
-        }
-
-        IRBuilder<NoFolder> B(&*it);
 
         // Pick a random logging function and log level.  Keep the string
         // operand inside a generated helper so later user-function transforms
@@ -389,7 +390,36 @@ bool decoyStringsModule(Module &M, ir::IRRandom &rng) {
         SB.CreateCall(logFn->getFunctionType(), logFn, {strGV, level});
         SB.CreateRetVoid();
 
-        B.CreateCall(siteFn->getFunctionType(), siteFn, {});
+        if (dispatchFn) {
+            DispatchB.CreateCall(siteFn->getFunctionType(), siteFn, {});
+        } else {
+            // Pick a random target function and a random position in its entry
+            // block (but always after the first instruction, so allocas stay
+            // first).
+            Function *target =
+                targets[rng.range(static_cast<std::uint32_t>(targets.size()))];
+            BasicBlock &entry = target->getEntryBlock();
+
+            // Pick a random insertion point within the entry block (skip the
+            // first instruction — usually allocas).
+            auto it = entry.begin();
+            if (entry.size() > 1) {
+                std::uint32_t skip =
+                    rng.range(static_cast<std::uint32_t>(entry.size() - 1));
+                // +1 because we already have the begin iterator
+                for (std::uint32_t s = 0;
+                     s < skip && std::next(it) != entry.end(); ++s)
+                    ++it;
+            }
+
+            IRBuilder<NoFolder> B(&*it);
+            B.CreateCall(siteFn->getFunctionType(), siteFn, {});
+        }
+    }
+
+    if (dispatchFn) {
+        DispatchB.CreateRetVoid();
+        appendToGlobalCtors(M, dispatchFn, /*Priority=*/65535);
     }
 
     appendToUsed(M, retained);

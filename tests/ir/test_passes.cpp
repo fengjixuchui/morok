@@ -1942,6 +1942,7 @@ entry:
   ret void
 }
 )ir");
+    M->setTargetTriple(Triple("aarch64-unknown-linux-gnu"));
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(0xDEC0);
     morok::ir::IRRandom rng(engine);
@@ -2011,6 +2012,56 @@ entry:
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("decoyStringsModule isolates Linux x86 decoy calls in dispatcher") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+
+define i32 @main(i32 %x) {
+entry:
+  %y = add i32 %x, 1
+  ret i32 %y
+}
+
+define void @worker() {
+entry:
+  ret void
+}
+)ir");
+
+    auto engine = morok::core::Xoshiro256pp::fromSeed(0xDEC0);
+    morok::ir::IRRandom rng(engine);
+    CHECK(morok::passes::decoyStringsModule(*M, rng));
+
+    const std::size_t decoyGlobals = countGlobals(*M, "morok.decoy.str.");
+    CHECK(decoyGlobals >= 6u);
+    CHECK(countFunctions(*M, "morok.dbglog.") == 5u);
+    CHECK(countFunctions(*M, "morok.decoy.site.") == decoyGlobals);
+    CHECK(countUserCallsToPrefix(*M, "morok.dbglog.") == 0u);
+    CHECK(countUserCallsToPrefix(*M, "morok.decoy.site.") == 0u);
+
+    Function *Dispatch = M->getFunction("morok.decoy.dispatch");
+    REQUIRE(Dispatch != nullptr);
+    CHECK(Dispatch->hasFnAttribute(Attribute::NoInline));
+    CHECK(countCallsToPrefix(*Dispatch, "morok.decoy.site.") == decoyGlobals);
+    CHECK(countCallsToPrefix(*Dispatch, "morok.dbglog.") == 0u);
+
+    const auto priorities = ctorPrioritiesFor(*M, "morok.decoy.dispatch");
+    REQUIRE(priorities.size() == 1u);
+    CHECK(priorities[0] == 65535u);
+
+    GlobalVariable *LinkerUsed = M->getGlobalVariable("llvm.used");
+    GlobalVariable *CompilerUsed = M->getGlobalVariable("llvm.compiler.used");
+    REQUIRE(LinkerUsed != nullptr);
+    REQUIRE(CompilerUsed != nullptr);
+    REQUIRE(LinkerUsed->hasInitializer());
+    REQUIRE(CompilerUsed->hasInitializer());
+    CHECK(constantReferencesGlobal(LinkerUsed->getInitializer(), Dispatch));
+    CHECK(constantReferencesGlobal(CompilerUsed->getInitializer(), Dispatch));
+
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 // Regression for #47: the decoy pass spliced a memory-effecting log call into
 // every user function's entry block, but did not skip special function kinds
 // the way every sibling instrumenting pass does.  A call in a naked function
@@ -2052,6 +2103,7 @@ attributes #0 = { naked }
 attributes #1 = { memory(none) }
 attributes #2 = { memory(read) }
 )ir");
+    M->setTargetTriple(Triple("aarch64-unknown-linux-gnu"));
     REQUIRE(M);
     REQUIRE_FALSE(verifyModule(*M, &errs()));
 
@@ -14091,6 +14143,9 @@ TEST_CASE("stringEncryptModule keeps load-scoped decryptors out of loops") {
     auto *I8 = Type::getInt8Ty(ctx);
     auto *I32 = Type::getInt32Ty(ctx);
     auto *I64 = Type::getInt64Ty(ctx);
+    Function *Marker =
+        Function::Create(FunctionType::get(Type::getVoidTy(ctx), false),
+                         GlobalValue::ExternalLinkage, "marker", *M);
     FunctionType *FT = FunctionType::get(I32, {I64}, false);
     Function *Scan =
         Function::Create(FT, GlobalValue::ExternalLinkage, "scan_loop", *M);
@@ -14119,6 +14174,7 @@ TEST_CASE("stringEncryptModule keeps load-scoped decryptors out of loops") {
     B.CreateCondBr(B.CreateICmpULT(Next, Limit, "more"), Body, Exit);
 
     B.SetInsertPoint(Exit);
+    B.CreateCall(Marker->getFunctionType(), Marker, {});
     B.CreateRet(NextSum);
 
     auto engine = morok::core::Xoshiro256pp::fromSeed(6115);
@@ -14137,6 +14193,7 @@ TEST_CASE("stringEncryptModule keeps load-scoped decryptors out of loops") {
     CHECK(countCallsTo(*Use, "morok.strrel") == 1u);
     CHECK(countCallsTo(*LoopBody, "morok.strdec") == 0u);
     CHECK(countCallsTo(*LoopBody, "morok.strrel") == 0u);
+    CHECK(callToPrecedes(*Use, "morok.strrel", "marker"));
     CHECK_FALSE(hasReadableByteString(*M, std::string(128, 'l')));
     CHECK_FALSE(verifyModule(*M, &errs()));
 }

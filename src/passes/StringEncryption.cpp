@@ -24,6 +24,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/Attributes.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -60,9 +61,9 @@ constexpr std::uint64_t kUnrollThreshold = 64; // ≤ this ⇒ unrolled, else lo
 // global decryptor instead of the stack path.
 constexpr std::uint64_t kMaxStackStringBytes = 4096;
 // Load-scoped plaintext decrypts and re-encrypts the entire string around each
-// load.  Keep it for small straight-line loads only; loops or large buffers use
-// function-scoped lifetime so runtime work stays proportional to activations,
-// not load executions.
+// load.  Keep it for small straight-line loads only; loops use loop-scoped
+// lifetime and large buffers use function-scoped lifetime so runtime work stays
+// proportional to activations, not load executions.
 constexpr std::uint64_t kMaxLoadScopedPlaintextBytes = 4096;
 constexpr int kCtorDecryptPriority = 0;
 
@@ -530,7 +531,16 @@ bool collectLoadUseSites(Value *V, SmallVectorImpl<LoadInst *> &Loads,
     return true;
 }
 
-bool loadScopeSitesInLoop(ArrayRef<LoadInst *> Loads) {
+struct LoopScopePlan {
+    SmallVector<BasicBlock *, 8> preheaders;
+    SmallVector<BasicBlock *, 8> exits;
+};
+
+bool collectLoadLoopScopes(ArrayRef<LoadInst *> Loads, LoopScopePlan &Plan,
+                           bool &SawLoopLoad) {
+    SawLoopLoad = false;
+    SmallPtrSet<BasicBlock *, 16> SeenPreheaders;
+    SmallPtrSet<BasicBlock *, 16> SeenExits;
     SmallPtrSet<Function *, 8> Checked;
     for (LoadInst *RootLI : Loads) {
         if (!RootLI || !RootLI->getParent())
@@ -541,15 +551,48 @@ bool loadScopeSitesInLoop(ArrayRef<LoadInst *> Loads) {
 
         DominatorTree DT(*F);
         LoopInfo LI(DT);
+        SmallPtrSet<Loop *, 8> SeenLoops;
         for (LoadInst *CandidateLI : Loads) {
             if (!CandidateLI || !CandidateLI->getParent() ||
                 CandidateLI->getFunction() != F)
                 continue;
-            if (LI.getLoopFor(CandidateLI->getParent()))
-                return true;
+            Loop *L = LI.getLoopFor(CandidateLI->getParent());
+            if (!L)
+                continue;
+            SawLoopLoad = true;
+            while (Loop *Parent = L->getParentLoop())
+                L = Parent;
+            if (!SeenLoops.insert(L).second)
+                continue;
+
+            BasicBlock *Preheader = L->getLoopPreheader();
+            if (!Preheader)
+                return false;
+
+            SmallVector<BasicBlock *, 4> ExitBlocks;
+            L->getExitBlocks(ExitBlocks);
+            if (ExitBlocks.empty())
+                return false;
+            for (BasicBlock *BB : L->blocks()) {
+                Instruction *Term = BB->getTerminator();
+                if (Term && (isa<ReturnInst>(Term) || isa<ResumeInst>(Term) ||
+                             isa<CleanupReturnInst>(Term)))
+                    return false;
+            }
+            for (BasicBlock *Exit : ExitBlocks) {
+                for (BasicBlock *Pred : predecessors(Exit))
+                    if (!L->contains(Pred))
+                        return false;
+            }
+
+            if (SeenPreheaders.insert(Preheader).second)
+                Plan.preheaders.push_back(Preheader);
+            for (BasicBlock *Exit : ExitBlocks)
+                if (SeenExits.insert(Exit).second)
+                    Plan.exits.push_back(Exit);
         }
     }
-    return false;
+    return true;
 }
 
 bool hasMustTailReturn(const SmallPtrSetImpl<Function *> &Funcs) {
@@ -891,14 +934,22 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
             scopedCandidate &&
             collectLoadUseSites(target, LoadScopeSites, SeenLoadUses) &&
             !LoadScopeSites.empty();
+        LoopScopePlan LoadLoopScope;
+        bool hasLoopLoadScopeSites = false;
+        const bool loopScopedPlaintext =
+            loadOnlyUses &&
+            collectLoadLoopScopes(LoadScopeSites, LoadLoopScope,
+                                  hasLoopLoadScopeSites) &&
+            hasLoopLoadScopeSites;
         const bool loadScopedPlaintext =
             loadOnlyUses && storedLen <= kMaxLoadScopedPlaintextBytes &&
-            !loadScopeSitesInLoop(LoadScopeSites);
-        const bool functionScopedPlaintext = scopedCandidate &&
-                                             !loadScopedPlaintext &&
-                                             !hasMustTailReturn(users);
-        const bool scopedPlaintext =
-            loadScopedPlaintext || functionScopedPlaintext;
+            !hasLoopLoadScopeSites;
+        const bool functionScopedPlaintext =
+            scopedCandidate && !loadScopedPlaintext && !loopScopedPlaintext &&
+            !hasMustTailReturn(users);
+        const bool scopedPlaintext = loadScopedPlaintext ||
+                                     loopScopedPlaintext ||
+                                     functionScopedPlaintext;
         target->setConstant(false); // mutated in place by its decryptor
         auto *decFn =
             Function::Create(FunctionType::get(voidTy, false),
@@ -1124,6 +1175,15 @@ bool stringEncryptModule(Module &M, const StrEncParams &params,
                         RB.CreateCall(releaseFn->getFunctionType(), releaseFn,
                                       {});
                     }
+                }
+            } else if (releaseFn && loopScopedPlaintext) {
+                for (BasicBlock *Preheader : LoadLoopScope.preheaders) {
+                    IRBuilder<> PB(Preheader->getTerminator());
+                    PB.CreateCall(decFn->getFunctionType(), decFn, {});
+                }
+                for (BasicBlock *Exit : LoadLoopScope.exits) {
+                    IRBuilder<> XB(&*Exit->getFirstInsertionPt());
+                    XB.CreateCall(releaseFn->getFunctionType(), releaseFn, {});
                 }
             } else {
                 for (Function *UF : users) {
