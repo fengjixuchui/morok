@@ -16360,6 +16360,19 @@ entry:
                                  "morok.antihook.emu.sig.locknop") >= 1u);
     CHECK(countNamedInstructions(*EmuSignalHandler,
                                  "morok.antihook.emu.sig.mask.next") >= 1u);
+    // #228: an unrecognized/foreign fault must chain back to the previous
+    // disposition (restore the saved sigaction and return) instead of being
+    // swallowed and re-executed at the same RIP. The saved dispositions live in
+    // module globals so the handler can reach them.
+    CHECK(countNamedInstructions(*EmuSignalHandler,
+                                 "morok.antihook.emu.sig.chain.restore") >= 1u);
+    CHECK(M->getGlobalVariable("morok.antihook.emu.old.segv.action", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.emu.old.ill.action", true) !=
+          nullptr);
+    // SA_SIGINFO (4) | SA_NODEFER (0x40000000) keeps the synchronous fault
+    // unmasked so a re-delivered fault is not force-killed by the kernel.
+    CHECK(functionHasConstantInt(*Emu, 0x40000004u));
     Instruction *EmuChanged =
         findNamedInstruction(*Ctor, "morok.corroborate.emu.changed");
     REQUIRE(EmuChanged != nullptr);

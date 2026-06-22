@@ -8529,11 +8529,42 @@ GlobalVariable *emuFaultAddrGlobal(Module &M) {
     return gv;
 }
 
+// Module-global storage for the saved SIGSEGV/SIGILL dispositions captured at
+// install time. They must be reachable from the signal handler (not stack
+// allocas in the probe) so the handler can chain an unrecognized fault back to
+// the previous action (#228). Sized to the Linux x86_64 struct sigaction.
+GlobalVariable *emuOldActionGlobal(Module &M, StringRef Name) {
+    if (auto *existing = M.getGlobalVariable(Name, /*AllowInternal=*/true))
+        return existing;
+    constexpr std::uint64_t kLinuxX64SigactionSize = 152;
+    auto *ty = ArrayType::get(Type::getInt8Ty(M.getContext()),
+                              kLinuxX64SigactionSize);
+    auto *gv = new GlobalVariable(M, ty, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantAggregateZero::get(ty), Name);
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *emuOldSegvActionGlobal(Module &M) {
+    return emuOldActionGlobal(M, "morok.antihook.emu.old.segv.action");
+}
+
+GlobalVariable *emuOldIllActionGlobal(Module &M) {
+    return emuOldActionGlobal(M, "morok.antihook.emu.old.ill.action");
+}
+
 void storeEmuSiginfoAction(IRBuilder<> &B, Module &M, AllocaInst *Action,
                            Function *Handler, const Twine &Prefix) {
     constexpr std::uint64_t kLinuxX64SigactionSize = 152;
     constexpr std::uint64_t kLinuxX64SigactionFlagsOffset = 136;
     constexpr std::uint32_t kSaSiginfo = 4;
+    // SA_NODEFER keeps SIGSEGV/SIGILL unmasked while the handler runs, so a
+    // re-delivered synchronous fault (including one raised by the handler's own
+    // RIP read, or a foreign fault that the handler chains back to the previous
+    // action) is not force-killed by the kernel default action (#228).
+    constexpr std::uint32_t kSaNodefer = 0x40000000u;
+    constexpr std::uint32_t kSaFlags = kSaSiginfo | kSaNodefer;
     auto *i8 = Type::getInt8Ty(M.getContext());
     auto *i32 = Type::getInt32Ty(M.getContext());
     for (std::uint64_t i = 0; i < kLinuxX64SigactionSize; ++i)
@@ -8541,7 +8572,7 @@ void storeEmuSiginfoAction(IRBuilder<> &B, Module &M, AllocaInst *Action,
                       gepI8(B, M, Action, constIp(M, i)));
     B.CreateStore(Handler,
                   gepI8(B, M, Action, constIp(M, 0), Prefix + ".handler"));
-    B.CreateStore(ConstantInt::get(i32, kSaSiginfo),
+    B.CreateStore(ConstantInt::get(i32, kSaFlags),
                   gepI8(B, M, Action,
                         constIp(M, kLinuxX64SigactionFlagsOffset),
                         Prefix + ".flags"));
@@ -8577,6 +8608,8 @@ Function *emuLinuxX86SignalHandler(Module &M) {
     auto *loadFaultBB = BasicBlock::Create(ctx, "fault.addr", fn);
     auto *classifyBB = BasicBlock::Create(ctx, "classify", fn);
     auto *decodeBB = BasicBlock::Create(ctx, "decode", fn);
+    auto *knownBB = BasicBlock::Create(ctx, "known", fn);
+    auto *unknownBB = BasicBlock::Create(ctx, "unknown", fn);
     auto *doneBB = BasicBlock::Create(ctx, "done", fn);
 
     IRBuilder<> B(entry);
@@ -8655,15 +8688,31 @@ Function *emuLinuxX86SignalHandler(Module &M) {
 
     Value *known = DB.CreateICmpNE(bit, ConstantInt::get(i32, 0),
                                    "morok.antihook.emu.sig.known");
-    Value *advance = DB.CreateSelect(known, ConstantInt::get(ip, 2),
-                                     ConstantInt::get(ip, 0),
-                                     "morok.antihook.emu.sig.advance");
+    DB.CreateCondBr(known, knownBB, unknownBB);
+
+    // Recognized probe instruction: step the saved RIP over the 2-byte stimulus
+    // and return so the probe thread resumes after it.
+    IRBuilder<> KB(knownBB);
     auto *pcStore =
-        DB.CreateStore(DB.CreateAdd(rip, advance,
+        KB.CreateStore(KB.CreateAdd(rip, ConstantInt::get(ip, 2),
                                     "morok.antihook.emu.sig.rip.next"),
                        ripSlot);
     pcStore->setAlignment(Align(1));
-    DB.CreateBr(doneBB);
+    KB.CreateBr(doneBB);
+
+    // Unrecognized/foreign fault: do NOT advance RIP (we cannot know its
+    // length) and do NOT swallow it. Restore the previous disposition for this
+    // signal and return, so the fault re-triggers and is delivered to the
+    // original handler / default action instead of looping or being lost (#228).
+    IRBuilder<> XB(unknownBB);
+    Value *oldAction =
+        XB.CreateSelect(isSegv, emuOldSegvActionGlobal(M),
+                        emuOldIllActionGlobal(M),
+                        "morok.antihook.emu.sig.old.action");
+    XB.CreateCall(sigactionDecl(M),
+                  {sig, oldAction, ConstantPointerNull::get(ptr)},
+                  "morok.antihook.emu.sig.chain.restore");
+    XB.CreateBr(doneBB);
 
     IRBuilder<> RB(doneBB);
     RB.CreateRetVoid();
@@ -8788,10 +8837,10 @@ void emitLinuxX86SemanticGapProbe(IRBuilder<> &B, Module &M, const Triple &TT,
     auto *actionTy = ArrayType::get(i8, kLinuxX64SigactionSize);
     AllocaInst *action =
         SB.CreateAlloca(actionTy, nullptr, "morok.antihook.emu.sa");
-    AllocaInst *oldSegv =
-        SB.CreateAlloca(actionTy, nullptr, "morok.antihook.emu.old.segv");
-    AllocaInst *oldIll =
-        SB.CreateAlloca(actionTy, nullptr, "morok.antihook.emu.old.ill");
+    // Saved dispositions live in module globals (not stack allocas) so the
+    // signal handler can reach them to chain unrecognized faults (#228).
+    GlobalVariable *oldSegv = emuOldSegvActionGlobal(M);
+    GlobalVariable *oldIll = emuOldIllActionGlobal(M);
     storeEmuSiginfoAction(SB, M, action, handler, "morok.antihook.emu.sa");
     FunctionCallee sigactionFn = sigactionDecl(M);
     Value *segvRc =
