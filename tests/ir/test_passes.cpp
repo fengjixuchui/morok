@@ -1474,6 +1474,50 @@ TEST_CASE("MorokPass demotes generated symbols to private linkage") {
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST_CASE("MorokPass seals tail calls before returnless dispatch") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "arm64-apple-macosx14.0.0"
+define internal i32 @leaf(i32 %x) {
+entry:
+  %r = add i32 %x, 7
+  ret i32 %r
+}
+
+define i32 @tail_edge(i32 %x) {
+entry:
+  %r = call i32 @leaf(i32 %x)
+  ret i32 %r
+}
+)ir");
+    Function *Caller = M->getFunction("tail_edge");
+    REQUIRE(Caller);
+
+    morok::config::Config cfg;
+    cfg.seed = 111;
+    cfg.passes.caller_keyed_dispatch.enabled = true;
+    cfg.passes.caller_keyed_dispatch.probability = 100;
+    cfg.passes.caller_keyed_dispatch.max_calls = 16;
+    cfg.passes.caller_keyed_dispatch.region_bytes = 8;
+    cfg.passes.caller_keyed_dispatch.seal_required = true;
+    cfg.passes.returnless_dispatch.enabled = true;
+    cfg.passes.returnless_dispatch.probability = 100;
+    cfg.passes.returnless_dispatch.max_sites = 16;
+
+    ModuleAnalysisManager AM;
+    morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
+
+    Function *Dispatch = M->getFunction("morok.ckd.dispatch");
+    REQUIRE(Dispatch != nullptr);
+    CHECK(countCallsTo(*Caller, "leaf") == 0u);
+    CHECK(countCallsThroughOperand(*Caller, Dispatch) == 1u);
+    CHECK(countGlobals(*M, "morok.ckd.seal.state") == 1u);
+    CHECK(countGlobals(*M, "morok.postlink.ckd") == 1u);
+    CHECK(countNamedInstructions(*Caller, "morok.ckd.target.decoded") == 1u);
+    CHECK(countGlobals(*M, "morok.retless.slot") == 0u);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST_CASE("MorokPass forwards string encryption content filters") {
     {
         LLVMContext ctx;

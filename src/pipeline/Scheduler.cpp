@@ -1293,29 +1293,12 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         changed |= passes::adversarialFunctionMergingModule(M, p, rng);
     }
 
-    // Returnless dispatch: rewrite tail-position returns (`%r = call g(args) ;
-    // ret %r`) into indirect tail branches so eligible functions leave through a
-    // computed `br x16` / `jmp *rax` read from a volatile slot instead of a
-    // `ret`.  Runs BEFORE caller-keyed dispatch so it claims the tail-position
-    // call edges first; CKD then skips them (they are now indirect/musttail) and
-    // mops up the remaining direct calls.  The musttail adjacency it needs stays
-    // intact afterwards: CKD/FunctionWrapper ignore indirect calls,
-    // PerBuildPolymorphism skips isMustTailReturn blocks, and MisleadingMetadata
-    // only rewrites debug-locations.
-    if (InitialModuleGrowthOk &&
-        config_.passes.returnless_dispatch.enabled.value_or(false) &&
-        dispatchModuleOk(measureUserModule(M))) {
-        passes::ReturnlessParams p;
-        p.probability =
-            config_.passes.returnless_dispatch.probability.value_or(100);
-        p.max_sites = config_.passes.returnless_dispatch.max_sites.value_or(64);
-        changed |= passes::returnlessDispatchModule(M, p, rng);
-    }
-
     // Collapse surviving direct user calls through one shared native dispatch
-    // hub.  Keep this after merge/tuning and before FunctionWrapper; otherwise
-    // wrappers would consume user edges first and leave only generated
-    // `morok.wrap` callees for this pass to skip.
+    // hub.  Run before returnless dispatch so direct tail-position calls are
+    // sealed while they are still direct; returnless will skip the generated
+    // `morok.ckd.*` dispatcher edges.  Keep this after merge/tuning and before
+    // FunctionWrapper; otherwise wrappers would consume user edges first and
+    // leave only generated `morok.wrap` callees for this pass to skip.
     if (InitialModuleGrowthOk &&
         config_.passes.caller_keyed_dispatch.enabled.value_or(false) &&
         dispatchModuleOk(measureUserModule(M))) {
@@ -1334,6 +1317,22 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
             config_.passes.caller_keyed_dispatch.seal_required.value_or(false) ||
             config_.passes.fail_closed_on_unsealed.value_or(false);
         changed |= passes::callerKeyedDispatchModule(M, p, rng);
+    }
+
+    // Returnless dispatch: rewrite surviving tail-position returns (`%r = call
+    // g(args) ; ret %r`) into indirect tail branches so eligible functions
+    // leave through a computed `br x16` / `jmp *rax` read from a volatile slot
+    // instead of a `ret`.  This runs after caller-keyed dispatch so CKD gets the
+    // first chance to seal direct user call edges; returnless then handles only
+    // the direct tail edges CKD deliberately left alone.
+    if (InitialModuleGrowthOk &&
+        config_.passes.returnless_dispatch.enabled.value_or(false) &&
+        dispatchModuleOk(measureUserModule(M))) {
+        passes::ReturnlessParams p;
+        p.probability =
+            config_.passes.returnless_dispatch.probability.value_or(100);
+        p.max_sites = config_.passes.returnless_dispatch.max_sites.value_or(64);
+        changed |= passes::returnlessDispatchModule(M, p, rng);
     }
 
     // Module-level call-site wrapping runs after the per-function transforms so
