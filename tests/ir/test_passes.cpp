@@ -1835,6 +1835,14 @@ entry:
   ret i32 %c
 }
 
+define i32 @novm_sensitive_math(i32 %x) {
+entry:
+  %a = add i32 %x, 29
+  %b = xor i32 %a, -559038737
+  %c = mul i32 %b, 5
+  ret i32 %c
+}
+
 define i32 @generate_keys(i32 %seed, i32 %tier) {
 entry:
   %mix0 = add i32 %seed, -1640531527
@@ -1852,6 +1860,13 @@ entry:
     keygenPolicy.func_regex = "^generate_keys$";
     keygenPolicy.overrides.virtualization.enabled = true;
     cfg.policies.push_back(std::move(keygenPolicy));
+    Function *Decoy = M->getFunction("decoy_math");
+    REQUIRE(Decoy);
+    morok::ir::addAnnotation(*Decoy, "sensitive");
+    Function *NoVmSensitive = M->getFunction("novm_sensitive_math");
+    REQUIRE(NoVmSensitive);
+    morok::ir::addAnnotation(*NoVmSensitive, "sensitive");
+    morok::ir::addAnnotation(*NoVmSensitive, "novm");
 
     ModuleAnalysisManager AM;
     morok::pipeline::MorokPass(std::move(cfg)).run(*M, AM);
@@ -1861,8 +1876,10 @@ entry:
     CHECK(M->getFunction("morok.vm.generate_keys.exec") != nullptr);
     CHECK(countCallsTo(*Core, "morok.vm.generate_keys.exec") == 1u);
     CHECK(M->getFunction("morok.vm.decoy_math.exec") == nullptr);
+    CHECK(M->getFunction("morok.vm.novm_sensitive_math.exec") == nullptr);
     CHECK(countGlobals(*M, "morok.vm.bytecode.generate_keys") == 1u);
     CHECK(countGlobals(*M, "morok.vm.bytecode.decoy_math") == 0u);
+    CHECK(countGlobals(*M, "morok.vm.bytecode.novm_sensitive_math") == 0u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

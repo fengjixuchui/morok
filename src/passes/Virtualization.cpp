@@ -245,9 +245,7 @@ bool candidateFunctionAllowed(const Function &F,
 bool markedUserVmPriority(const Function &F) {
     if (generatedFunction(F))
         return false;
-    return ir::hasAnnotation(F, "morok.vm.priority") ||
-           ir::hasAnnotation(F, "sensitive") || ir::hasAnnotation(F, "vm") ||
-           ir::hasAnnotation(F, "virtualization");
+    return ir::hasAnnotation(F, "morok.vm.priority");
 }
 
 bool hasNaturalLoop(Function &F) {
