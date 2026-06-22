@@ -16081,6 +16081,13 @@ entry:
     REQUIRE(Dbi != nullptr);
     Function *Smc = M->getFunction("morok.antihook.dbi.smc");
     REQUIRE(Smc != nullptr);
+    Function *MprotectSmc = M->getFunction("morok.antihook.mprotect.smc");
+    REQUIRE(MprotectSmc != nullptr);
+    Function *MprotectHandler =
+        M->getFunction("morok.antihook.mprotect.handler");
+    REQUIRE(MprotectHandler != nullptr);
+    Function *Kernel58 = M->getFunction("morok.antihook.mprotect.kernel58");
+    REQUIRE(Kernel58 != nullptr);
     Function *Schro = M->getFunction("morok.antihook.schro");
     REQUIRE(Schro != nullptr);
     Function *SchroHandler = M->getFunction("morok.antihook.schro.handler");
@@ -16127,6 +16134,16 @@ entry:
     CHECK(M->getGlobalVariable("morok.antihook.schro.armed", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.schro.old.segv", true) !=
           nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mprotect.page", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mprotect.expected", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mprotect.guard.hits", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mprotect.exec.hits", true) !=
+          nullptr);
+    CHECK(M->getGlobalVariable("morok.antihook.mprotect.bad.addr", true) !=
+          nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.emu.sig.mask", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.antihook.emu.fault.addr", true) !=
           nullptr);
@@ -16153,6 +16170,7 @@ entry:
     CHECK(M->getFunction("mmap") == nullptr);
     CHECK(M->getFunction("munmap") == nullptr);
     CHECK(M->getFunction("mprotect") == nullptr);
+    CHECK(M->getFunction("uname") == nullptr);
     CHECK(M->getFunction("close") == nullptr);
     CHECK(M->getFunction("syscall") == nullptr);
     CHECK(M->getFunction("sigaction") != nullptr);
@@ -16366,6 +16384,72 @@ entry:
     CHECK(countNamedInstructions(*Smc, "morok.antihook.dbi.smc.trip") >= 1u);
     checkSmcCoherencyProbe(*Smc);
     checkPosixSmcThreadRaceProbe(*M, *Smc);
+    CHECK(countNamedInstructions(*MprotectSmc,
+                                 "morok.antihook.mprotect.mmap") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.sigaction.segv") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.mprotect.none") >= 1u);
+    CHECK(countNamedInstructions(*MprotectSmc,
+                                 "morok.antihook.mprotect.guard.byte") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.guard.missing") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.guard.addr.bad") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.guard.changed") >= 1u);
+    CHECK(countNamedInstructions(*MprotectSmc,
+                                 "morok.antihook.mprotect.kernel58") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.mprotect.exec") >= 1u);
+    CHECK(countNamedInstructions(*MprotectSmc,
+                                 "morok.antihook.mprotect.exec.byte") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.exec.missing") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.exec.changed") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectSmc, "morok.antihook.mprotect.restore.segv") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectHandler,
+              "morok.antihook.mprotect.fault.in.page") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectHandler,
+              "morok.antihook.mprotect.expected.match") >= 1u);
+    CHECK(countNamedInstructions(*MprotectHandler,
+                                 "morok.antihook.mprotect.handler.rw") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectHandler,
+              "morok.antihook.mprotect.guard.hits.next") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectHandler,
+              "morok.antihook.mprotect.exec.hits.next") >= 1u);
+    CHECK(countNamedInstructions(
+              *MprotectHandler,
+              "morok.antihook.mprotect.bad.addr.next") >= 1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.uname") >=
+          1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.major") >=
+          1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.minor") >=
+          1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.gate") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *Kernel58, "morok.antihook.mprotect.kernel58.version.ge") >= 1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.pku") >=
+          1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.ospke") >=
+          1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.xom.ready") >=
+          1u);
     CHECK(countNamedInstructions(*Schro, "morok.antihook.schro.mmap") >= 1u);
     CHECK(countNamedInstructions(*Schro,
                                  "morok.antihook.schro.sigaction.segv") >= 1u);
@@ -16400,10 +16484,18 @@ entry:
     CHECK(countNamedInstructions(*Ctor, "morok.gate.sandbox.soft") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.gate.negative.timing.soft") >=
           1u);
+    CHECK(countNamedInstructions(*Ctor, "morok.gate.mprotect.hard") >= 1u);
+    CHECK(countNamedInstructions(*Ctor,
+                                 "morok.corroborate.mprotect.changed") >= 1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.schro.changed") >=
           1u);
     CHECK(countNamedInstructions(*Ctor, "morok.corroborate.antidump.changed") >=
           1u);
+    Instruction *MprotectChanged =
+        findNamedInstruction(*Ctor, "morok.corroborate.mprotect.changed");
+    REQUIRE(MprotectChanged != nullptr);
+    CHECK(valueFeedsNamedInstruction(MprotectChanged,
+                                     "morok.seal.fold.anti_debug"));
     Instruction *SandboxChanged =
         findNamedInstruction(*Ctor, "morok.corroborate.sandbox.changed");
     REQUIRE(SandboxChanged != nullptr);
@@ -16458,6 +16550,60 @@ entry:
     CHECK_FALSE(hasReadableByteString(*M, "QBDI_addCodeRangeCB"));
     CHECK_FALSE(hasReadableByteString(*M, "ASAN_OPTIONS"));
     CHECK_FALSE(hasReadableByteString(*M, "MSHookFunction"));
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("antiHookingModule emits Linux aarch64 mprotect SMC probe") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "aarch64-unknown-linux-gnu"
+define i32 @work(i32 %x) {
+entry:
+  %y = add i32 %x, 5
+  ret i32 %y
+}
+define i32 @main() {
+entry:
+  %v = call i32 @work(i32 37)
+  ret i32 %v
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(8805);
+    morok::ir::IRRandom rng(engine);
+
+    CHECK(morok::passes::antiHookingModule(*M, rng));
+
+    Function *Probe = M->getFunction("morok.antihook.mprotect.smc");
+    REQUIRE(Probe != nullptr);
+    Function *Handler = M->getFunction("morok.antihook.mprotect.handler");
+    REQUIRE(Handler != nullptr);
+    Function *Kernel58 = M->getFunction("morok.antihook.mprotect.kernel58");
+    REQUIRE(Kernel58 != nullptr);
+    Function *Ctor = M->getFunction("morok.antihook");
+    REQUIRE(Ctor != nullptr);
+
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.antihook.mprotect.mprotect.none") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.antihook.mprotect.mprotect.exec") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.antihook.mprotect.guard.changed") >=
+          1u);
+    CHECK(countNamedInstructions(*Probe,
+                                 "morok.antihook.mprotect.exec.changed") >=
+          1u);
+    CHECK(countNamedInstructions(
+              *Handler, "morok.antihook.mprotect.expected.match") >= 1u);
+    CHECK(countNamedInstructions(*Kernel58,
+                                 "morok.antihook.mprotect.kernel58.gate") >=
+          1u);
+    Instruction *Changed =
+        findNamedInstruction(*Ctor, "morok.corroborate.mprotect.changed");
+    REQUIRE(Changed != nullptr);
+    CHECK(valueFeedsNamedInstruction(Changed, "morok.seal.fold.anti_debug"));
+    CHECK(countNamedInstructions(*Ctor, "morok.gate.mprotect.hard") >= 1u);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }
 

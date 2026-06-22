@@ -11376,6 +11376,629 @@ Function *schrodingerPageProbe(Module &M, GlobalVariable *State,
     return fn;
 }
 
+bool linuxMprotectSmcLayout(const Triple &TT, SchroFaultLayout &L) {
+    if (!TT.isOSLinux() || (TT.getArch() != Triple::x86_64 &&
+                            TT.getArch() != Triple::aarch64))
+        return false;
+    L.sigactionSize = 152;
+    L.flagsOffset = 136;
+    L.siginfoAddrOffset = 16;
+    L.saSiginfo = 4;
+    L.sigSegv = 11;
+    return true;
+}
+
+GlobalVariable *mprotectSmcPageGlobal(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.antihook.mprotect.page",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *ip = intPtrTy(M);
+    auto *gv = new GlobalVariable(
+        M, ip, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(ip, 0), "morok.antihook.mprotect.page");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *mprotectSmcSizeGlobal(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.antihook.mprotect.size",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *ip = intPtrTy(M);
+    auto *gv = new GlobalVariable(
+        M, ip, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(ip, 0), "morok.antihook.mprotect.size");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *mprotectSmcExpectedGlobal(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.antihook.mprotect.expected",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *ip = intPtrTy(M);
+    auto *gv = new GlobalVariable(
+        M, ip, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(ip, 0), "morok.antihook.mprotect.expected");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *mprotectSmcModeGlobal(Module &M) {
+    if (auto *existing = M.getGlobalVariable("morok.antihook.mprotect.mode",
+                                             /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(M, i32, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(i32, 0),
+                                  "morok.antihook.mprotect.mode");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *mprotectSmcGuardHitsGlobal(Module &M) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antihook.mprotect.guard.hits",
+                                /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(M, i32, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(i32, 0),
+                                  "morok.antihook.mprotect.guard.hits");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *mprotectSmcExecHitsGlobal(Module &M) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antihook.mprotect.exec.hits",
+                                /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(M, i32, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(i32, 0),
+                                  "morok.antihook.mprotect.exec.hits");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+GlobalVariable *mprotectSmcBadAddrGlobal(Module &M) {
+    if (auto *existing =
+            M.getGlobalVariable("morok.antihook.mprotect.bad.addr",
+                                /*AllowInternal=*/true))
+        return existing;
+    auto *i32 = Type::getInt32Ty(M.getContext());
+    auto *gv = new GlobalVariable(M, i32, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(i32, 0),
+                                  "morok.antihook.mprotect.bad.addr");
+    gv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    return gv;
+}
+
+bool linuxUnameSyscall(const Triple &TT, std::uint32_t &Uname) {
+    switch (TT.getArch()) {
+    case Triple::x86_64:
+        Uname = 63;
+        return true;
+    case Triple::aarch64:
+        Uname = 160;
+        return true;
+    default:
+        return false;
+    }
+}
+
+Value *asciiDigitValue(IRBuilder<> &B, Value *Ch, const Twine &Name) {
+    auto *i8 = Type::getInt8Ty(B.getContext());
+    auto *i32 = Type::getInt32Ty(B.getContext());
+    Value *isDigit = B.CreateAnd(
+        B.CreateICmpUGE(Ch, ConstantInt::get(i8, '0'), Name + ".ge0"),
+        B.CreateICmpULE(Ch, ConstantInt::get(i8, '9'), Name + ".le9"),
+        Name + ".digit");
+    Value *digit =
+        B.CreateSub(B.CreateZExt(Ch, i32, Name + ".zext"),
+                    ConstantInt::get(i32, '0'), Name + ".value.raw");
+    return B.CreateSelect(isDigit, digit, ConstantInt::get(i32, 0),
+                          Name + ".value");
+}
+
+Function *linuxExecOnlyKernelGate(Module &M, const Triple &TT) {
+    if (!TT.isOSLinux() || (TT.getArch() != Triple::x86_64 &&
+                            TT.getArch() != Triple::aarch64) ||
+        intPtrTy(M)->getBitWidth() != 64)
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.mprotect.kernel58"))
+        return existing;
+
+    std::uint32_t unameNr = 0;
+    if (!linuxUnameSyscall(TT, unameNr))
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *fn = Function::Create(FunctionType::get(i32, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.mprotect.kernel58", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    auto *utsTy = ArrayType::get(i8, 390);
+    AllocaInst *uts = B.CreateAlloca(utsTy, nullptr,
+                                     "morok.antihook.mprotect.uts");
+    Value *utsPtr = B.CreateInBoundsGEP(
+        utsTy, uts, {ConstantInt::get(ip, 0), ConstantInt::get(ip, 0)},
+        "morok.antihook.mprotect.uts.ptr");
+    Value *rc = emitLinuxSyscall(B, M, TT, unameNr, {utsPtr});
+    rc->setName("morok.antihook.mprotect.kernel58.uname");
+    Value *ok = B.CreateICmpEQ(rc, ConstantInt::get(ip, 0),
+                               "morok.antihook.mprotect.kernel58.uname.ok");
+    auto loadRelease = [&](std::uint64_t offset, const Twine &name) {
+        return loadAt(B, M, i8, uts, offset,
+                      Twine("morok.antihook.mprotect.kernel58.") + name);
+    };
+    Value *c0 = loadRelease(130, "c0");
+    Value *c1 = loadRelease(131, "c1");
+    Value *c2 = loadRelease(132, "c2");
+    Value *c3 = loadRelease(133, "c3");
+    Value *c4 = loadRelease(134, "c4");
+    Value *c0Digit = B.CreateAnd(
+        B.CreateICmpUGE(c0, ConstantInt::get(i8, '0')),
+        B.CreateICmpULE(c0, ConstantInt::get(i8, '9')),
+        "morok.antihook.mprotect.kernel58.c0.digit");
+    Value *c1Digit = B.CreateAnd(
+        B.CreateICmpUGE(c1, ConstantInt::get(i8, '0')),
+        B.CreateICmpULE(c1, ConstantInt::get(i8, '9')),
+        "morok.antihook.mprotect.kernel58.c1.digit");
+    Value *oneDigitMajor =
+        B.CreateAnd(c0Digit, B.CreateICmpEQ(c1, ConstantInt::get(i8, '.')),
+                    "morok.antihook.mprotect.kernel58.major.one");
+    Value *twoDigitMajor = B.CreateAnd(
+        B.CreateAnd(c0Digit, c1Digit),
+        B.CreateICmpEQ(c2, ConstantInt::get(i8, '.')),
+        "morok.antihook.mprotect.kernel58.major.two");
+    Value *d0 = asciiDigitValue(B, c0,
+                                "morok.antihook.mprotect.kernel58.major.d0");
+    Value *d1 = asciiDigitValue(B, c1,
+                                "morok.antihook.mprotect.kernel58.major.d1");
+    Value *major2 =
+        B.CreateAdd(B.CreateMul(d0, ConstantInt::get(i32, 10)), d1,
+                    "morok.antihook.mprotect.kernel58.major.two.value");
+    Value *major = B.CreateSelect(twoDigitMajor, major2, d0,
+                                  "morok.antihook.mprotect.kernel58.major");
+    Value *m0 =
+        B.CreateSelect(twoDigitMajor, c3, c2,
+                       "morok.antihook.mprotect.kernel58.minor.c0");
+    Value *m1 =
+        B.CreateSelect(twoDigitMajor, c4, c3,
+                       "morok.antihook.mprotect.kernel58.minor.c1");
+    Value *m0Digit = B.CreateAnd(
+        B.CreateICmpUGE(m0, ConstantInt::get(i8, '0')),
+        B.CreateICmpULE(m0, ConstantInt::get(i8, '9')),
+        "morok.antihook.mprotect.kernel58.m0.digit");
+    Value *m1Digit = B.CreateAnd(
+        B.CreateICmpUGE(m1, ConstantInt::get(i8, '0')),
+        B.CreateICmpULE(m1, ConstantInt::get(i8, '9')),
+        "morok.antihook.mprotect.kernel58.m1.digit");
+    Value *minorOne = B.CreateAnd(
+        m0Digit, B.CreateNot(m1Digit),
+        "morok.antihook.mprotect.kernel58.minor.one");
+    Value *minorTwo = B.CreateAnd(
+        m0Digit, m1Digit, "morok.antihook.mprotect.kernel58.minor.two");
+    Value *md0 = asciiDigitValue(B, m0,
+                                 "morok.antihook.mprotect.kernel58.minor.d0");
+    Value *md1 = asciiDigitValue(B, m1,
+                                 "morok.antihook.mprotect.kernel58.minor.d1");
+    Value *minor2 =
+        B.CreateAdd(B.CreateMul(md0, ConstantInt::get(i32, 10)), md1,
+                    "morok.antihook.mprotect.kernel58.minor.two.value");
+    Value *minor = B.CreateSelect(minorTwo, minor2, md0,
+                                  "morok.antihook.mprotect.kernel58.minor");
+    Value *versionParsed =
+        B.CreateAnd(B.CreateOr(oneDigitMajor, twoDigitMajor),
+                    B.CreateOr(minorOne, minorTwo),
+                    "morok.antihook.mprotect.kernel58.parsed");
+    Value *newerMajor =
+        B.CreateICmpUGT(major, ConstantInt::get(i32, 5),
+                        "morok.antihook.mprotect.kernel58.major.newer");
+    Value *sameMajor =
+        B.CreateICmpEQ(major, ConstantInt::get(i32, 5),
+                       "morok.antihook.mprotect.kernel58.major.same");
+    Value *minorOk =
+        B.CreateICmpUGE(minor, ConstantInt::get(i32, 8),
+                        "morok.antihook.mprotect.kernel58.minor.ok");
+    Value *kernelOk = B.CreateAnd(
+        B.CreateAnd(ok, versionParsed,
+                    "morok.antihook.mprotect.kernel58.version.ok"),
+        B.CreateOr(newerMajor, B.CreateAnd(sameMajor, minorOk),
+                   "morok.antihook.mprotect.kernel58.version.ge"),
+        "morok.antihook.mprotect.kernel58.kernel.ok");
+    Value *execOnlyReady = ConstantInt::getTrue(ctx);
+    if (TT.getArch() == Triple::x86_64) {
+        Value *leaf0 = emitCpuid(B, M, ConstantInt::get(i32, 0),
+                                 ConstantInt::get(i32, 0));
+        Value *maxLeaf =
+            cpuidReg(B, leaf0, 0, "morok.antihook.mprotect.kernel58.cpuid.max");
+        Value *hasLeaf7 =
+            B.CreateICmpUGE(maxLeaf, ConstantInt::get(i32, 7),
+                            "morok.antihook.mprotect.kernel58.leaf7");
+        Value *leaf7 = emitCpuid(B, M, ConstantInt::get(i32, 7),
+                                 ConstantInt::get(i32, 0));
+        Value *ecx =
+            cpuidReg(B, leaf7, 2, "morok.antihook.mprotect.kernel58.cpuid.ecx");
+        Value *pku =
+            B.CreateICmpNE(B.CreateAnd(ecx, ConstantInt::get(i32, 1u << 3)),
+                           ConstantInt::get(i32, 0),
+                           "morok.antihook.mprotect.kernel58.pku");
+        Value *ospke =
+            B.CreateICmpNE(B.CreateAnd(ecx, ConstantInt::get(i32, 1u << 4)),
+                           ConstantInt::get(i32, 0),
+                           "morok.antihook.mprotect.kernel58.ospke");
+        execOnlyReady =
+            B.CreateAnd(hasLeaf7, B.CreateAnd(pku, ospke),
+                        "morok.antihook.mprotect.kernel58.xom.ready");
+    }
+    Value *gate = B.CreateAnd(kernelOk, execOnlyReady,
+                              "morok.antihook.mprotect.kernel58.gate");
+    B.CreateRet(B.CreateZExt(gate, i32));
+    return fn;
+}
+
+Function *linuxMprotectSmcHandler(Module &M, GlobalVariable *State,
+                                  const Triple &TT,
+                                  const SchroFaultLayout &Layout) {
+    if (Function *existing = M.getFunction("morok.antihook.mprotect.handler"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(
+        FunctionType::get(Type::getVoidTy(ctx), {i32, ptr, ptr}, false),
+        GlobalValue::PrivateLinkage, "morok.antihook.mprotect.handler", &M);
+    fn->setDSOLocal(true);
+    Argument *sig = fn->getArg(0);
+    sig->setName("sig");
+    Argument *info = fn->getArg(1);
+    info->setName("info");
+    fn->getArg(2)->setName("uctx");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *loadFaultBB = BasicBlock::Create(ctx, "fault.addr", fn);
+    auto *classifyBB = BasicBlock::Create(ctx, "classify", fn);
+    auto *oursBB = BasicBlock::Create(ctx, "ours", fn);
+    auto *restoreBB = BasicBlock::Create(ctx, "restore", fn);
+    auto *doneBB = BasicBlock::Create(ctx, "done", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *faultSlot =
+        B.CreateAlloca(ip, nullptr, "morok.antihook.mprotect.fault.slot");
+    B.CreateStore(ConstantInt::get(ip, 0), faultSlot)->setVolatile(true);
+    B.CreateCondBr(B.CreateICmpNE(info, ConstantPointerNull::get(ptr)),
+                   loadFaultBB, classifyBB);
+
+    IRBuilder<> FB(loadFaultBB);
+    Value *fault = loadAt(FB, M, ip, info, Layout.siginfoAddrOffset,
+                          "morok.antihook.mprotect.fault");
+    FB.CreateStore(fault, faultSlot)->setVolatile(true);
+    FB.CreateBr(classifyBB);
+
+    IRBuilder<> CB(classifyBB);
+    Value *page = CB.CreateLoad(ip, mprotectSmcPageGlobal(M),
+                                "morok.antihook.mprotect.page.v");
+    cast<LoadInst>(page)->setVolatile(true);
+    Value *size = CB.CreateLoad(ip, mprotectSmcSizeGlobal(M),
+                                "morok.antihook.mprotect.size.v");
+    cast<LoadInst>(size)->setVolatile(true);
+    Value *faultV =
+        CB.CreateLoad(ip, faultSlot, "morok.antihook.mprotect.fault.v");
+    cast<LoadInst>(faultV)->setVolatile(true);
+    Value *end = CB.CreateAdd(page, size, "morok.antihook.mprotect.end");
+    Value *inRange = CB.CreateAnd(
+        CB.CreateICmpNE(page, ConstantInt::get(ip, 0)),
+        CB.CreateAnd(CB.CreateICmpUGE(faultV, page),
+                     CB.CreateICmpULT(faultV, end)),
+        "morok.antihook.mprotect.fault.in.page");
+    CB.CreateCondBr(inRange, oursBB, restoreBB);
+
+    IRBuilder<> OB(oursBB);
+    Value *expected =
+        OB.CreateLoad(ip, mprotectSmcExpectedGlobal(M),
+                      "morok.antihook.mprotect.expected.v");
+    cast<LoadInst>(expected)->setVolatile(true);
+    Value *mode = OB.CreateLoad(i32, mprotectSmcModeGlobal(M),
+                                "morok.antihook.mprotect.mode.v");
+    cast<LoadInst>(mode)->setVolatile(true);
+    Value *exact = OB.CreateICmpEQ(faultV, expected,
+                                   "morok.antihook.mprotect.expected.match");
+    Value *guardMode =
+        OB.CreateICmpEQ(mode, ConstantInt::get(i32, 1),
+                        "morok.antihook.mprotect.mode.guard");
+    Value *execMode =
+        OB.CreateICmpEQ(mode, ConstantInt::get(i32, 2),
+                        "morok.antihook.mprotect.mode.exec");
+    Value *rwRc = emitPosixMprotect(OB, M, TT, page, size,
+                                    ConstantInt::get(ip, 3));
+    rwRc->setName("morok.antihook.mprotect.handler.rw");
+    Value *guardHit = OB.CreateAnd(exact, guardMode,
+                                   "morok.antihook.mprotect.guard.hit");
+    auto *oldGuard =
+        OB.CreateLoad(i32, mprotectSmcGuardHitsGlobal(M),
+                      "morok.antihook.mprotect.guard.hits.old");
+    oldGuard->setVolatile(true);
+    OB.CreateStore(OB.CreateAdd(oldGuard, OB.CreateZExt(guardHit, i32),
+                                "morok.antihook.mprotect.guard.hits.next"),
+                   mprotectSmcGuardHitsGlobal(M))
+        ->setVolatile(true);
+    Value *execHit = OB.CreateAnd(exact, execMode,
+                                  "morok.antihook.mprotect.exec.hit");
+    auto *oldExec =
+        OB.CreateLoad(i32, mprotectSmcExecHitsGlobal(M),
+                      "morok.antihook.mprotect.exec.hits.old");
+    oldExec->setVolatile(true);
+    OB.CreateStore(OB.CreateAdd(oldExec, OB.CreateZExt(execHit, i32),
+                                "morok.antihook.mprotect.exec.hits.next"),
+                   mprotectSmcExecHitsGlobal(M))
+        ->setVolatile(true);
+    Value *badAddr = OB.CreateNot(exact, "morok.antihook.mprotect.bad.addr.hit");
+    auto *oldBad =
+        OB.CreateLoad(i32, mprotectSmcBadAddrGlobal(M),
+                      "morok.antihook.mprotect.bad.addr.old");
+    oldBad->setVolatile(true);
+    OB.CreateStore(OB.CreateAdd(oldBad, OB.CreateZExt(badAddr, i32),
+                                "morok.antihook.mprotect.bad.addr.next"),
+                   mprotectSmcBadAddrGlobal(M))
+        ->setVolatile(true);
+    foldState(OB, State, faultV, 0x3D10A6CE84B2579FULL,
+              "morok.antihook.mprotect.fault.mix");
+    foldState(OB, State, mode, 0x97C2E45B1A603D8FULL,
+              "morok.antihook.mprotect.mode.mix");
+    OB.CreateBr(doneBB);
+
+    IRBuilder<> RB(restoreBB);
+    GlobalVariable *oldSegv = schroOldActionGlobal(
+        M, "morok.antihook.mprotect.old.segv", Layout.sigactionSize);
+    RB.CreateCall(sigactionDecl(M),
+                  {sig, oldSegv, ConstantPointerNull::get(ptr)},
+                  "morok.antihook.mprotect.restore.foreign");
+    RB.CreateBr(doneBB);
+
+    IRBuilder<> DB(doneBB);
+    DB.CreateRetVoid();
+    return fn;
+}
+
+Function *linuxMprotectSmcProbe(Module &M, GlobalVariable *State,
+                                ir::IRRandom &rng, const Triple &TT) {
+    SchroFaultLayout layout;
+    if (intPtrTy(M)->getBitWidth() != 64 || !linuxMprotectSmcLayout(TT, layout))
+        return nullptr;
+    if (Function *existing = M.getFunction("morok.antihook.mprotect.smc"))
+        return existing;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(ctx);
+    auto *fn = Function::Create(FunctionType::get(i64, false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.mprotect.smc", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    auto *setupBB = BasicBlock::Create(ctx, "setup", fn);
+    auto *guardProtectBB = BasicBlock::Create(ctx, "guard.protect", fn);
+    auto *guardTouchBB = BasicBlock::Create(ctx, "guard.touch", fn);
+    auto *guardAnalyzeBB = BasicBlock::Create(ctx, "guard.analyze", fn);
+    auto *execGateBB = BasicBlock::Create(ctx, "exec.gate", fn);
+    auto *execProtectBB = BasicBlock::Create(ctx, "exec.protect", fn);
+    auto *execTouchBB = BasicBlock::Create(ctx, "exec.touch", fn);
+    auto *execAnalyzeBB = BasicBlock::Create(ctx, "exec.analyze", fn);
+    auto *restoreBB = BasicBlock::Create(ctx, "restore", fn);
+    auto *unmapBB = BasicBlock::Create(ctx, "unmap", fn);
+    auto *retBB = BasicBlock::Create(ctx, "ret", fn);
+
+    IRBuilder<> B(entry);
+    AllocaInst *diff =
+        B.CreateAlloca(i64, nullptr, "morok.antihook.mprotect.diff");
+    B.CreateStore(ConstantInt::get(i64, 0), diff)->setVolatile(true);
+    Value *pageSize = ConstantInt::get(ip, 4096);
+    Value *mapped = emitPosixAnonMmapAddr(
+        B, M, TT, pageSize, ConstantInt::get(ip, 3),
+        ConstantInt::get(ip, 2u | 0x20u), "morok.antihook.mprotect.mmap");
+    mapped->setName("morok.antihook.mprotect.mmap");
+    Value *mappedOk = B.CreateAnd(
+        B.CreateICmpUGT(mapped, ConstantInt::get(ip, 4096)),
+        B.CreateICmpULT(mapped, ConstantInt::getSigned(ip, -4095)),
+        "morok.antihook.mprotect.mapped");
+    B.CreateCondBr(mappedOk, setupBB, retBB);
+
+    IRBuilder<> SB(setupBB);
+    SB.CreateStore(mapped, mprotectSmcPageGlobal(M))->setVolatile(true);
+    SB.CreateStore(pageSize, mprotectSmcSizeGlobal(M))->setVolatile(true);
+    SB.CreateStore(ConstantInt::get(ip, 0), mprotectSmcExpectedGlobal(M))
+        ->setVolatile(true);
+    SB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcModeGlobal(M))
+        ->setVolatile(true);
+    SB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcGuardHitsGlobal(M))
+        ->setVolatile(true);
+    SB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcExecHitsGlobal(M))
+        ->setVolatile(true);
+    SB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcBadAddrGlobal(M))
+        ->setVolatile(true);
+    Value *guardAddr =
+        SB.CreateAdd(mapped, ConstantInt::get(ip, 173),
+                     "morok.antihook.mprotect.guard.addr");
+    Value *execAddr =
+        SB.CreateAdd(mapped, ConstantInt::get(ip, 349),
+                     "morok.antihook.mprotect.exec.addr");
+    auto *guardBytePtr =
+        SB.CreateIntToPtr(guardAddr, ptr, "morok.antihook.mprotect.guard.ptr");
+    auto *execBytePtr =
+        SB.CreateIntToPtr(execAddr, ptr, "morok.antihook.mprotect.exec.ptr");
+    SB.CreateStore(ConstantInt::get(i8, 0x3d), guardBytePtr)->setVolatile(true);
+    SB.CreateStore(ConstantInt::get(i8, 0xa7), execBytePtr)->setVolatile(true);
+    Function *handler = linuxMprotectSmcHandler(M, State, TT, layout);
+    auto *actionTy = ArrayType::get(i8, layout.sigactionSize);
+    AllocaInst *action =
+        SB.CreateAlloca(actionTy, nullptr, "morok.antihook.mprotect.sa");
+    storeNamedSiginfoAction(SB, M, action, handler, layout,
+                            "morok.antihook.mprotect.sa");
+    FunctionCallee sigactionFn = sigactionDecl(M);
+    GlobalVariable *oldSegv = schroOldActionGlobal(
+        M, "morok.antihook.mprotect.old.segv", layout.sigactionSize);
+    Value *segvRc =
+        SB.CreateCall(sigactionFn,
+                      {ConstantInt::getSigned(i32, layout.sigSegv), action,
+                       oldSegv},
+                      "morok.antihook.mprotect.sigaction.segv");
+    SB.CreateCondBr(SB.CreateICmpEQ(segvRc, ConstantInt::get(i32, 0),
+                                    "morok.antihook.mprotect.sigaction.ok"),
+                    guardProtectBB, unmapBB);
+
+    IRBuilder<> GPB(guardProtectBB);
+    GPB.CreateStore(guardAddr, mprotectSmcExpectedGlobal(M))->setVolatile(true);
+    GPB.CreateStore(ConstantInt::get(i32, 1), mprotectSmcModeGlobal(M))
+        ->setVolatile(true);
+    GPB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcBadAddrGlobal(M))
+        ->setVolatile(true);
+    Value *noneRc = emitPosixMprotect(GPB, M, TT, mapped, pageSize,
+                                      ConstantInt::get(ip, 0));
+    noneRc->setName("morok.antihook.mprotect.mprotect.none");
+    GPB.CreateCondBr(GPB.CreateICmpEQ(noneRc, ConstantInt::get(i32, 0),
+                                      "morok.antihook.mprotect.none.ok"),
+                     guardTouchBB, restoreBB);
+
+    IRBuilder<> GTB(guardTouchBB);
+    auto *guardByte =
+        GTB.CreateLoad(i8, guardBytePtr, "morok.antihook.mprotect.guard.byte");
+    guardByte->setVolatile(true);
+    guardByte->setAlignment(Align(1));
+    GTB.CreateBr(guardAnalyzeBB);
+
+    IRBuilder<> GAB(guardAnalyzeBB);
+    auto *guardHits =
+        GAB.CreateLoad(i32, mprotectSmcGuardHitsGlobal(M),
+                       "morok.antihook.mprotect.guard.hits.final");
+    guardHits->setVolatile(true);
+    auto *guardBad =
+        GAB.CreateLoad(i32, mprotectSmcBadAddrGlobal(M),
+                       "morok.antihook.mprotect.guard.bad.final");
+    guardBad->setVolatile(true);
+    Value *guardMissing =
+        GAB.CreateICmpULT(guardHits, ConstantInt::get(i32, 1),
+                          "morok.antihook.mprotect.guard.missing");
+    Value *guardAddrBad =
+        GAB.CreateICmpNE(guardBad, ConstantInt::get(i32, 0),
+                         "morok.antihook.mprotect.guard.addr.bad");
+    Value *guardByteBad =
+        GAB.CreateICmpNE(guardByte, ConstantInt::get(i8, 0x3d),
+                         "morok.antihook.mprotect.guard.byte.bad");
+    Value *guardChanged = GAB.CreateOr(
+        GAB.CreateOr(guardMissing, guardAddrBad,
+                     "morok.antihook.mprotect.guard.signal.bad"),
+        guardByteBad, "morok.antihook.mprotect.guard.changed");
+    incrementDiff(GAB, diff, guardChanged, "morok.antihook.mprotect.guard");
+    emitPosixMprotect(GAB, M, TT, mapped, pageSize, ConstantInt::get(ip, 3))
+        ->setName("morok.antihook.mprotect.guard.restore");
+    GAB.CreateBr(execGateBB);
+
+    IRBuilder<> EGB(execGateBB);
+    Function *kernelGate = linuxExecOnlyKernelGate(M, TT);
+    Value *execGate = ConstantInt::get(i32, 0);
+    if (kernelGate)
+        execGate =
+            EGB.CreateCall(kernelGate, {}, "morok.antihook.mprotect.kernel58");
+    foldState(EGB, State, execGate, rng.next(),
+              "morok.antihook.mprotect.kernel58.mix");
+    EGB.CreateCondBr(EGB.CreateICmpNE(execGate, ConstantInt::get(i32, 0),
+                                      "morok.antihook.mprotect.exec.gated"),
+                     execProtectBB, restoreBB);
+
+    IRBuilder<> EPB(execProtectBB);
+    EPB.CreateStore(execAddr, mprotectSmcExpectedGlobal(M))->setVolatile(true);
+    EPB.CreateStore(ConstantInt::get(i32, 2), mprotectSmcModeGlobal(M))
+        ->setVolatile(true);
+    EPB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcBadAddrGlobal(M))
+        ->setVolatile(true);
+    EPB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcExecHitsGlobal(M))
+        ->setVolatile(true);
+    Value *execRc = emitPosixMprotect(EPB, M, TT, mapped, pageSize,
+                                      ConstantInt::get(ip, 4));
+    execRc->setName("morok.antihook.mprotect.mprotect.exec");
+    EPB.CreateCondBr(EPB.CreateICmpEQ(execRc, ConstantInt::get(i32, 0),
+                                      "morok.antihook.mprotect.exec.ok"),
+                     execTouchBB, restoreBB);
+
+    IRBuilder<> ETB(execTouchBB);
+    auto *execByte =
+        ETB.CreateLoad(i8, execBytePtr, "morok.antihook.mprotect.exec.byte");
+    execByte->setVolatile(true);
+    execByte->setAlignment(Align(1));
+    ETB.CreateBr(execAnalyzeBB);
+
+    IRBuilder<> EAB(execAnalyzeBB);
+    auto *execHits =
+        EAB.CreateLoad(i32, mprotectSmcExecHitsGlobal(M),
+                       "morok.antihook.mprotect.exec.hits.final");
+    execHits->setVolatile(true);
+    auto *execBad =
+        EAB.CreateLoad(i32, mprotectSmcBadAddrGlobal(M),
+                       "morok.antihook.mprotect.exec.bad.final");
+    execBad->setVolatile(true);
+    Value *execMissing =
+        EAB.CreateICmpULT(execHits, ConstantInt::get(i32, 1),
+                          "morok.antihook.mprotect.exec.missing");
+    Value *execAddrBad =
+        EAB.CreateICmpNE(execBad, ConstantInt::get(i32, 0),
+                         "morok.antihook.mprotect.exec.addr.bad");
+    Value *execByteBad =
+        EAB.CreateICmpNE(execByte, ConstantInt::get(i8, 0xa7),
+                         "morok.antihook.mprotect.exec.byte.bad");
+    Value *execChanged = EAB.CreateOr(
+        EAB.CreateOr(execMissing, execAddrBad,
+                     "morok.antihook.mprotect.exec.signal.bad"),
+        execByteBad, "morok.antihook.mprotect.exec.changed");
+    incrementDiff(EAB, diff, execChanged, "morok.antihook.mprotect.exec");
+    EAB.CreateBr(restoreBB);
+
+    IRBuilder<> RB(restoreBB);
+    RB.CreateCall(sigactionFn,
+                  {ConstantInt::getSigned(i32, layout.sigSegv), oldSegv,
+                   ConstantPointerNull::get(ptr)},
+                  "morok.antihook.mprotect.restore.segv");
+    emitPosixMprotect(RB, M, TT, mapped, pageSize, ConstantInt::get(ip, 3))
+        ->setName("morok.antihook.mprotect.restore.rw");
+    RB.CreateBr(unmapBB);
+
+    IRBuilder<> UB(unmapBB);
+    emitLinuxMunmap(UB, M, TT, mapped, pageSize);
+    UB.CreateStore(ConstantInt::get(ip, 0), mprotectSmcPageGlobal(M))
+        ->setVolatile(true);
+    UB.CreateStore(ConstantInt::get(ip, 0), mprotectSmcSizeGlobal(M))
+        ->setVolatile(true);
+    UB.CreateStore(ConstantInt::get(ip, 0), mprotectSmcExpectedGlobal(M))
+        ->setVolatile(true);
+    UB.CreateStore(ConstantInt::get(i32, 0), mprotectSmcModeGlobal(M))
+        ->setVolatile(true);
+    UB.CreateBr(retBB);
+
+    IRBuilder<> RetB(retBB);
+    emitRetDiff(RetB, diff);
+    return fn;
+}
+
 GlobalVariable *pageFaultTlbState(Module &M, ir::IRRandom &rng) {
     if (auto *existing =
             M.getGlobalVariable("morok.pftlb.state", /*AllowInternal=*/true))
@@ -19175,6 +19798,19 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng) {
                   "morok.antihook.dbi.smc");
         foldEnforcedFlag(B, state, changed, 0x73B5D02E6C49A18FULL,
                          "morok.antihook.dbi.smc.changed");
+    }
+    if (Function *mprotectSmc = linuxMprotectSmcProbe(M, state, rng, tt)) {
+        Value *diff =
+            B.CreateCall(mprotectSmc, {}, "morok.antihook.mprotect.diff");
+        Value *changed =
+            B.CreateICmpNE(diff, ConstantInt::get(B.getInt64Ty(), 0),
+                           "morok.corroborate.mprotect.changed");
+        addHardGateSignal(B, gate, changed, 3, 0x91B4E02D7A6C53F8ULL,
+                          "morok.gate.mprotect");
+        foldState(B, state, diff, 0x40D79A2C5E18B6F3ULL,
+                  "morok.antihook.mprotect");
+        foldEnforcedFlag(B, state, changed, 0xBED176A4309C52F8ULL,
+                         "morok.antihook.mprotect.changed");
     }
     if (Function *schro = schrodingerPageProbe(M, state, rng, tt)) {
         Value *diff = B.CreateCall(schro, {}, "morok.antihook.schro.diff");
