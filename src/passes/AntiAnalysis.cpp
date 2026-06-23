@@ -16316,6 +16316,262 @@ bool insertAntiDebugCallsiteProbes(Module &M, Function *Probe,
     return !sites.empty();
 }
 
+bool isTaggedVoidProbe(Function *Probe) {
+    return Probe && Probe->arg_size() == 1 &&
+           Probe->getReturnType()->isVoidTy() &&
+           Probe->getFunctionType()->getParamType(0)->isIntegerTy(64);
+}
+
+void emitTaggedProbeCall(IRBuilder<> &B, Module &M, Function *Probe, Value *Tag,
+                         const Twine &Prefix, ir::IRRandom &rng,
+                         std::uint32_t SiteId) {
+    auto *ip = intPtrTy(M);
+    auto *ptr = PointerType::getUnqual(M.getContext());
+    const std::uint64_t key = rng.next() | 1ULL;
+    const std::uint64_t salt = rng.next() | 1ULL;
+    std::string prefix = Prefix.str();
+
+    auto *keyGv = new GlobalVariable(
+        M, ip, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(ip, key), prefix + ".key");
+    keyGv->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    keyGv->setAlignment(Align(ip->getBitWidth() / 8));
+    keyGv->setDSOLocal(true);
+
+    Value *loadedKey = B.CreateLoad(ip, keyGv, prefix + ".key.load");
+    cast<LoadInst>(loadedKey)->setVolatile(true);
+    Value *targetIp = B.CreatePtrToInt(Probe, ip, prefix + ".target.ip");
+    Value *encoded = nullptr;
+    Value *decoded = nullptr;
+    switch ((rng.next() ^ SiteId) & 3ULL) {
+    case 0:
+        encoded = B.CreateXor(targetIp, ConstantInt::get(ip, key),
+                              prefix + ".target.encoded");
+        decoded = B.CreateXor(encoded, loadedKey, prefix + ".target.decoded");
+        break;
+    case 1:
+        encoded = B.CreateXor(B.CreateAdd(targetIp, ConstantInt::get(ip, key)),
+                              ConstantInt::get(ip, salt),
+                              prefix + ".target.encoded");
+        decoded = B.CreateSub(B.CreateXor(encoded, ConstantInt::get(ip, salt)),
+                              loadedKey, prefix + ".target.decoded");
+        break;
+    case 2:
+        encoded = B.CreateSub(B.CreateXor(targetIp, ConstantInt::get(ip, salt)),
+                              ConstantInt::get(ip, key),
+                              prefix + ".target.encoded");
+        decoded = B.CreateXor(B.CreateAdd(encoded, loadedKey),
+                              ConstantInt::get(ip, salt),
+                              prefix + ".target.decoded");
+        break;
+    default:
+        encoded = B.CreateXor(B.CreateAdd(targetIp, ConstantInt::get(ip, salt)),
+                              ConstantInt::get(ip, key),
+                              prefix + ".target.encoded");
+        decoded = B.CreateSub(B.CreateXor(encoded, loadedKey),
+                              ConstantInt::get(ip, salt),
+                              prefix + ".target.decoded");
+        break;
+    }
+    Value *callee = B.CreateIntToPtr(decoded, ptr, prefix + ".callee");
+    B.CreateCall(Probe->getFunctionType(), callee, {Tag});
+}
+
+Function *makeStaggeredRecheckCtor(Module &M, Function *Probe, StringRef Stem,
+                                   unsigned Index, unsigned Priority,
+                                   ir::IRRandom &rng) {
+    std::string name = (Twine("morok.") + Stem + ".recheck.ctor." +
+                        Twine(Index))
+                           .str();
+    Function *ctor = makeCtorShell(M, name.c_str());
+    ctor->addFnAttr(Attribute::NoInline);
+    ctor->setDSOLocal(true);
+
+    IRBuilder<> B(&ctor->getEntryBlock());
+    auto *tag = ConstantInt::get(
+        Type::getInt64Ty(M.getContext()),
+        rng.next() ^ (0xB5E3F1D97A4C620FULL * (Priority + Index + 1ULL)));
+    emitTaggedProbeCall(B, M, Probe, tag,
+                        Twine("morok.") + Stem + ".recheck.ctor." +
+                            Twine(Index),
+                        rng, Index + 1);
+    B.CreateRetVoid();
+    return ctor;
+}
+
+bool appendStaggeredRecheckCtors(Module &M, Function *Probe, StringRef Stem,
+                                 ir::IRRandom &rng) {
+    if (!isTaggedVoidProbe(Probe))
+        return false;
+    constexpr unsigned kPriorities[] = {101, 1000, 65534};
+    for (unsigned i = 0; i < 3; ++i)
+        appendToGlobalCtors(
+            M, makeStaggeredRecheckCtor(M, Probe, Stem, i, kPriorities[i], rng),
+            static_cast<int>(kPriorities[i]));
+    return true;
+}
+
+void insertStagedRecheckSite(Module &M, Instruction &I, Function *Probe,
+                             StringRef Stem, std::uint64_t Tag,
+                             std::uint8_t ArmedByte, std::uint32_t SiteId,
+                             ir::IRRandom &rng) {
+    LLVMContext &ctx = M.getContext();
+    auto *i8 = Type::getInt8Ty(ctx);
+
+    auto *gate = new GlobalVariable(
+        M, i8, /*isConstant=*/false, GlobalValue::PrivateLinkage,
+        ConstantInt::get(i8, 0), (Twine("morok.") + Stem + ".recheck.site").str());
+    gate->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+
+    Function *parent = I.getFunction();
+    BasicBlock *headBB = I.getParent();
+    BasicBlock *contBB = headBB->splitBasicBlock(
+        I.getIterator(), (Twine("morok.") + Stem + ".recheck.site.cont").str());
+    headBB->getTerminator()->eraseFromParent();
+    auto *callBB =
+        BasicBlock::Create(ctx, (Twine("morok.") + Stem + ".recheck.site.call").str(),
+                           parent, contBB);
+
+    IRBuilder<> HB(headBB);
+    auto *seen = HB.CreateLoad(i8, gate,
+                               (Twine("morok.") + Stem + ".recheck.site.seen")
+                                   .str());
+    seen->setVolatile(true);
+    Value *shouldRun = HB.CreateICmpEQ(
+        seen, ConstantInt::get(i8, 0),
+        (Twine("morok.") + Stem + ".recheck.site.armed").str());
+    HB.CreateCondBr(shouldRun, callBB, contBB);
+
+    IRBuilder<> CB(callBB);
+    auto *armed = CB.CreateStore(ConstantInt::get(i8, ArmedByte), gate);
+    armed->setVolatile(true);
+    emitTaggedProbeCall(
+        CB, M, Probe,
+        ConstantInt::get(CB.getInt64Ty(),
+                         Tag ^ (0x9E3779B97F4A7C15ULL * SiteId)),
+        Twine("morok.") + Stem + ".recheck.mid." + Twine(SiteId), rng,
+        SiteId);
+    CB.CreateBr(contBB);
+}
+
+bool insertStagedRecheckSites(Module &M, Function *Probe, StringRef Stem,
+                              ir::IRRandom &rng) {
+    if (!isTaggedVoidProbe(Probe))
+        return false;
+    constexpr std::uint32_t kMaxProbeSites = 4;
+
+    std::vector<Instruction *> sites;
+    sites.reserve(kMaxProbeSites);
+    for (Function &F : M) {
+        if (sites.size() >= kMaxProbeSites)
+            break;
+        if (F.isDeclaration() || F.hasAvailableExternallyLinkage() ||
+            F.getName().starts_with("morok.") || directlyRecursive(F))
+            continue;
+
+        SmallPtrSet<BasicBlock *, 32> loopBlocks = naturalLoopBlocks(F);
+        std::vector<Instruction *> candidates;
+        candidates.reserve(8);
+        for (BasicBlock &BB : F) {
+            if (BB.isEHPad() || BB.isLandingPad() || loopBlocks.contains(&BB))
+                continue;
+            for (Instruction &Inst : BB)
+                if (isProbeInsertionPoint(Inst))
+                    candidates.push_back(&Inst);
+        }
+        if (!candidates.empty())
+            sites.push_back(candidates[rng.range(
+                static_cast<std::uint32_t>(candidates.size()))]);
+    }
+
+    std::uint32_t siteId = 1;
+    for (Instruction *I : sites)
+        insertStagedRecheckSite(
+            M, *I, Probe, Stem, rng.next(),
+            static_cast<std::uint8_t>((rng.next() | 1) & 0xffu), siteId++,
+            rng);
+    return !sites.empty();
+}
+
+Function *antiHookRecheckProbe(Module &M, GlobalVariable *State,
+                               Function *GotRecheckProbe,
+                               Function *StackCheck, ir::IRRandom &rng) {
+    if (Function *existing = M.getFunction("morok.antihook.recheck.phase"))
+        return existing;
+    if (!State && !GotRecheckProbe && !StackCheck)
+        return nullptr;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i32 = Type::getInt32Ty(ctx);
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), {i64},
+                                                  false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antihook.recheck.phase", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *tag = fn->getArg(0);
+    tag->setName("tag");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    if (State)
+        foldState(B, State, tag, 0xA34E6D17C829F5B1ULL,
+                  "morok.antihook.recheck.tag");
+    if (GotRecheckProbe)
+        emitTaggedProbeCall(B, M, GotRecheckProbe,
+                            B.CreateXor(tag, ConstantInt::get(i64, rng.next()),
+                                        "morok.antihook.recheck.got.tag"),
+                            "morok.antihook.recheck.got", rng, 1);
+    if (StackCheck && State) {
+        FunctionCallee returnAddress = returnAddressDecl(M);
+        Value *ra = B.CreateCall(returnAddress, {ConstantInt::get(i32, 0)},
+                                 "morok.antihook.recheck.ra");
+        Value *addr =
+            B.CreatePtrToInt(ra, intPtrTy(M), "morok.antihook.recheck.addr");
+        Value *ok =
+            B.CreateCall(StackCheck->getFunctionType(), StackCheck, {addr},
+                         "morok.antihook.recheck.stack.module");
+        Value *changed = B.CreateICmpEQ(ok, ConstantInt::get(i32, 0),
+                                        "morok.antihook.recheck.stack.changed");
+        foldEnforcedFlag(B, State, changed, 0x8E43A7D61C9250BFULL,
+                         "morok.antihook.recheck.stack.changed");
+    }
+    B.CreateRetVoid();
+    return fn;
+}
+
+Function *antiDebugRecheckProbe(Module &M, GlobalVariable *State,
+                                Function *FullProbe, ir::IRRandom &rng,
+                                const Triple &TT, bool DistributionSigned) {
+    if (!TT.isOSDarwin())
+        return FullProbe;
+    if (Function *existing = M.getFunction("morok.antidbg.recheck.phase"))
+        return existing;
+    if (!State)
+        return FullProbe;
+
+    LLVMContext &ctx = M.getContext();
+    auto *i64 = Type::getInt64Ty(ctx);
+    auto *fn = Function::Create(FunctionType::get(Type::getVoidTy(ctx), {i64},
+                                                  false),
+                                GlobalValue::PrivateLinkage,
+                                "morok.antidbg.recheck.phase", &M);
+    fn->addFnAttr(Attribute::NoInline);
+    fn->setDSOLocal(true);
+    Argument *tag = fn->getArg(0);
+    tag->setName("tag");
+
+    auto *entry = BasicBlock::Create(ctx, "entry", fn);
+    IRBuilder<> B(entry);
+    foldState(B, State, tag, rng.next() ^ 0x63B79D2EA514C80FULL,
+              "morok.antidbg.recheck.tag");
+    emitDarwinSysctlCheck(B, M, State, TT);
+    emitDarwinCsopsCheck(B, M, State, TT, DistributionSigned);
+    B.CreateRetVoid();
+    return fn;
+}
+
 GlobalVariable *timingOracleState(Module &M, ir::IRRandom &rng) {
     if (auto *existing =
             M.getGlobalVariable("morok.timing.state", /*AllowInternal=*/true))
@@ -31768,6 +32024,10 @@ bool antiDebuggingModule(Module &M, ir::IRRandom &rng, bool AllowSelfTrace,
     Function *probe =
         antiDebugProbe(M, state, rng, tt, AllowSelfTrace, DistributionSigned);
     insertAntiDebugCallsiteProbes(M, probe, rng);
+    Function *recheckProbe =
+        antiDebugRecheckProbe(M, state, probe, rng, tt, DistributionSigned);
+    appendStaggeredRecheckCtors(M, recheckProbe, "antidbg", rng);
+    insertStagedRecheckSites(M, recheckProbe, "antidbg", rng);
     appendToGlobalCtors(M, ctor, 0);
     registerWindowsTlsCallbacks(M, ctor, "antidbg", rng);
     if (startLiveWatchers)
@@ -32314,10 +32574,14 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng,
     Function *gotRecheckProbe =
         gotProbe ? linuxGotRecheckProbe(M, gotProbe, state) : nullptr;
     appendPrologueTarget(prologueTargets, gotRecheckProbe);
+    Function *phaseRecheck =
+        antiHookRecheckProbe(M, state, gotRecheckProbe, stackCheck, rng);
     emitProloguePatternChecks(B, M, tt, state, prologueTargets, rng);
     emitPosixStubIntegrityChecks(B, M, tt, state, rng);
     if (gotProbe)
         insertAntiHookGotRecheckSites(M, gotRecheckProbe, rng);
+    appendStaggeredRecheckCtors(M, phaseRecheck, "antihook", rng);
+    insertStagedRecheckSites(M, phaseRecheck, "antihook", rng);
     if (Function *dbiOverhead = dbiOverheadProbe(M, rng, tt)) {
         Value *sample = B.CreateCall(dbiOverhead, {},
                                      "morok.antihook.dbi.overhead.sample");
@@ -32342,6 +32606,7 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng,
         emitGateResponseActionCall(B, M, rng, tt, responseTier);
         B.CreateRetVoid();
         appendToGlobalCtors(M, ctor, 0);
+        registerWindowsTlsCallbacks(M, ctor, "antihook", rng);
         return true;
     }
     if (!tt.isOSLinux()) {
@@ -32352,6 +32617,7 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng,
         emitGateResponseActionCall(B, M, rng, tt, responseTier);
         B.CreateRetVoid();
         appendToGlobalCtors(M, ctor, 0);
+        registerWindowsTlsCallbacks(M, ctor, "antihook", rng);
         return true;
     }
 
@@ -32396,6 +32662,7 @@ bool antiHookingModule(Module &M, ir::IRRandom &rng,
     emitGateResponseActionCall(B, M, rng, tt, responseTier);
     B.CreateRetVoid();
     appendToGlobalCtors(M, ctor, 0);
+    registerWindowsTlsCallbacks(M, ctor, "antihook", rng);
     return true;
 }
 

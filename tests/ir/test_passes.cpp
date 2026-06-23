@@ -16965,6 +16965,8 @@ entry:
     REQUIRE(Loader != nullptr);
     Function *GotRecheck = M->getFunction("morok.antihook.got.recheck");
     REQUIRE(GotRecheck != nullptr);
+    Function *PhaseRecheck = M->getFunction("morok.antihook.recheck.phase");
+    REQUIRE(PhaseRecheck != nullptr);
     Function *Rx = M->getFunction("morok.antihook.elf.rx");
     REQUIRE(Rx != nullptr);
     Function *Lazy = M->getFunction("morok.antihook.got.lazy");
@@ -17183,7 +17185,25 @@ entry:
                                  "morok.antihook.got.recheck.diff") >= 1u);
     CHECK(countNamedInstructions(*GotRecheck,
                                  "morok.antihook.got.recheck.changed") >= 1u);
+    const auto recheckPriorities =
+        ctorPrioritiesFor(*M, "morok.antihook.recheck.ctor");
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 101u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 1000u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 65534u) !=
+          recheckPriorities.end());
+    CHECK(countNamedInstructions(*PhaseRecheck,
+                                 "morok.antihook.recheck.got.callee") >= 1u);
+    Instruction *PhaseStackChanged = findNamedInstruction(
+        *PhaseRecheck, "morok.antihook.recheck.stack.changed");
+    REQUIRE(PhaseStackChanged != nullptr);
+    CHECK(valueFeedsNamedInstruction(PhaseStackChanged,
+                                     "morok.seal.fold.anti_debug"));
     CHECK(countNamedInstructions(*Work, "morok.antihook.got.site.seen") >= 1u);
+    CHECK(countNamedInstructions(*Work, "morok.antihook.recheck.site.seen") >=
+          1u);
+    CHECK(countNamedInstructions(*Work, "morok.antihook.recheck.mid.") >= 1u);
     CHECK(countNamedInstructions(*Rx, "morok.antihook.got.self.seg.hit") >= 1u);
     CHECK(countNamedInstructions(*Rx, "morok.antihook.got.map.seg.hit") == 0u);
     CHECK(countNamedInstructions(*Lazy, "morok.antihook.got.lazy.seg.hit") >=
@@ -18499,6 +18519,8 @@ entry:
     REQUIRE(WriteWatch != nullptr);
     Function *Direct = M->getFunction("morok.win.sys.direct");
     REQUIRE(Direct != nullptr);
+    Function *PhaseRecheck = M->getFunction("morok.antihook.recheck.phase");
+    REQUIRE(PhaseRecheck != nullptr);
     Function *Direct6 = M->getFunction("morok.win.sys.direct6");
     REQUIRE(Direct6 != nullptr);
     Function *Direct7 = M->getFunction("morok.win.sys.direct7");
@@ -18513,8 +18535,22 @@ entry:
     REQUIRE(Response != nullptr);
     Function *Work = M->getFunction("work");
     REQUIRE(Work != nullptr);
+    checkWindowsTlsCallbacks(*M, "antihook", "morok.antihook");
     checkSealEnforcement(*M, *Ctor);
     checkGateScoring(*Ctor);
+    const auto recheckPriorities =
+        ctorPrioritiesFor(*M, "morok.antihook.recheck.ctor");
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 101u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 1000u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 65534u) !=
+          recheckPriorities.end());
+    Instruction *PhaseStackChanged = findNamedInstruction(
+        *PhaseRecheck, "morok.antihook.recheck.stack.changed");
+    REQUIRE(PhaseStackChanged != nullptr);
+    CHECK(valueFeedsNamedInstruction(PhaseStackChanged,
+                                     "morok.seal.fold.anti_debug"));
     CHECK(M->getFunction("VirtualQuery") != nullptr);
     CHECK(M->getFunction("VirtualProtect") != nullptr);
     CHECK(M->getFunction("QueryPerformanceCounter") != nullptr);
@@ -18696,6 +18732,9 @@ entry:
     CHECK(countNamedInstructions(*Stack, "morok.antihook.stack.image") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.ra") >= 1u);
     CHECK(countNamedInstructions(*Work, "morok.antihook.stack.bad") >= 1u);
+    CHECK(countNamedInstructions(*Work, "morok.antihook.recheck.site.seen") >=
+          1u);
+    CHECK(countNamedInstructions(*Work, "morok.antihook.recheck.mid.") >= 1u);
     checkSealEnforcement(*M, *Work);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.rwx") >= 1u);
     CHECK(countNamedInstructions(*Vm, "morok.antihook.win.rwx.large") >= 1u);
@@ -18833,6 +18872,7 @@ entry:
     Function *HotProbe = M->getFunction("morok.antidbg.probe");
     Function *Parent = M->getFunction("morok.antidbg.parent");
     Function *Rr = M->getFunction("morok.antidbg.rr");
+    Function *Work = M->getFunction("work");
     REQUIRE(Memfd != nullptr);
     REQUIRE(Stat != nullptr);
     REQUIRE(Sigmask != nullptr);
@@ -18851,6 +18891,7 @@ entry:
     CHECK(HotProbe != nullptr);
     CHECK(Parent != nullptr);
     CHECK(Rr != nullptr);
+    REQUIRE(Work != nullptr);
     CHECK(Memfd->arg_size() == 3);
     CHECK(M->getFunction("morok.watchdog") != nullptr);
     Function *AntiDbg = M->getFunction("morok.antidbg");
@@ -18858,6 +18899,14 @@ entry:
     const auto antiDbgPriorities = ctorPrioritiesForTarget(*M, *AntiDbg);
     CHECK(std::find(antiDbgPriorities.begin(), antiDbgPriorities.end(), 0u) !=
           antiDbgPriorities.end());
+    const auto recheckPriorities =
+        ctorPrioritiesFor(*M, "morok.antidbg.recheck.ctor");
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 101u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 1000u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 65534u) !=
+          recheckPriorities.end());
     CHECK(M->getGlobalVariable("morok.antidbg.seccomp.sigsys.slot", true) !=
           nullptr);
     CHECK(M->getGlobalVariable("morok.antidbg.faultcf.sentinel", true) !=
@@ -18872,6 +18921,9 @@ entry:
           nullptr);
     CHECK(M->getGlobalVariable("morok.seal.root.tracer", true) != nullptr);
     CHECK(countUserCallsTo(*M, "morok.antidbg.probe") >= 1u);
+    CHECK(countNamedInstructions(*Work, "morok.antidbg.recheck.site.seen") >=
+          1u);
+    CHECK(countNamedInstructions(*Work, "morok.antidbg.recheck.mid.") >= 1u);
     CHECK(M->getFunction("ptrace") != nullptr);
     CHECK(M->getFunction("__errno_location") != nullptr);
     CHECK(M->getFunction("prctl") == nullptr);
@@ -20505,6 +20557,21 @@ entry:
     CHECK(M->getFunction("_dyld_get_image_name") != nullptr);
     CHECK(M->getFunction("_dyld_image_count") != nullptr);
     CHECK(M->getFunction("morok.antidbg.probe") != nullptr);
+    Function *Recheck = M->getFunction("morok.antidbg.recheck.phase");
+    REQUIRE(Recheck != nullptr);
+    const auto recheckPriorities =
+        ctorPrioritiesFor(*M, "morok.antidbg.recheck.ctor");
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 101u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 1000u) !=
+          recheckPriorities.end());
+    CHECK(std::find(recheckPriorities.begin(), recheckPriorities.end(), 65534u) !=
+          recheckPriorities.end());
+    CHECK(countNamedInstructions(*Recheck, "morok.antidbg.recheck.tag") >= 1u);
+    CHECK(countNamedInstructions(*Recheck, "morok.antidbg.tfp.self") == 0u);
+    checkDarwinCsopsTaskAllowSignals(*Recheck);
+    CHECK(countNamedInstructions(*M->getFunction("work"),
+                                 "morok.antidbg.recheck.site.seen") >= 1u);
     CHECK(M->getFunction("morok.antidbg.probe.watch") != nullptr);
     CHECK(M->getFunction("morok.watchdog") != nullptr);
     CHECK(M->getFunction("morok.watchdog.heartbeat.watch") != nullptr);
