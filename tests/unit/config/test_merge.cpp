@@ -162,6 +162,10 @@ TEST_CASE("merge handles every pass family") {
     src.external_secret_binding.public_key = "pub-rot-a";
     src.external_secret_binding.expected_digest = "0x1122334455667788";
     src.external_secret_binding.identity_policy = "raw";
+    src.external_secret_binding.entitlement_gate = true;
+    src.external_secret_binding.entitlement_required_mask = 7ULL;
+    src.external_secret_binding.entitlement_not_before_epoch = 1700000000ULL;
+    src.external_secret_binding.entitlement_not_after_epoch = 2000000000ULL;
     src.external_secret_binding.bind_to_runtime_seal = true;
     src.external_secret_binding.virtualize_helpers = false;
     src.env_binding_kdf.enabled = true;
@@ -375,6 +379,12 @@ TEST_CASE("merge handles every pass family") {
     CHECK(dst.external_secret_binding.public_key == "pub-rot-a");
     CHECK(dst.external_secret_binding.expected_digest == "0x1122334455667788");
     CHECK(dst.external_secret_binding.identity_policy == "raw");
+    CHECK(dst.external_secret_binding.entitlement_gate == true);
+    CHECK(dst.external_secret_binding.entitlement_required_mask == 7ULL);
+    CHECK(dst.external_secret_binding.entitlement_not_before_epoch ==
+          1700000000ULL);
+    CHECK(dst.external_secret_binding.entitlement_not_after_epoch ==
+          2000000000ULL);
     CHECK(dst.external_secret_binding.bind_to_runtime_seal == true);
     CHECK(dst.external_secret_binding.virtualize_helpers == false);
     CHECK(dst.env_binding_kdf.enabled == true);

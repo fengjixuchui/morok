@@ -204,6 +204,14 @@ void merge(PassConfig &dst, const PassConfig &src) {
              src.external_secret_binding.expected_digest);
     mergeOpt(dst.external_secret_binding.identity_policy,
              src.external_secret_binding.identity_policy);
+    mergeOpt(dst.external_secret_binding.entitlement_gate,
+             src.external_secret_binding.entitlement_gate);
+    mergeOpt(dst.external_secret_binding.entitlement_required_mask,
+             src.external_secret_binding.entitlement_required_mask);
+    mergeOpt(dst.external_secret_binding.entitlement_not_before_epoch,
+             src.external_secret_binding.entitlement_not_before_epoch);
+    mergeOpt(dst.external_secret_binding.entitlement_not_after_epoch,
+             src.external_secret_binding.entitlement_not_after_epoch);
     mergeOpt(dst.external_secret_binding.bind_to_runtime_seal,
              src.external_secret_binding.bind_to_runtime_seal);
     mergeOpt(dst.external_secret_binding.virtualize_helpers,

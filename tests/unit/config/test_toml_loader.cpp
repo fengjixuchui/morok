@@ -284,6 +284,10 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     public_key = "pub-rot-a"
     expected_digest = "0x1122334455667788"
     identity_policy = "raw"
+    entitlement_gate = true
+    entitlement_required_mask = 7
+    entitlement_not_before_epoch = 1700000000
+    entitlement_not_after_epoch = 2000000000
     bind_to_runtime_seal = true
     virtualize_helpers = false
     [passes.env_binding_kdf]
@@ -540,6 +544,13 @@ TEST_CASE("preset is the base and [passes.*] overrides it") {
     CHECK(r.config.passes.external_secret_binding.expected_digest ==
           "0x1122334455667788");
     CHECK(r.config.passes.external_secret_binding.identity_policy == "raw");
+    CHECK(r.config.passes.external_secret_binding.entitlement_gate == true);
+    CHECK(r.config.passes.external_secret_binding.entitlement_required_mask ==
+          7ULL);
+    CHECK(r.config.passes.external_secret_binding.entitlement_not_before_epoch ==
+          1700000000ULL);
+    CHECK(r.config.passes.external_secret_binding.entitlement_not_after_epoch ==
+          2000000000ULL);
     CHECK(r.config.passes.external_secret_binding.bind_to_runtime_seal == true);
     CHECK(r.config.passes.external_secret_binding.virtualize_helpers == false);
     CHECK(r.config.passes.env_binding_kdf.enabled == true);

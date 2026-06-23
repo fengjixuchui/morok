@@ -27,6 +27,10 @@ struct ExternalSecretBindingParams {
     std::string mode = "feed_api";
     std::string expected_digest;
     std::string identity_policy = "ascii_lower_strip_ws";
+    bool entitlement_gate = false;
+    std::uint64_t entitlement_required_mask = 0;
+    std::uint64_t entitlement_not_before_epoch = 0;
+    std::uint64_t entitlement_not_after_epoch = 0;
     bool bind_to_runtime_seal = true;
     bool virtualize_helpers = true;
 };

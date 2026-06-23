@@ -10667,6 +10667,7 @@ entry:
         "morok.seal.root.external_proof", /*AllowInternal=*/true);
     REQUIRE(Seal != nullptr);
     CHECK(M->getGlobalVariable("morok.proof.accum", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.proof.mask", true) != nullptr);
     CHECK(M->getGlobalVariable("morok.proof.seen", true) != nullptr);
 
     Function *Feed = M->getFunction("morok.proof.feed");
@@ -10727,6 +10728,82 @@ entry:
     for (Instruction &I : instructions(*Finish))
         if (auto *SI = dyn_cast<StoreInst>(&I))
             finishStoresSeal |= SI->getPointerOperand() == Seal;
+    CHECK(finishStoresSeal);
+    CHECK_FALSE(verifyModule(*M, &errs()));
+}
+
+TEST_CASE("externalSecretBindingModule emits entitlement factor gate") {
+    LLVMContext ctx;
+    auto M = parse(ctx, R"ir(
+target triple = "x86_64-unknown-linux-gnu"
+define i32 @main() {
+entry:
+  ret i32 0
+}
+)ir");
+    auto engine = morok::core::Xoshiro256pp::fromSeed(152152);
+    morok::ir::IRRandom rng(engine);
+
+    morok::passes::ExternalSecretBindingParams params;
+    params.mode = "entitlement";
+    params.expected_digest = "0x1122334455667788";
+    params.entitlement_required_mask = 0x3;
+    params.entitlement_not_before_epoch = 1700000000ULL;
+    params.entitlement_not_after_epoch = 2000000000ULL;
+    CHECK(morok::passes::externalSecretBindingModule(*M, params, rng));
+
+    GlobalVariable *Seal = M->getGlobalVariable(
+        "morok.seal.root.external_proof", /*AllowInternal=*/true);
+    REQUIRE(Seal != nullptr);
+    CHECK(M->getGlobalVariable("morok.proof.accum", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.proof.mask", true) != nullptr);
+    CHECK(M->getGlobalVariable("morok.proof.seen", true) != nullptr);
+    CHECK(M->getFunction("time") == nullptr);
+    CHECK(M->getFunction("GetSystemTime") == nullptr);
+
+    Function *Feed = M->getFunction("morok.proof.feed");
+    Function *Window = M->getFunction("morok.proof.window");
+    Function *Finish = M->getFunction("morok.proof.finish");
+    REQUIRE(Feed != nullptr);
+    REQUIRE(Window != nullptr);
+    REQUIRE(Finish != nullptr);
+    CHECK(Feed->hasFnAttribute(Attribute::NoInline));
+    CHECK(Window->hasFnAttribute(Attribute::NoInline));
+    CHECK(Finish->hasFnAttribute(Attribute::NoInline));
+    CHECK(countNamedInstructions(*Feed, "morok.proof.factor.bit") == 1u);
+    CHECK(countNamedInstructions(*Feed, "morok.proof.mask.next") == 1u);
+    CHECK(countNamedInstructions(*Window, "morok.proof.window.in_range") == 1u);
+    CHECK(countNamedInstructions(*Window,
+                                 "morok.proof.window.contribution") == 1u);
+    CHECK(countNamedInstructions(*Window,
+                                 "morok.proof.window.mask.next") == 1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.required.ok") == 1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.gate.ok") == 1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.expected.diff") == 1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.missing.mask") == 1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.missing.required") == 1u);
+    CHECK(countNamedInstructions(*Finish,
+                                 "morok.proof.finish.contribution") == 1u);
+    CHECK(countNamedInstructions(*Finish, "morok.proof.finish.seal.next") ==
+          1u);
+
+    bool contributionUsesGate = false;
+    bool finishStoresSeal = false;
+    for (Instruction &I : instructions(*Finish)) {
+        if (auto *SI = dyn_cast<SelectInst>(&I))
+            if (SI->getName() == "morok.proof.finish.contribution")
+                contributionUsesGate =
+                    SI->getCondition()->getName() ==
+                    "morok.proof.finish.gate.ok";
+        if (auto *Store = dyn_cast<StoreInst>(&I))
+            finishStoresSeal |= Store->getPointerOperand() == Seal;
+    }
+    CHECK(contributionUsesGate);
     CHECK(finishStoresSeal);
     CHECK_FALSE(verifyModule(*M, &errs()));
 }

@@ -244,6 +244,11 @@ void parseExternalSecretBinding(const toml::table &t,
     c.public_key = readString(t["public_key"]);
     c.expected_digest = readString(t["expected_digest"]);
     c.identity_policy = readString(t["identity_policy"]);
+    c.entitlement_gate = readBool(t["entitlement_gate"]);
+    c.entitlement_required_mask = readU64(t["entitlement_required_mask"]);
+    c.entitlement_not_before_epoch =
+        readU64(t["entitlement_not_before_epoch"]);
+    c.entitlement_not_after_epoch = readU64(t["entitlement_not_after_epoch"]);
     c.bind_to_runtime_seal = readBool(t["bind_to_runtime_seal"]);
     c.virtualize_helpers = readBool(t["virtualize_helpers"]);
 }

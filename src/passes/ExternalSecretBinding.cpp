@@ -25,8 +25,12 @@ namespace {
 
 constexpr StringLiteral kFeedName = "morok.proof.feed";
 constexpr StringLiteral kFinishName = "morok.proof.finish";
+constexpr StringLiteral kWindowName = "morok.proof.window";
 constexpr StringLiteral kAccumName = "morok.proof.accum";
+constexpr StringLiteral kMaskName = "morok.proof.mask";
 constexpr StringLiteral kSeenName = "morok.proof.seen";
+constexpr std::uint64_t kEntitlementDefaultMask = 0x3ULL;
+constexpr std::uint64_t kEntitlementWindowMask = 1ULL << 2;
 
 void addHelperAttrs(Function &F, bool VirtualizeHelpers) {
     F.addFnAttr(Attribute::NoUnwind);
@@ -43,6 +47,18 @@ GlobalVariable *getAccum(Module &M, ir::IRRandom &Rng) {
                                   GlobalValue::PrivateLinkage,
                                   ConstantInt::get(I64, Rng.next()),
                                   kAccumName);
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+    GV->setAlignment(Align(8));
+    return GV;
+}
+
+GlobalVariable *getMask(Module &M) {
+    if (auto *Existing = M.getGlobalVariable(kMaskName, true))
+        return Existing;
+    auto *I64 = Type::getInt64Ty(M.getContext());
+    auto *GV = new GlobalVariable(M, I64, /*isConstant=*/false,
+                                  GlobalValue::PrivateLinkage,
+                                  ConstantInt::get(I64, 0), kMaskName);
     GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
     GV->setAlignment(Align(8));
     return GV;
@@ -96,7 +112,8 @@ Function *getApiFunction(Module &M, StringRef Name, FunctionType *Ty) {
     return Function::Create(Ty, GlobalValue::ExternalLinkage, Name, M);
 }
 
-bool defineFeed(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
+bool defineFeed(Module &M, GlobalVariable *Accum, GlobalVariable *Mask,
+                GlobalVariable *Seen,
                 bool VirtualizeHelpers) {
     LLVMContext &Ctx = M.getContext();
     auto *I8 = Type::getInt8Ty(Ctx);
@@ -161,6 +178,17 @@ bool defineFeed(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
     auto *StoreAcc = CB.CreateStore(NextAcc, Accum);
     StoreAcc->setVolatile(true);
     StoreAcc->setAlignment(Align(8));
+    auto *OldMask = CB.CreateLoad(I64, Mask, "morok.proof.mask.old");
+    OldMask->setVolatile(true);
+    OldMask->setAlignment(Align(8));
+    Value *BitIndex =
+        CB.CreateAnd(Domain, ConstantInt::get(I64, 63), "morok.proof.bit");
+    Value *Bit = CB.CreateShl(ConstantInt::get(I64, 1), BitIndex,
+                              "morok.proof.factor.bit");
+    auto *StoreMask = CB.CreateStore(
+        CB.CreateOr(OldMask, Bit, "morok.proof.mask.next"), Mask);
+    StoreMask->setVolatile(true);
+    StoreMask->setAlignment(Align(8));
     auto *StoreSeen = CB.CreateStore(ConstantInt::getTrue(Ctx), Seen);
     StoreSeen->setVolatile(true);
     StoreSeen->setAlignment(Align(1));
@@ -171,8 +199,67 @@ bool defineFeed(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
     return true;
 }
 
-bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
-                  std::uint64_t ExpectedDigest, bool BindToRuntimeSeal,
+bool defineWindow(Module &M, GlobalVariable *Accum, GlobalVariable *Mask,
+                  GlobalVariable *Seen, std::uint64_t NotBefore,
+                  std::uint64_t NotAfter, bool VirtualizeHelpers) {
+    LLVMContext &Ctx = M.getContext();
+    auto *I64 = Type::getInt64Ty(Ctx);
+    auto *Ty = FunctionType::get(Type::getVoidTy(Ctx), {I64},
+                                 /*isVarArg=*/false);
+    Function *Fn = getApiFunction(M, kWindowName, Ty);
+    if (!Fn || !Fn->empty())
+        return false;
+    Fn->setLinkage(GlobalValue::ExternalLinkage);
+    addHelperAttrs(*Fn, VirtualizeHelpers);
+
+    Value *Now = Fn->getArg(0);
+    Now->setName("now_epoch");
+    BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", Fn);
+    IRBuilder<> B(Entry);
+    Value *AfterStart =
+        NotBefore == 0
+            ? ConstantInt::getTrue(Ctx)
+            : B.CreateICmpUGE(Now, ConstantInt::get(I64, NotBefore),
+                              "morok.proof.window.after_start");
+    Value *BeforeEnd =
+        NotAfter == 0
+            ? ConstantInt::getTrue(Ctx)
+            : B.CreateICmpULE(Now, ConstantInt::get(I64, NotAfter),
+                              "morok.proof.window.before_end");
+    Value *InWindow =
+        B.CreateAnd(AfterStart, BeforeEnd, "morok.proof.window.in_range");
+    Value *WindowWord = B.CreateSelect(
+        InWindow, ConstantInt::get(I64, 0x7C2F9A13E5D084B6ULL),
+        ConstantInt::get(I64, 0xE19B4D7608C35AF1ULL),
+        "morok.proof.window.contribution");
+    auto *Acc = B.CreateLoad(I64, Accum, "morok.proof.window.accum");
+    Acc->setVolatile(true);
+    Acc->setAlignment(Align(8));
+    Value *NextAcc = mix64(
+        B, B.CreateXor(Acc, WindowWord, "morok.proof.window.input"),
+        0x4A2F81D95C76B3E0ULL, "morok.proof.window.mix");
+    auto *StoreAcc = B.CreateStore(NextAcc, Accum);
+    StoreAcc->setVolatile(true);
+    StoreAcc->setAlignment(Align(8));
+    auto *OldMask = B.CreateLoad(I64, Mask, "morok.proof.window.mask.old");
+    OldMask->setVolatile(true);
+    OldMask->setAlignment(Align(8));
+    auto *StoreMask = B.CreateStore(
+        B.CreateOr(OldMask, ConstantInt::get(I64, kEntitlementWindowMask),
+                   "morok.proof.window.mask.next"),
+        Mask);
+    StoreMask->setVolatile(true);
+    StoreMask->setAlignment(Align(8));
+    auto *StoreSeen = B.CreateStore(ConstantInt::getTrue(Ctx), Seen);
+    StoreSeen->setVolatile(true);
+    StoreSeen->setAlignment(Align(1));
+    B.CreateRetVoid();
+    return true;
+}
+
+bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Mask,
+                  GlobalVariable *Seen, std::uint64_t ExpectedDigest,
+                  std::uint64_t RequiredMask, bool BindToRuntimeSeal,
                   bool VirtualizeHelpers) {
     LLVMContext &Ctx = M.getContext();
     auto *I64 = Type::getInt64Ty(Ctx);
@@ -194,23 +281,43 @@ bool defineFinish(Module &M, GlobalVariable *Accum, GlobalVariable *Seen,
     auto *Acc = B.CreateLoad(I64, Accum, "morok.proof.finish.accum");
     Acc->setVolatile(true);
     Acc->setAlignment(Align(8));
+    auto *MaskLoad = B.CreateLoad(I64, Mask, "morok.proof.finish.mask");
+    MaskLoad->setVolatile(true);
+    MaskLoad->setAlignment(Align(8));
+    Value *RequiredOk =
+        RequiredMask == 0
+            ? static_cast<Value *>(ConstantInt::getTrue(Ctx))
+            : B.CreateICmpEQ(
+                  B.CreateAnd(MaskLoad, ConstantInt::get(I64, RequiredMask),
+                              "morok.proof.finish.required.have"),
+                  ConstantInt::get(I64, RequiredMask),
+                  "morok.proof.finish.required.ok");
+    Value *GateOk =
+        B.CreateAnd(SeenLoad, RequiredOk, "morok.proof.finish.gate.ok");
     // Zero-on-valid (#95): seal consumers are encoded against the clean S0
     // baseline, so a correct proof must contribute exactly zero.  The seen path
     // is therefore the accumulated proof digest XOR the build-time expected
-    // digest.  Only the expected proof reaches zero; forged and missing proofs
-    // dirty the external_proof channel and fail closed through seal consumers.
+    // digest.  Entitlement mode also requires every configured proof factor
+    // bit, so machine identity, external secret, and optional window material
+    // AND-combine without exposing a branchable verdict.  Only the expected
+    // proof reaches zero; forged, incomplete, and missing proofs dirty the
+    // external_proof channel and fail closed through seal consumers.
     Value *SeenDiff =
         B.CreateXor(Acc, ConstantInt::get(I64, ExpectedDigest),
                     "morok.proof.finish.expected.diff");
     Value *Missing = B.CreateXor(Acc, Domain,
                                  "morok.proof.finish.missing.domain");
+    Missing = B.CreateXor(Missing, MaskLoad,
+                          "morok.proof.finish.missing.mask");
+    Missing = B.CreateXor(Missing, ConstantInt::get(I64, RequiredMask),
+                          "morok.proof.finish.missing.required");
     Missing = B.CreateXor(Missing, ConstantInt::get(I64, 0xD6E8FEB86659FD93ULL),
                           "morok.proof.finish.missing.tag");
     Missing = mix64(B, Missing, 0xE7037ED1A0B428DBULL,
                     "morok.proof.finish.missing");
     Missing = B.CreateOr(Missing, ConstantInt::get(I64, 1),
                          "morok.proof.finish.missing.nonzero");
-    Value *Contribution = B.CreateSelect(SeenLoad, SeenDiff, Missing,
+    Value *Contribution = B.CreateSelect(GateOk, SeenDiff, Missing,
                                          "morok.proof.finish.contribution");
     if (BindToRuntimeSeal)
         runtime_seal::foldWord(B, runtime_seal::kExternalProofChannel,
@@ -233,11 +340,27 @@ bool externalSecretBindingModule(Module &M,
     const std::uint64_t ExpectedDigest =
         parseExpectedDigest(Params.expected_digest).value_or(Rng.next() | 1ULL);
     GlobalVariable *Accum = getAccum(M, Rng);
+    GlobalVariable *Mask = getMask(M);
     GlobalVariable *Seen = getSeen(M);
+    const bool EntitlementMode =
+        Params.entitlement_gate || Params.mode == "entitlement" ||
+        Params.mode == "entitlement_gate";
+    const bool HasWindow = Params.entitlement_not_before_epoch != 0 ||
+                           Params.entitlement_not_after_epoch != 0;
+    std::uint64_t RequiredMask = Params.entitlement_required_mask;
+    if (EntitlementMode && RequiredMask == 0)
+        RequiredMask = kEntitlementDefaultMask;
+    if (HasWindow)
+        RequiredMask |= kEntitlementWindowMask;
 
     bool Changed = false;
-    Changed |= defineFeed(M, Accum, Seen, Params.virtualize_helpers);
-    Changed |= defineFinish(M, Accum, Seen, ExpectedDigest,
+    Changed |= defineFeed(M, Accum, Mask, Seen, Params.virtualize_helpers);
+    if (HasWindow)
+        Changed |= defineWindow(M, Accum, Mask, Seen,
+                                Params.entitlement_not_before_epoch,
+                                Params.entitlement_not_after_epoch,
+                                Params.virtualize_helpers);
+    Changed |= defineFinish(M, Accum, Mask, Seen, ExpectedDigest, RequiredMask,
                             Params.bind_to_runtime_seal,
                             Params.virtualize_helpers);
     return Changed;

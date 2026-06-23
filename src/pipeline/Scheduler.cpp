@@ -550,6 +550,17 @@ PreservedAnalyses MorokPass::run(Module &M, ModuleAnalysisManager &) {
         p.identity_policy =
             config_.passes.external_secret_binding.identity_policy.value_or(
                 "ascii_lower_strip_ws");
+        p.entitlement_gate = config_.passes.external_secret_binding
+                                 .entitlement_gate.value_or(false);
+        p.entitlement_required_mask =
+            config_.passes.external_secret_binding.entitlement_required_mask
+                .value_or(0);
+        p.entitlement_not_before_epoch =
+            config_.passes.external_secret_binding.entitlement_not_before_epoch
+                .value_or(0);
+        p.entitlement_not_after_epoch =
+            config_.passes.external_secret_binding.entitlement_not_after_epoch
+                .value_or(0);
         p.bind_to_runtime_seal = config_.passes.external_secret_binding
                                      .bind_to_runtime_seal.value_or(true);
         p.virtualize_helpers =

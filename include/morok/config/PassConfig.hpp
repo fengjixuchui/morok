@@ -198,6 +198,10 @@ struct ExternalSecretBindingConfig {
     Opt<std::string> public_key;
     Opt<std::string> expected_digest;
     Opt<std::string> identity_policy;
+    Opt<bool> entitlement_gate;
+    Opt<std::uint64_t> entitlement_required_mask;
+    Opt<std::uint64_t> entitlement_not_before_epoch;
+    Opt<std::uint64_t> entitlement_not_after_epoch;
     Opt<bool> bind_to_runtime_seal;
     Opt<bool> virtualize_helpers;
 };
